@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Execute a command inside the openclaw-dev CVM container
+set -euo pipefail
+
+HOST="${CVM_SSH_HOST:?Set CVM_SSH_HOST e.g. <app_id>-1022.<gateway>.phala.network}"
+
+ssh -o "ProxyCommand=openssl s_client -quiet -connect %h:%p 2>/dev/null" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=30 \
+    -p 443 \
+    "root@${HOST}" \
+    "$@"

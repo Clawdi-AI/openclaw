@@ -1,0 +1,24 @@
+services:
+  openclaw:
+    image: h4x3rotab/openclaw-cvm@sha256:0c22d642864b18df52c16d13120c78661c5fbaf7bdee1cef337bc10886da03ef
+    # For local builds, uncomment below and comment out image:
+    # build:
+    #   context: ..
+    #   dockerfile: phala-deploy/Dockerfile
+    container_name: openclaw
+    privileged: true
+    ports:
+      - "1022:22"
+      - "18789:18789"
+    volumes:
+      - /home/root/.ssh:/root/.ssh:ro
+      - openclaw_state:/data/openclaw
+      - docker_data:/var/lib/docker
+    environment:
+      OPENCLAW_STATE_DIR: /data/openclaw
+      NODE_ENV: production
+    restart: unless-stopped
+
+volumes:
+  openclaw_state:
+  docker_data:

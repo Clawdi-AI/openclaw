@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Copy files from/to the CVM container via SSH+tar
+# Usage:
+#   cvm-scp pull <remote-path> <local-dir>   # recursive copy remote → local
+#   cvm-scp push <local-path> <remote-dir>   # recursive copy local → remote
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+HOST="${CVM_SSH_HOST:?Set CVM_SSH_HOST e.g. <app_id>-1022.<gateway>.phala.network}"
+
+SSH_OPTS=(
+  -o "ProxyCommand=openssl s_client -quiet -connect %h:%p 2>/dev/null"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=30
+  -p 443
+)
+
+usage() {
+  echo "Usage: $0 pull <remote-path> <local-dir>"
+  echo "       $0 push <local-path> <remote-dir>"
+  exit 1
+}
+
+[[ $# -ge 3 ]] || usage
+
+case "$1" in
+  pull)
+    remote_path="$2"
+    local_dir="$3"
+    mkdir -p "$local_dir"
+    ssh "${SSH_OPTS[@]}" "root@${HOST}" "tar -cf - -C '$(dirname "$remote_path")' '$(basename "$remote_path")'" \
+      | tar -xf - -C "$local_dir"
+    echo "Pulled $remote_path → $local_dir"
+    ;;
+  push)
+    local_path="$2"
+    remote_dir="$3"
+    ssh "${SSH_OPTS[@]}" "root@${HOST}" "mkdir -p '$remote_dir'"
+    tar -cf - -C "$(dirname "$local_path")" "$(basename "$local_path")" \
+      | ssh "${SSH_OPTS[@]}" "root@${HOST}" "tar -xf - -C '$remote_dir'"
+    echo "Pushed $local_path → $remote_dir"
+    ;;
+  *)
+    usage
+    ;;
+esac

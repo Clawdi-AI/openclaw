@@ -225,3 +225,45 @@
   - `node --import tsx scripts/release-check.ts`
   - `pnpm release:check`
   - `pnpm test:install:smoke` or `OPENCLAW_INSTALL_SMOKE_SKIP_NONROOT=1 pnpm test:install:smoke` for non-root smoke path.
+
+## Phala Cloud Deployment
+- Deploy: `cd phala-deploy && phala deploy -n openclaw-dev -c docker-compose.yml -t tdx.medium --dev-os --wait`.
+- `phala ssh` connects to the **VM** (port 22), not the container. To reach the container SSH (port 1022), construct the hostname manually: `<app_id>-1022.<gateway>.phala.network` (no `_.` prefix; `_.` is only for VM port 22).
+- Helper scripts: `phala-deploy/cvm-exec '<command>'` for non-interactive commands; `phala-deploy/cvm-ssh` for interactive SSH (forces TTY).
+- From-source build inside CVM: follow README — `pnpm install`, then `pnpm ui:build`, then `pnpm build`, then `pnpm openclaw <command>`.
+- Do **not** use `npm link` — use `pnpm openclaw` for the dev CLI.
+- Gateway requires `gateway.auth.token` configured before it will start.
+- Backgrounding over non-interactive SSH is unreliable; use tmux inside the CVM.
+- Ubuntu 22.04 base is bare: install `unzip` (for bun), `tmux`, and use nodesource repo for Node 22 (default apt gives Node 12).
+- When adding new provider commits, check **both** the type definitions **and** the options wiring (`buildAuthChoiceOptions` must have a matching entry for every choice in `AUTH_CHOICE_GROUP_DEFS`).
+- Current CVM: `openclaw-dev`, app ID `<app_id>`, gateway `<gateway>`.
+- Dashboard: `https://cloud.phala.com/dashboard/cvms/<cvm-uuid>`.
+- Deploy branch: `phala-deploy` (based on tag `v2026.1.29` + Redpill cherry-pick + fixes). Repo: `git@github.com:h4x3rotab/openclaw.git`.
+- Phala compose does **not** support `build:`; images must be pre-built and pushed to a registry (e.g. Docker Hub). Use `image:` in compose.
+- To update an existing CVM, use `phala deploy --cvm-id <uuid>` (the UUID, not the name). `--name` only works for new CVMs.
+- DinD inside the CVM requires `--storage-driver=vfs` for dockerd (overlay-on-overlay fails inside the TEE VM).
+- iptables: the CVM kernel does **not** support `nf_tables`. Ubuntu 24.04 defaults iptables to the nft backend, which fails with "Could not fetch rule set generation id: Invalid argument". Fix: `update-alternatives --set iptables /usr/sbin/iptables-legacy` in Dockerfile. With iptables-legacy, Docker networking (bridge NAT) works; ip6tables warnings are harmless (kernel lacks IPv6 nat/filter modules).
+- Entrypoint must clean stale PID files (`rm -f /var/run/docker.pid /var/run/containerd/containerd.pid`) before starting dockerd, otherwise container restarts fail with "process with PID N is still running".
+- Gateway `--bind lan` binds to `0.0.0.0`; set `gateway.bind=lan` in config (CLI `--bind` flag may not override config defaults reliably via `exec` entrypoints).
+- Bootstrap entrypoint must seed `openclaw.json` with `gateway.mode=local`, `gateway.bind=lan`, and `gateway.auth.token` for the gateway to start unattended.
+- Entrypoint starts SSH before dockerd so SSH is always available for debugging, even if dockerd fails.
+- Pin images by digest (not `latest`) in compose to guarantee dstack sees a change on deploy. After `phala deploy --cvm-id`, dstack pulls the new image in the background while the old container keeps serving. Wait a few minutes before checking — don't assume the update failed just because the old container is still running.
+- When restoring config from backup, `cvm-scp push` places files inside a subdirectory (e.g. `/data/openclaw/.openclaw/`); flatten with `cp -a ... && rm -rf`. Also patch `gateway.bind` to `lan` since the old config likely has `loopback`.
+- Docker image: `h4x3rotab/openclaw-cvm:latest` on Docker Hub. Rebuild: `docker build -f phala-deploy/Dockerfile -t h4x3rotab/openclaw-cvm:latest .` from repo root, then `docker push`.
+- Docker in the image uses **static binaries** from `download.docker.com/linux/static/stable/` plus `docker-compose-plugin` from GitHub releases. Do **not** bind-mount Docker binaries from the CVM host (ELF interpreter mismatch: host uses `/lib/ld-linux-x86-64.so.2`, Ubuntu 24.04 only has `/lib64/`).
+- SSH sessions into the container lack `OPENCLAW_STATE_DIR`. Prefix CLI commands with `OPENCLAW_STATE_DIR=/data/openclaw` when running via SSH.
+- dstack `app-compose.sh` can fail with "container name already in use" if old container auto-restarts before compose runs. Check `journalctl -u app-compose` on the VM host.
+- Use `phala cvms logs <uuid>` (serial logs) to monitor deploy progress — don't rely on SSH during reboots.
+- npm package: published as `@h4x3rotab/openclaw` on npm. The Dockerfile installs via `npm install -g @h4x3rotab/openclaw@latest` instead of building from source. To republish: bump version in `package.json`, `pnpm build && pnpm ui:install && pnpm ui:build`, then `npm publish --access public`.
+- `node-llama-cpp` has been removed from `optionalDependencies`. Local embeddings use the Redpill API (`qwen/qwen3-embedding-8b`) instead. The `src/memory/embeddings.ts` code gracefully handles missing `node-llama-cpp` (lazy `import()` with fallback).
+- Memory search embedding config: set `agents.defaults.memorySearch.provider=openai`, `model=qwen/qwen3-embedding-8b`, `remote.baseUrl=https://api.redpill.ai/v1`, `remote.apiKey=<key>`, `fallback=none`. The OpenAI embedding provider supports any OpenAI-compatible endpoint via `remote.baseUrl`.
+- Redpill embedding models available: `qwen/qwen3-embedding-8b` (8B, 33K context, $0.01/1M input), `sentence-transformers/all-minilm-l6-v2` (384-dim, 512 context, $0.000005/1M).
+- Auto-update is disabled in CVM bootstrap config (`update.checkOnStart=false`) since the update system hardcodes the `openclaw` package name. Updates happen via Docker image rebuilds.
+- Docker is installed via **static binaries** from `download.docker.com/linux/static/stable/` (~80MB compressed, ~270MB on disk) plus `docker-compose-plugin` from GitHub releases. This is much slimmer than `apt docker-ce` (~280MB + systemd deps) and avoids the fragility of bind-mounting host binaries.
+- Do **not** bind-mount Docker binaries from the CVM host — the host's binaries (Alpine/2018) have ELF interpreter set to `/lib/ld-linux-x86-64.so.2` which doesn't exist on Ubuntu 24.04 (only `/lib64/ld-linux-x86-64.so.2`), causing `cannot execute: required file not found` errors.
+- Dockerfile optimization: `build-essential` is installed, used for `npm install`, then purged in the same `RUN` layer (along with npm cache and `/usr/include`) to avoid Docker layer bloat. Never split install and purge across layers.
+- Image size history: 3.14 GB (from-source) → 3.02 GB (npm install) → 1.81 GB (drop llama-cpp) → 1.34 GB (purge build tools) → 1.33 GB (Docker static binaries).
+- dstack deploy gotcha: `app-compose.sh` runs `docker compose up` but fails with "container name already in use" if the old container still exists from `restart: unless-stopped`. The old container auto-starts on reboot before compose runs. Check `journalctl -u app-compose` on the VM for errors.
+- SSH sessions into the container don't have `OPENCLAW_STATE_DIR` set. Always prefix CLI commands with `OPENCLAW_STATE_DIR=/data/openclaw` when running `openclaw` via SSH (e.g. `OPENCLAW_STATE_DIR=/data/openclaw openclaw channels status --probe`).
+- Backup config lives in `phala-deploy/backup/.openclaw/` (not committed — contains credentials). Push to CVM via `cvm-scp`.
+- Phala CLI suggestions: `phala-deploy/PHALA_CLI_SUGGESTIONS.md`.
