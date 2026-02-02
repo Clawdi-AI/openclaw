@@ -1,6 +1,6 @@
 services:
   openclaw:
-    image: h4x3rotab/openclaw-cvm@sha256:0c22d642864b18df52c16d13120c78661c5fbaf7bdee1cef337bc10886da03ef
+    image: h4x3rotab/openclaw-cvm@sha256:f0e1c170b5f122753011c1cfb47c939dbec2f65e1f1ead64a3c4c912615b39a2
     # For local builds, uncomment below and comment out image:
     # build:
     #   context: ..
@@ -12,16 +12,17 @@ services:
       - "18789:18789"
     volumes:
       - /home/root/.ssh:/root/.ssh:ro
-      - openclaw_state:/data/openclaw
+      - openclaw_data:/data
       - docker_data:/var/lib/docker
     environment:
-      OPENCLAW_STATE_DIR: /data/openclaw
       NODE_ENV: production
       # Master key — derives rclone crypt passwords + gateway auth token via HKDF
       MASTER_KEY: ${MASTER_KEY:-}
+      # Redpill AI provider
+      REDPILL_API_KEY: ${REDPILL_API_KEY:-}
       # Encrypted S3 storage (optional — omit S3_BUCKET to use local volume)
       S3_BUCKET: ${S3_BUCKET:-}
-      S3_PREFIX: ${S3_PREFIX:-openclaw-state}
+      S3_PREFIX: ${S3_PREFIX:-openclaw-data}
       S3_ENDPOINT: ${S3_ENDPOINT:-}
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_PROVIDER: ${S3_PROVIDER:-Other}
@@ -30,8 +31,11 @@ services:
       # Override derived crypt passwords (optional — only if not using MASTER_KEY)
       RCLONE_CRYPT_PASSWORD: ${RCLONE_CRYPT_PASSWORD:-}
       RCLONE_CRYPT_PASSWORD2: ${RCLONE_CRYPT_PASSWORD2:-}
+      # Debug logging (set to 1 to enable)
+      OPENCLAW_RAW_STREAM: ${OPENCLAW_RAW_STREAM:-}
+      OPENCLAW_ANTHROPIC_PAYLOAD_LOG: ${OPENCLAW_ANTHROPIC_PAYLOAD_LOG:-}
     restart: unless-stopped
 
 volumes:
-  openclaw_state:
+  openclaw_data:
   docker_data:

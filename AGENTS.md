@@ -112,9 +112,10 @@
 - If `git branch -d/-D <branch>` is policy-blocked, delete the local ref directly: `git update-ref -d refs/heads/<branch>`.
 
 ## Security & Configuration Tips
-
-- Web provider stores creds at `~/.openclaw/credentials/`; rerun `openclaw login` if logged out.
-- Pi sessions live under `~/.openclaw/sessions/` by default; the base directory is not configurable.
+- **Credentials**: managed via Redpill Vault (`rv`). Secrets in `.rv.json` are injected into shell commands transparently by the `rv-exec` hook — the agent never sees secret values. Global keys: `REDPILL_API_KEY`, `BRAVE_API`. Project-scoped keys: `MASTER_KEY`, `S3_BUCKET`, `S3_ENDPOINT`, `S3_PROVIDER`, `S3_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `CVM_SSH_HOST`. Use `rv list` to check status, `rv import <file>` to add from .env, `rv import <file> -g` for global scope. For Phala deploy, use `rv-exec --dotenv` to generate a temp .env file (see Phala Cloud Deployment section).
+- Do **not** store secrets in plaintext `.env` files in the repo. The old `phala-deploy/secrets/.env` has been superseded by the vault.
+- Web provider stores creds at `~/.clawdbot/credentials/`; rerun `openclaw login` if logged out.
+- Pi sessions live under `~/.clawdbot/sessions/` by default; the base directory is not configurable.
 - Environment variables: see `~/.profile`.
 - Never commit or publish real phone numbers, videos, or live configuration values. Use obviously fake placeholders in docs, tests, and examples.
 - Release flow: always read `docs/reference/RELEASING.md` and `docs/platforms/mac/release.md` before any release work; do not ask routine questions once those docs answer them.
@@ -227,7 +228,16 @@
   - `pnpm test:install:smoke` or `OPENCLAW_INSTALL_SMOKE_SKIP_NONROOT=1 pnpm test:install:smoke` for non-root smoke path.
 
 ## Phala Cloud Deployment
-- Deploy: `cd phala-deploy && phala deploy -n openclaw-dev -c docker-compose.yml -t tdx.medium --dev-os --wait`.
+- Deploy (new CVM): `cd phala-deploy && phala deploy -n openclaw-dev -c docker-compose.yml -t tdx.medium --dev-os --wait`.
+- Deploy (update existing): use `rv-exec --dotenv` to inject secrets from vault:
+  ```bash
+  cd phala-deploy && rv-exec --dotenv /tmp/deploy.env \
+    MASTER_KEY S3_BUCKET S3_ENDPOINT S3_PROVIDER S3_REGION \
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY REDPILL_API_KEY \
+    -- phala deploy --cvm-id 0cd515c5-ef55-4f8a-8adf-9bc71318ff8e \
+    -c docker-compose.yml -e /tmp/deploy.env
+  ```
+- Docker image digest: `h4x3rotab/openclaw-cvm@sha256:f0e1c170b5f122753011c1cfb47c939dbec2f65e1f1ead64a3c4c912615b39a2` (updated 2026-02-05).
 - `phala ssh` connects to the **VM** (port 22), not the container. To reach the container SSH (port 1022), construct the hostname manually: `<app_id>-1022.<gateway>.phala.network` (no `_.` prefix; `_.` is only for VM port 22).
 - Helper scripts: `phala-deploy/cvm-exec '<command>'` for non-interactive commands; `phala-deploy/cvm-ssh` for interactive SSH (forces TTY).
 - From-source build inside CVM: follow README — `pnpm install`, then `pnpm ui:build`, then `pnpm build`, then `pnpm openclaw <command>`.
@@ -236,8 +246,8 @@
 - Backgrounding over non-interactive SSH is unreliable; use tmux inside the CVM.
 - Ubuntu 22.04 base is bare: install `unzip` (for bun), `tmux`, and use nodesource repo for Node 22 (default apt gives Node 12).
 - When adding new provider commits, check **both** the type definitions **and** the options wiring (`buildAuthChoiceOptions` must have a matching entry for every choice in `AUTH_CHOICE_GROUP_DEFS`).
-- Current CVM: `openclaw-dev`, app ID `<app_id>`, gateway `<gateway>`.
-- Dashboard: `https://cloud.phala.com/dashboard/cvms/<cvm-uuid>`.
+- Current CVM: `openclaw-dev`, CVM ID `0cd515c5-ef55-4f8a-8adf-9bc71318ff8e`, app ID `43069de20638d656a2d0e49fb074bee1049bc90e`, gateway `dstack-pha-prod9.phala.network`.
+- Dashboard: `https://cloud.phala.com/dashboard/cvms/app_43069de20638d656a2d0e49fb074bee1049bc90e`.
 - Deploy branch: `phala-deploy` (based on tag `v2026.1.29` + Redpill cherry-pick + fixes). Repo: `git@github.com:h4x3rotab/openclaw.git`.
 - Phala compose does **not** support `build:`; images must be pre-built and pushed to a registry (e.g. Docker Hub). Use `image:` in compose.
 - To update an existing CVM, use `phala deploy --cvm-id <uuid>` (the UUID, not the name). `--name` only works for new CVMs.
@@ -248,10 +258,10 @@
 - Bootstrap entrypoint must seed `openclaw.json` with `gateway.mode=local`, `gateway.bind=lan`, and `gateway.auth.token` for the gateway to start unattended.
 - Entrypoint starts SSH before dockerd so SSH is always available for debugging, even if dockerd fails.
 - Pin images by digest (not `latest`) in compose to guarantee dstack sees a change on deploy. After `phala deploy --cvm-id`, dstack pulls the new image in the background while the old container keeps serving. Wait a few minutes before checking — don't assume the update failed just because the old container is still running.
-- When restoring config from backup, `cvm-scp push` places files inside a subdirectory (e.g. `/data/openclaw/.openclaw/`); flatten with `cp -a ... && rm -rf`. Also patch `gateway.bind` to `lan` since the old config likely has `loopback`.
-- Docker image: `h4x3rotab/openclaw-cvm:latest` on Docker Hub. Rebuild: `docker build -f phala-deploy/Dockerfile -t h4x3rotab/openclaw-cvm:latest .` from repo root, then `docker push`.
+- When restoring config from backup, push files to `/root/.openclaw/` (symlink to `/data/openclaw`). For large backups, `cvm-scp` may timeout — use tar-over-ssh in parts instead. Ensure `gateway.bind=lan` in restored config.
+- Docker image: `h4x3rotab/openclaw-cvm@sha256:f0e1c170b5f122753011c1cfb47c939dbec2f65e1f1ead64a3c4c912615b39a2` on Docker Hub. Rebuild: `docker build -f phala-deploy/Dockerfile -t h4x3rotab/openclaw-cvm:latest .` from repo root, then `docker push`. Update `docker-compose.yml` with the new digest from `docker inspect --format='{{index .RepoDigests 0}}' h4x3rotab/openclaw-cvm:latest`.
 - Docker in the image uses **static binaries** from `download.docker.com/linux/static/stable/` plus `docker-compose-plugin` from GitHub releases. Do **not** bind-mount Docker binaries from the CVM host (ELF interpreter mismatch: host uses `/lib/ld-linux-x86-64.so.2`, Ubuntu 24.04 only has `/lib64/`).
-- SSH sessions into the container lack `OPENCLAW_STATE_DIR`. Prefix CLI commands with `OPENCLAW_STATE_DIR=/data/openclaw` when running via SSH.
+- SSH sessions: symlinks handle paths automatically (`~/.openclaw → /data/openclaw`), no env var prefix needed.
 - dstack `app-compose.sh` can fail with "container name already in use" if old container auto-restarts before compose runs. Check `journalctl -u app-compose` on the VM host.
 - Use `phala cvms logs <uuid>` (serial logs) to monitor deploy progress — don't rely on SSH during reboots.
 - npm package: published as `@h4x3rotab/openclaw` on npm. The Dockerfile installs via `npm install -g @h4x3rotab/openclaw@latest` instead of building from source. To republish: bump version in `package.json`, `pnpm build && pnpm ui:install && pnpm ui:build`, then `npm publish --access public`.
@@ -264,8 +274,8 @@
 - Dockerfile optimization: `build-essential` is installed, used for `npm install`, then purged in the same `RUN` layer (along with npm cache and `/usr/include`) to avoid Docker layer bloat. Never split install and purge across layers.
 - Image size history: 3.14 GB (from-source) → 3.02 GB (npm install) → 1.81 GB (drop llama-cpp) → 1.34 GB (purge build tools) → 1.33 GB (Docker static binaries).
 - dstack deploy gotcha: `app-compose.sh` runs `docker compose up` but fails with "container name already in use" if the old container still exists from `restart: unless-stopped`. The old container auto-starts on reboot before compose runs. Check `journalctl -u app-compose` on the VM for errors.
-- SSH sessions into the container don't have `OPENCLAW_STATE_DIR` set. Always prefix CLI commands with `OPENCLAW_STATE_DIR=/data/openclaw` when running `openclaw` via SSH (e.g. `OPENCLAW_STATE_DIR=/data/openclaw openclaw channels status --probe`).
-- Backup config lives in `phala-deploy/backup/.openclaw/` (not committed — contains credentials). Push to CVM via `cvm-scp`.
+- SSH sessions into the container: `~/.openclaw` and `~/.config` are symlinked to `/data/openclaw` and `/data/.config` by the entrypoint, so `openclaw` commands work without env var prefixes. (Legacy: `OPENCLAW_STATE_DIR` is no longer needed.)
+- Backup config lives in `phala-deploy/backup/` (not committed — contains credentials). Push to CVM via `cvm-scp`.
 - Phala CLI suggestions: `phala-deploy/PHALA_CLI_SUGGESTIONS.md`.
-- Encrypted S3 storage: set `S3_BUCKET`, `S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RCLONE_CRYPT_PASSWORD` (obscured via `rclone obscure`) env vars to enable rclone crypt + mount. State dir (`/data/openclaw`) becomes a FUSE mount backed by encrypted S3. SQLite `memory.db` files are kept on local storage and synced to S3 every 60s (SQLite can't run on FUSE). On boot, memory.db is restored from S3 before mount. Without `S3_BUCKET`, behavior is unchanged (local volume). Generate obscured passwords: `rclone obscure <plaintext>`. Set `S3_PROVIDER=Cloudflare` for R2. Config includes `no_check_bucket=true` (R2 rejects CreateBucket calls).
-- Current R2 encrypted storage: endpoint `https://1d694c298092ffa09c793cbca4587812.r2.cloudflarestorage.com`, bucket `h4xtest`, prefix `openclaw-state`, crypt password `0V1Cm9fGoEEmWMtgBq8q6slMApBEQxG3YnsDTvGcuNaCJwaBRI0VpPMlMuHdfNjvr0HQ0reYQMs87mGT`.
+- Encrypted S3 storage: two modes. **FUSE mount** (preferred): if `/dev/fuse` available, rclone mounts encrypted S3 directly at `/data`. VFS cache handles syncing (writes flush to S3 after 5s, no background jobs). SQLite works directly on mount. **Sync fallback**: if FUSE unavailable, uses periodic `rclone copy` (60s interval), SQLite kept on local storage with symlinks. Set `S3_BUCKET`, `S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` env vars (via Redpill Vault); `MASTER_KEY` derives rclone crypt passwords via HKDF. Without `S3_BUCKET`, uses local Docker volume (state lost on CVM destruction). Set `S3_PROVIDER=Cloudflare` for R2. Config includes `no_check_bucket=true` (R2 rejects CreateBucket calls). Entrypoint unmounts Docker volume before FUSE mount (can't overlay on existing mount). Entrypoint creates symlinks: `~/.openclaw → /data/openclaw`, `~/.config → /data/.config`. Rclone config placed at `/tmp/rclone/rclone.conf` to avoid writing to persistent `~/.config`.
+- FUSE mount detection: use `mount | grep "fuse.rclone"` not `mountpoint` (Docker volume is already a mountpoint). Symlinks don't work on rclone FUSE — skip SQLite symlink workaround in mount mode.

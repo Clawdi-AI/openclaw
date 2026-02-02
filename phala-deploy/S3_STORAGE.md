@@ -2,15 +2,37 @@
 
 The CVM can use S3-compatible object storage (AWS S3, Cloudflare R2, MinIO, etc.) as its state backend. All data is encrypted client-side before upload using rclone's crypt overlay, so the storage provider never sees plaintext.
 
+Without `S3_BUCKET` set, the entrypoint skips all S3 logic and uses a local Docker volume instead.
+
 ## Architecture
 
+Two sync strategies, tried in order:
+
+### FUSE mount (preferred)
+
 ```
-/data/openclaw  (FUSE mount — apps read/write normally)
+/data/openclaw  (rclone FUSE mount — apps read/write normally)
   └── rclone crypt  (NaCl SecretBox encryption)
        └── S3 remote  (any S3-compatible provider)
 ```
 
-The gateway and all tools interact with `/data/openclaw` as a normal directory. rclone transparently encrypts filenames and file contents before uploading to S3.
+If `/dev/fuse` is available, rclone mounts the encrypted S3 bucket directly as a filesystem. The VFS cache layer handles all syncing automatically:
+
+- `--vfs-cache-mode writes` — writes are cached locally, reads go through cache
+- `--vfs-write-back 5s` — local writes flush to S3 after 5 seconds idle
+- `--dir-cache-time 30s` — directory listings cached for 30 seconds
+- `--vfs-cache-max-size 500M` — local cache limited to 500MB
+
+No background sync jobs, no SQLite workarounds. SQLite works directly on the mount because the VFS write cache keeps writes local until flushed.
+
+### Sync fallback
+
+If FUSE is unavailable, the entrypoint falls back to periodic `rclone copy`:
+
+- On boot: restores SQLite files from S3 to local storage, then pulls remaining state to the Docker volume
+- Every 60 seconds: pushes state dir changes and SQLite backups to S3
+- SQLite `memory.db` files are kept on local storage (`/data/openclaw-local/sqlite/`) with symlinks from the agent directories
+- Maximum data loss: 60 seconds of writes
 
 ## Key management
 
@@ -33,15 +55,23 @@ You can also set `RCLONE_CRYPT_PASSWORD` directly (without `MASTER_KEY`) for man
 
 ## How it works
 
+### FUSE mount mode
+
 1. **Derive keys**: if `MASTER_KEY` is set, derive crypt passwords and gateway token via HKDF
-2. **Restore**: SQLite database files are pulled from S3 to local storage
-3. **Mount**: rclone mounts the encrypted S3 bucket at `/data/openclaw` via FUSE
+2. **Unmount Docker volume**: remove the pre-existing Docker volume mount at the state dir
+3. **FUSE mount**: rclone mounts the encrypted S3 bucket at `/data/openclaw`
 4. **Bootstrap**: if no config exists, create one with the derived gateway token
 5. **Run**: the gateway starts and reads/writes the state dir normally
-6. **Backup**: a background loop copies SQLite files to S3 every 60 seconds
-7. **Symlinks**: a periodic job redirects `memory.db` files to local storage (safety measure for SQLite on FUSE)
+6. rclone VFS cache handles all syncing to S3 automatically
 
-Without `S3_BUCKET` set, the entrypoint skips all S3 logic and uses the local Docker volume as before.
+### Sync fallback mode
+
+1. **Derive keys**: same as above
+2. **Restore SQLite**: pull SQLite files from S3 to local storage
+3. **Initial sync**: pull remaining state from S3 to the Docker volume
+4. **Bootstrap**: create config if needed
+5. **Run**: gateway starts
+6. **Background sync**: every 60 seconds, push changes back to S3
 
 ## Environment variables
 
@@ -76,10 +106,11 @@ Save this value securely. If you lose it, the encrypted data on S3 is unrecovera
 
 ### 3. Create a secrets file
 
-Save credentials to `phala-deploy/secrets/r2.env` (gitignored):
+Save credentials to `phala-deploy/secrets/.env` (gitignored):
 
 ```env
 MASTER_KEY=your-base64-master-key
+REDPILL_API_KEY=your-redpill-api-key
 S3_BUCKET=your-bucket
 S3_ENDPOINT=https://your-account-id.r2.cloudflarestorage.com
 S3_PROVIDER=Cloudflare
@@ -95,7 +126,7 @@ For local testing:
 ```sh
 docker build -f phala-deploy/Dockerfile -t openclaw-cvm:test .
 docker run -d --name openclaw --privileged \
-  --env-file phala-deploy/secrets/r2.env \
+  --env-file phala-deploy/secrets/.env \
   -e OPENCLAW_STATE_DIR=/data/openclaw \
   -e NODE_ENV=production \
   -p 18789:18789 \
@@ -111,16 +142,16 @@ Check the boot log for key derivation and mount:
 ```
 Deriving keys from MASTER_KEY...
 Keys derived (crypt password, crypt salt, gateway token).
-S3 storage configured (bucket: h4xtest), setting up rclone...
-rclone mount ready at /data/openclaw
-Created default config at /data/openclaw/openclaw.json (token: derived)
+S3 storage configured (bucket: ...), setting up rclone...
+Attempting FUSE mount...
+rclone FUSE mount ready at /data/openclaw
 ```
 
 Check mount status:
 
 ```sh
 # Inside the container
-mountpoint /data/openclaw        # should say "is a mountpoint"
+mount | grep fuse.rclone         # should show s3-crypt on /data/openclaw
 ls /data/openclaw/                # should show openclaw.json, agents/, etc.
 ```
 
@@ -131,36 +162,16 @@ rclone ls s3:your-bucket/openclaw-state/
 # Filenames should be encrypted gibberish like "kh1v5oec8hqh01519qhuit8nc8"
 ```
 
-## SQLite handling
-
-SQLite databases use file locking that can be unreliable on FUSE mounts. As a safety measure:
-
-- `memory.db` files are kept on local storage (`/data/openclaw-local/sqlite/`)
-- Symlinks in the agent directories point to the local copies
-- A background job copies local SQLite files to S3 every 60 seconds
-- On boot, SQLite files are restored from S3 before the mount is created
-
-This means memory data survives container restarts (restored from S3) with at most 60 seconds of data loss.
-
-## VFS cache settings
-
-| Flag | Value | Effect |
-|------|-------|--------|
-| `--vfs-cache-mode` | `writes` | Cache writes locally, read through to S3 |
-| `--vfs-write-back` | `5s` | Flush writes to S3 after 5s idle |
-| `--dir-cache-time` | `30s` | Cache directory listings for 30s |
-| `--vfs-cache-max-size` | `500M` | Limit local cache to 500MB |
-
 ## Disaster recovery
 
 If the container is destroyed:
 
 1. Create a new container with the same `MASTER_KEY` and S3 credentials
-2. The entrypoint derives the same encryption keys, restores SQLite from S3, and mounts
+2. The entrypoint derives the same encryption keys and mounts S3
 3. All config, agent data, and memory is restored automatically
 4. The gateway auth token is the same (derived, not random)
 
-The only data at risk is SQLite writes from the last 60 seconds before destruction.
+In FUSE mount mode, there is no data loss — all writes are flushed to S3 within 5 seconds. In sync fallback mode, the maximum data loss is 60 seconds.
 
 ## Encryption details
 

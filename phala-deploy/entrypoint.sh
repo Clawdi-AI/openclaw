@@ -1,8 +1,9 @@
 #!/bin/sh
 set -e
 
-STATE_DIR="${OPENCLAW_STATE_DIR:-/data/openclaw}"
-SQLITE_LOCAL_DIR="/data/openclaw-local/sqlite"
+# Persistent storage root (S3 mount or Docker volume)
+DATA_DIR="/data"
+SQLITE_LOCAL_DIR="/data-local/sqlite"
 
 # --- Derive keys from MASTER_KEY via HKDF-SHA256 ---
 # One master secret derives: rclone crypt password, crypt salt, gateway auth token.
@@ -30,12 +31,12 @@ fi
 if [ -n "$S3_BUCKET" ]; then
   echo "S3 storage configured (bucket: $S3_BUCKET), setting up rclone..."
 
-  S3_PREFIX="${S3_PREFIX:-openclaw-state}"
+  S3_PREFIX="${S3_PREFIX:-openclaw-data}"
   S3_REGION="${S3_REGION:-us-east-1}"
 
-  # Generate rclone config from env vars
-  mkdir -p /root/.config/rclone
-  cat > /root/.config/rclone/rclone.conf <<RCONF
+  # Generate rclone config from env vars (write to temp location, not ~/.config)
+  mkdir -p /tmp/rclone
+  cat > /tmp/rclone/rclone.conf <<RCONF
 [s3]
 type = s3
 provider = ${S3_PROVIDER:-Other}
@@ -52,66 +53,141 @@ password2 = ${RCLONE_CRYPT_PASSWORD2:-}
 filename_encryption = standard
 directory_name_encryption = true
 RCONF
+  export RCLONE_CONFIG=/tmp/rclone/rclone.conf
 
-  # Local dir for SQLite files (can't run on FUSE)
-  mkdir -p "$SQLITE_LOCAL_DIR"
+  # Try FUSE mount first; fall back to rclone sync if FUSE unavailable
+  mkdir -p "$DATA_DIR"
+  S3_MODE=""
 
-  # Restore memory.db files from S3 before mount
-  echo "Restoring SQLite files from S3..."
-  rclone copy s3-crypt:sqlite/ "$SQLITE_LOCAL_DIR/" 2>/dev/null || true
-
-  # Mount encrypted S3 as state dir
-  mkdir -p "$STATE_DIR"
-  rclone mount s3-crypt: "$STATE_DIR" \
-    --vfs-cache-mode writes \
-    --vfs-write-back 5s \
-    --dir-cache-time 30s \
-    --vfs-cache-max-size 500M \
-    --allow-other \
-    --daemon
-
-  # Wait for mount
-  echo "Waiting for rclone mount..."
-  MOUNT_WAIT=0
-  while ! mountpoint -q "$STATE_DIR"; do
-    sleep 0.5
-    MOUNT_WAIT=$((MOUNT_WAIT + 1))
-    if [ $MOUNT_WAIT -ge 20 ]; then
-      echo "ERROR: rclone mount not ready after 10s, aborting."
-      exit 1
+  if [ -e /dev/fuse ]; then
+    echo "Attempting FUSE mount..."
+    # Unmount Docker volume if present (FUSE can't overlay on existing mounts)
+    if mountpoint -q "$DATA_DIR" 2>/dev/null; then
+      echo "Unmounting existing volume at $DATA_DIR..."
+      umount "$DATA_DIR" 2>/dev/null || true
     fi
-  done
-  echo "rclone mount ready at $STATE_DIR"
+    rclone mount s3-crypt: "$DATA_DIR" \
+      --config "$RCLONE_CONFIG" \
+      --vfs-cache-mode writes \
+      --vfs-write-back 5s \
+      --dir-cache-time 30s \
+      --vfs-cache-max-size 500M \
+      --allow-other \
+      --daemon 2>&1 || true
 
-  # Start periodic SQLite backup to S3 (every 60s)
-  (
-    while true; do
-      sleep 60
-      rclone copy "$SQLITE_LOCAL_DIR/" s3-crypt:sqlite/ 2>/dev/null || true
+    # Wait for FUSE mount (up to 10s) — check for fuse.rclone specifically,
+    # not just mountpoint (Docker volume is already a mountpoint)
+    MOUNT_WAIT=0
+    while ! mount | grep -q "on $DATA_DIR type fuse.rclone"; do
+      sleep 0.5
+      MOUNT_WAIT=$((MOUNT_WAIT + 1))
+      if [ $MOUNT_WAIT -ge 20 ]; then
+        break
+      fi
     done
-  ) &
-  SQLITE_BACKUP_PID=$!
-  echo "SQLite backup loop started (PID $SQLITE_BACKUP_PID)"
+
+    if mount | grep -q "on $DATA_DIR type fuse.rclone"; then
+      S3_MODE="mount"
+      echo "rclone FUSE mount ready at $DATA_DIR"
+    else
+      echo "FUSE mount failed, falling back to sync mode."
+    fi
+  fi
+
+  # Fallback: sync mode (pull from S3, periodic push back)
+  if [ -z "$S3_MODE" ]; then
+    S3_MODE="sync"
+    echo "Using rclone sync mode (no FUSE)."
+    # Restore SQLite files to local storage (can't run on FUSE, use symlinks instead)
+    mkdir -p "$SQLITE_LOCAL_DIR"
+    echo "Restoring SQLite files from S3..."
+    rclone copy s3-crypt:sqlite/ "$SQLITE_LOCAL_DIR/" --config "$RCLONE_CONFIG" 2>/dev/null || true
+    # Pull remaining state
+    rclone copy s3-crypt: "$DATA_DIR/" --config "$RCLONE_CONFIG" --exclude "sqlite/**" 2>&1 || true
+    echo "Initial sync from S3 complete."
+  fi
+
+  # In sync mode, run periodic background jobs to push changes to S3.
+  # In mount mode, rclone VFS cache handles syncing automatically.
+  if [ "$S3_MODE" = "sync" ]; then
+    (
+      while true; do
+        sleep 60
+        rclone copy "$SQLITE_LOCAL_DIR/" s3-crypt:sqlite/ --config "$RCLONE_CONFIG" 2>/dev/null || true
+        rclone copy "$DATA_DIR/" s3-crypt: --config "$RCLONE_CONFIG" --exclude "sqlite/**" 2>/dev/null || true
+      done
+    ) &
+    echo "Background sync started (PID $!)"
+  fi
 else
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$DATA_DIR"
 fi
 
-# Bootstrap minimal config if none exists
-CONFIG_FILE="$STATE_DIR/openclaw.json"
+# --- Set up home directory symlinks ---
+# ~/.openclaw → /data/openclaw (state dir)
+# ~/.config → /data/.config (plugin configs)
+mkdir -p "$DATA_DIR/openclaw" "$DATA_DIR/.config"
+ln -sfn "$DATA_DIR/openclaw" /root/.openclaw
+ln -sfn "$DATA_DIR/.config" /root/.config
+echo "Home symlinks created (~/.openclaw, ~/.config → $DATA_DIR)"
+
+# Bootstrap config if none exists — generates full Redpill provider + model catalog
+CONFIG_FILE="/root/.openclaw/openclaw.json"
 if [ ! -f "$CONFIG_FILE" ]; then
-  # Use derived gateway token if available, otherwise generate random
   BOOT_TOKEN="${GATEWAY_AUTH_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)}"
-  cat > "$CONFIG_FILE" <<CONF
+  export CONFIG_FILE BOOT_TOKEN
+  node -e "
+    // Import Redpill config functions from installed openclaw package
+    const PKG = '/usr/lib/node_modules/@h4x3rotab/openclaw/dist';
+    const { applyRedpillConfig } = require(PKG + '/commands/onboard-auth.config-core.js');
+
+    const base = {
+      gateway: {
+        mode: 'local',
+        bind: 'lan',
+        auth: { token: process.env.BOOT_TOKEN },
+        controlUi: { dangerouslyDisableDeviceAuth: true },
+      },
+      update: { checkOnStart: false },
+      agents: {
+        defaults: {
+          memorySearch: {
+            provider: 'openai',
+            model: 'qwen/qwen3-embedding-8b',
+            remote: { baseUrl: 'https://api.redpill.ai/v1', apiKey: process.env.REDPILL_API_KEY || undefined },
+            fallback: 'none',
+          },
+        },
+      },
+    };
+
+    // Apply full Redpill provider config (model catalog + default model)
+    let cfg = applyRedpillConfig(base);
+
+    // Override default model to GLM 4.7
+    cfg.agents.defaults.model.primary = 'redpill/z-ai/glm-4.7';
+
+    // Inject Redpill API key if provided
+    if (process.env.REDPILL_API_KEY) {
+      cfg.models.providers.redpill.apiKey = process.env.REDPILL_API_KEY;
+    }
+
+    require('fs').writeFileSync(process.env.CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  " 2>&1 || {
+    # Fallback: write minimal config if node import fails (e.g. package structure changed)
+    echo "Warning: full config generation failed, writing minimal config."
+    cat > "$CONFIG_FILE" <<CONF
 {"gateway":{"mode":"local","bind":"lan","auth":{"token":"$BOOT_TOKEN"},"controlUi":{"dangerouslyDisableDeviceAuth":true}},"update":{"checkOnStart":false},"agents":{"defaults":{"memorySearch":{"provider":"openai","model":"qwen/qwen3-embedding-8b","remote":{"baseUrl":"https://api.redpill.ai/v1"},"fallback":"none"}}}}
 CONF
-  echo "Created default config at $CONFIG_FILE (token: ${GATEWAY_AUTH_TOKEN:+derived}${GATEWAY_AUTH_TOKEN:-random})"
+  }
+  echo "Created config at $CONFIG_FILE (token: ${GATEWAY_AUTH_TOKEN:+derived}${GATEWAY_AUTH_TOKEN:-random})"
 fi
 
 # --- SQLite symlink helper ---
 # Called after gateway creates agent dirs to redirect memory.db to local storage
 setup_sqlite_symlinks() {
   if [ -z "$S3_BUCKET" ]; then return; fi
-  for agent_dir in "$STATE_DIR"/agents/*/; do
+  for agent_dir in /root/.openclaw/agents/*/; do
     [ -d "$agent_dir" ] || continue
     agent_id=$(basename "$agent_dir")
     local_db="$SQLITE_LOCAL_DIR/${agent_id}-memory.db"
@@ -163,9 +239,10 @@ if docker info >/dev/null 2>&1; then
   echo "Docker daemon ready."
 fi
 
-# Set up SQLite symlinks (run once now, then periodically for new agents)
-setup_sqlite_symlinks
-if [ -n "$S3_BUCKET" ]; then
+# Set up SQLite symlinks — only needed in sync mode (no VFS cache).
+# In FUSE mount mode, --vfs-cache-mode writes handles SQLite locally.
+if [ "$S3_MODE" = "sync" ]; then
+  setup_sqlite_symlinks
   (
     while true; do
       sleep 30
