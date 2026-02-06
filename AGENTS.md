@@ -112,6 +112,7 @@
 - If `git branch -d/-D <branch>` is policy-blocked, delete the local ref directly: `git update-ref -d refs/heads/<branch>`.
 
 ## Security & Configuration Tips
+
 - **Credentials**: managed via Redpill Vault (`rv`). Secrets in `.rv.json` are injected into shell commands transparently by the `rv-exec` hook — the agent never sees secret values. Global keys: `REDPILL_API_KEY`, `BRAVE_API`. Project-scoped keys: `MASTER_KEY`, `S3_BUCKET`, `S3_ENDPOINT`, `S3_PROVIDER`, `S3_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `CVM_SSH_HOST`. Use `rv list` to check status, `rv import <file>` to add from .env, `rv import <file> -g` for global scope. For Phala deploy, use `rv-exec --dotenv` to generate a temp .env file (see Phala Cloud Deployment section).
 - Do **not** store secrets in plaintext `.env` files in the repo. The old `phala-deploy/secrets/.env` has been superseded by the vault.
 - Web provider stores creds at `~/.clawdbot/credentials/`; rerun `openclaw login` if logged out.
@@ -228,6 +229,7 @@
   - `pnpm test:install:smoke` or `OPENCLAW_INSTALL_SMOKE_SKIP_NONROOT=1 pnpm test:install:smoke` for non-root smoke path.
 
 ## Phala Cloud Deployment
+
 - Deploy (new CVM): `cd phala-deploy && phala deploy -n openclaw-dev -c docker-compose.yml -t tdx.medium --dev-os --wait`.
 - Deploy (update existing): use `rv-exec --dotenv` to inject secrets from vault:
   ```bash
@@ -264,7 +266,9 @@
 - SSH sessions: symlinks handle paths automatically (`~/.openclaw → /data/openclaw`), no env var prefix needed.
 - dstack `app-compose.sh` can fail with "container name already in use" if old container auto-restarts before compose runs. Check `journalctl -u app-compose` on the VM host.
 - Use `phala cvms logs <uuid>` (serial logs) to monitor deploy progress — don't rely on SSH during reboots.
-- npm package: published as `@h4x3rotab/openclaw` on npm. The Dockerfile installs via `npm install -g @h4x3rotab/openclaw@latest` instead of building from source. To republish: bump version in `package.json`, `pnpm build && pnpm ui:install && pnpm ui:build`, then `npm publish --access public`.
+- `phala deploy` is the reliable rollout path. `phala cvms logs` can lag, so confirm with a live version check via `cvm-exec`.
+- `rv-exec` with `CVM_SSH_HOST` is sufficient to verify the live container without exposing secrets.
+- npm package: Docker images install from a local tarball at `phala-deploy/openclaw.tgz`. To update: bump version in `package.json` (if needed), run `pnpm build && pnpm ui:install && pnpm ui:build`, then `npm pack` and move the tarball into `phala-deploy/openclaw.tgz` before rebuilding the image.
 - `node-llama-cpp` has been removed from `optionalDependencies`. Local embeddings use the Redpill API (`qwen/qwen3-embedding-8b`) instead. The `src/memory/embeddings.ts` code gracefully handles missing `node-llama-cpp` (lazy `import()` with fallback).
 - Memory search embedding config: set `agents.defaults.memorySearch.provider=openai`, `model=qwen/qwen3-embedding-8b`, `remote.baseUrl=https://api.redpill.ai/v1`, `remote.apiKey=<key>`, `fallback=none`. The OpenAI embedding provider supports any OpenAI-compatible endpoint via `remote.baseUrl`.
 - Redpill embedding models available: `qwen/qwen3-embedding-8b` (8B, 33K context, $0.01/1M input), `sentence-transformers/all-minilm-l6-v2` (384-dim, 512 context, $0.000005/1M).

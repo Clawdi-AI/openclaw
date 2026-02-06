@@ -126,9 +126,22 @@ fi
 # --- Set up home directory symlinks ---
 # ~/.openclaw → /data/openclaw (state dir)
 # ~/.config → /data/.config (plugin configs)
-mkdir -p "$DATA_DIR/openclaw" "$DATA_DIR/.config"
-ln -sfn "$DATA_DIR/openclaw" /root/.openclaw
-ln -sfn "$DATA_DIR/.config" /root/.config
+ensure_symlink_dir() {
+  target="$1"
+  link="$2"
+
+  mkdir -p "$target"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    if [ "$(ls -A "$link" 2>/dev/null)" ]; then
+      find "$link" -mindepth 1 -maxdepth 1 -exec mv -t "$target" {} + || true
+    fi
+    rmdir "$link" 2>/dev/null || rm -rf "$link"
+  fi
+  ln -sfn "$target" "$link"
+}
+
+ensure_symlink_dir "$DATA_DIR/openclaw" /root/.openclaw
+ensure_symlink_dir "$DATA_DIR/.config" /root/.config
 echo "Home symlinks created (~/.openclaw, ~/.config → $DATA_DIR)"
 
 # Bootstrap config if none exists — generates full Redpill provider + model catalog
@@ -138,41 +151,48 @@ if [ ! -f "$CONFIG_FILE" ]; then
   export CONFIG_FILE BOOT_TOKEN
   node -e "
     // Import Redpill config functions from installed openclaw package
-    const PKG = '/usr/lib/node_modules/@h4x3rotab/openclaw/dist';
-    const { applyRedpillConfig } = require(PKG + '/commands/onboard-auth.config-core.js');
+    const { writeFileSync } = require('fs');
+    const PKG = 'file:///usr/lib/node_modules/openclaw/dist/commands/onboard-auth.config-core.js';
 
-    const base = {
-      gateway: {
-        mode: 'local',
-        bind: 'lan',
-        auth: { token: process.env.BOOT_TOKEN },
-        controlUi: { dangerouslyDisableDeviceAuth: true },
-      },
-      update: { checkOnStart: false },
-      agents: {
-        defaults: {
-          memorySearch: {
-            provider: 'openai',
-            model: 'qwen/qwen3-embedding-8b',
-            remote: { baseUrl: 'https://api.redpill.ai/v1', apiKey: process.env.REDPILL_API_KEY || undefined },
-            fallback: 'none',
+    (async () => {
+      const { applyRedpillConfig } = await import(PKG);
+
+      const base = {
+        gateway: {
+          mode: 'local',
+          bind: 'lan',
+          auth: { token: process.env.BOOT_TOKEN },
+          controlUi: { dangerouslyDisableDeviceAuth: true },
+        },
+        update: { checkOnStart: false },
+        agents: {
+          defaults: {
+            memorySearch: {
+              provider: 'openai',
+              model: 'qwen/qwen3-embedding-8b',
+              remote: { baseUrl: 'https://api.redpill.ai/v1', apiKey: process.env.REDPILL_API_KEY || undefined },
+              fallback: 'none',
+            },
           },
         },
-      },
-    };
+      };
 
-    // Apply full Redpill provider config (model catalog + default model)
-    let cfg = applyRedpillConfig(base);
+      // Apply full Redpill provider config (model catalog + default model)
+      let cfg = applyRedpillConfig(base);
 
-    // Override default model to GLM 4.7
-    cfg.agents.defaults.model.primary = 'redpill/z-ai/glm-4.7';
+      // Override default model to GLM 4.7
+      cfg.agents.defaults.model.primary = 'redpill/z-ai/glm-4.7';
 
-    // Inject Redpill API key if provided
-    if (process.env.REDPILL_API_KEY) {
-      cfg.models.providers.redpill.apiKey = process.env.REDPILL_API_KEY;
-    }
+      // Inject Redpill API key if provided
+      if (process.env.REDPILL_API_KEY) {
+        cfg.models.providers.redpill.apiKey = process.env.REDPILL_API_KEY;
+      }
 
-    require('fs').writeFileSync(process.env.CONFIG_FILE, JSON.stringify(cfg, null, 2));
+      writeFileSync(process.env.CONFIG_FILE, JSON.stringify(cfg, null, 2));
+    })().catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
   " 2>&1 || {
     # Fallback: write minimal config if node import fails (e.g. package structure changed)
     echo "Warning: full config generation failed, writing minimal config."
@@ -251,5 +271,52 @@ if [ "$S3_MODE" = "sync" ]; then
   ) &
 fi
 
-# Start openclaw gateway (foreground)
-exec openclaw gateway run --bind lan --port 18789 --force
+# Gateway supervision (keep container alive for SSH even if gateway fails).
+GATEWAY_RESTART_DELAY="${OPENCLAW_GATEWAY_RESTART_DELAY:-5}"
+GATEWAY_RESTART_MAX_DELAY="${OPENCLAW_GATEWAY_RESTART_MAX_DELAY:-60}"
+GATEWAY_RESET_AFTER="${OPENCLAW_GATEWAY_RESET_AFTER:-600}"
+
+shutdown() {
+  echo "Shutting down..."
+  if [ -n "${GATEWAY_PID:-}" ] && kill -0 "$GATEWAY_PID" 2>/dev/null; then
+    kill "$GATEWAY_PID" 2>/dev/null || true
+  fi
+  if [ -n "${DOCKERD_PID:-}" ] && kill -0 "$DOCKERD_PID" 2>/dev/null; then
+    kill "$DOCKERD_PID" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+trap shutdown INT TERM
+
+backoff="$GATEWAY_RESTART_DELAY"
+set +e
+while true; do
+  echo "Starting OpenClaw gateway..."
+  start_time=$(date +%s)
+  openclaw gateway run --bind lan --port 18789 --force &
+  GATEWAY_PID=$!
+  wait "$GATEWAY_PID"
+  exit_code=$?
+  end_time=$(date +%s)
+  runtime=$((end_time - start_time))
+  echo "Gateway exited with code ${exit_code}."
+
+  if [ "$runtime" -ge "$GATEWAY_RESET_AFTER" ]; then
+    backoff="$GATEWAY_RESTART_DELAY"
+    echo "Gateway ran for ${runtime}s; resetting backoff to ${backoff}s."
+  else
+    if [ "$backoff" -lt 1 ]; then
+      backoff=1
+    fi
+    if [ "$backoff" -lt "$GATEWAY_RESTART_MAX_DELAY" ]; then
+      backoff=$((backoff * 2))
+      if [ "$backoff" -gt "$GATEWAY_RESTART_MAX_DELAY" ]; then
+        backoff="$GATEWAY_RESTART_MAX_DELAY"
+      fi
+    fi
+  fi
+
+  echo "Restarting gateway in ${backoff}s..."
+  sleep "$backoff"
+done

@@ -96,7 +96,7 @@ describe("Redpill Models", () => {
     it("should have correct vision models", () => {
       const visionModels = REDPILL_GPU_TEE_CATALOG.filter((m) => m.input.includes("image"));
       expect(visionModels).toHaveLength(2);
-      expect(visionModels.map((m) => m.id).sort()).toEqual([
+      expect(visionModels.map((m) => m.id).toSorted()).toEqual([
         "moonshotai/kimi-k2.5",
         "qwen/qwen3-vl-30b-a3b-instruct",
       ]);

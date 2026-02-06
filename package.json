@@ -22,6 +22,13 @@
   ],
   "type": "module",
   "main": "dist/index.js",
+  "typesVersions": {
+    "*": {
+      "plugin-sdk": [
+        "src/plugin-sdk/index.ts"
+      ]
+    }
+  },
   "exports": {
     ".": "./dist/index.js",
     "./plugin-sdk": {
@@ -166,9 +173,6 @@
     "ws": "^8.19.0",
     "yaml": "^2.8.2",
     "zod": "^4.3.6"
-  },
-  "optionalDependencies": {
-    "@napi-rs/canvas": "^0.1.88"
   },
   "devDependencies": {
     "@grammyjs/types": "^3.24.0",
