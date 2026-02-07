@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -28,6 +28,9 @@ type TenantSeed = {
   id: string;
   name: string;
   apiKey: string;
+  inboundUrl?: string;
+  inboundToken?: string;
+  inboundTimeoutMs: number;
 };
 
 type TenantIdentity = {
@@ -57,6 +60,12 @@ type PairingCodeRow = {
   claimed_by_tenant_id: string | null;
 };
 
+type PairingTokenRow = {
+  tenant_id: string;
+  channel: string;
+  session_key: string | null;
+};
+
 type ActiveBindingRow = {
   binding_id: string;
   channel: string;
@@ -64,14 +73,103 @@ type ActiveBindingRow = {
   route_key: string;
 };
 
+type ExistingBindingRow = {
+  binding_id: string;
+};
+
 type SessionRouteBindingRow = {
   binding_id: string;
   route_key: string;
 };
 
+type ActiveBindingLookupRow = {
+  tenant_id: string;
+  binding_id: string;
+};
+
 type TelegramBoundRoute = {
   chatId: string;
   topicId?: number;
+};
+
+type TenantInboundTarget = {
+  url: string;
+  token: string;
+  timeoutMs: number;
+};
+
+type TelegramIncomingMessage = {
+  message_id?: number;
+  date?: number;
+  text?: string;
+  caption?: string;
+  message_thread_id?: number;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
+  video?: TelegramVideo;
+  animation?: TelegramAnimation;
+  from?: { id?: number };
+  chat?: { id?: number; type?: string };
+};
+
+type TelegramPhotoSize = {
+  file_id?: string;
+  file_unique_id?: string;
+  width?: number;
+  height?: number;
+  file_size?: number;
+};
+
+type TelegramDocument = {
+  file_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+};
+
+type TelegramVideo = {
+  file_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  width?: number;
+  height?: number;
+  duration?: number;
+  file_size?: number;
+};
+
+type TelegramAnimation = {
+  file_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  width?: number;
+  height?: number;
+  duration?: number;
+  file_size?: number;
+};
+
+type TelegramInboundAttachment = {
+  type?: string;
+  mimeType?: string;
+  fileName?: string;
+  content: string;
+};
+
+type TelegramInboundMediaSummary = {
+  kind: string;
+  fileId: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  width?: number;
+  height?: number;
+  durationSec?: number;
+  filePath?: string;
+};
+
+type TelegramUpdate = {
+  update_id?: number;
+  message?: TelegramIncomingMessage;
+  edited_message?: TelegramIncomingMessage;
 };
 
 const host = process.env.MUX_HOST || "127.0.0.1";
@@ -82,6 +180,28 @@ const logPath =
 const dbPath =
   process.env.MUX_DB_PATH || path.resolve(process.cwd(), "mux-server", "data", "mux-server.sqlite");
 const idempotencyTtlMs = Number(process.env.MUX_IDEMPOTENCY_TTL_MS || 10 * 60 * 1000);
+const telegramApiBaseUrl = (
+  process.env.MUX_TELEGRAM_API_BASE_URL || "https://api.telegram.org"
+).replace(/\/+$/, "");
+const telegramInboundEnabled = process.env.MUX_TELEGRAM_INBOUND_ENABLED === "true";
+const telegramPollTimeoutSec = Number(process.env.MUX_TELEGRAM_POLL_TIMEOUT_SEC || 25);
+const telegramPollRetryMs = Number(process.env.MUX_TELEGRAM_POLL_RETRY_MS || 1_000);
+const telegramBootstrapLatest = process.env.MUX_TELEGRAM_BOOTSTRAP_LATEST !== "false";
+const telegramInboundMediaMaxBytes = Number(
+  process.env.MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
+);
+const pairingTokenTtlSec = Number(process.env.MUX_PAIRING_TOKEN_TTL_SEC || 15 * 60);
+const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
+const telegramBotUsername = readNonEmptyString(process.env.MUX_TELEGRAM_BOT_USERNAME);
+const pairingSuccessText =
+  readNonEmptyString(process.env.MUX_PAIRING_SUCCESS_TEXT) ||
+  "Paired successfully. You can chat now.";
+const pairingInvalidText =
+  readNonEmptyString(process.env.MUX_PAIRING_INVALID_TEXT) ||
+  "Pairing link is invalid or expired. Request a new link from your dashboard.";
+const unpairedHintText =
+  readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT) ||
+  "This chat is not paired yet. Open your dashboard and use a new pairing link.";
 
 if (!telegramBotToken?.trim()) {
   console.error("TELEGRAM_BOT_TOKEN is required");
@@ -162,6 +282,45 @@ const stmtClaimPairingCode = db.prepare(`
   WHERE code = ? AND claimed_by_tenant_id IS NULL AND expires_at_ms > ?
 `);
 
+const stmtDeleteExpiredPairingTokens = db.prepare(`
+  DELETE FROM pairing_tokens
+  WHERE expires_at_ms <= ?
+`);
+
+const stmtInsertPairingToken = db.prepare(`
+  INSERT INTO pairing_tokens (
+    token_hash,
+    tenant_id,
+    channel,
+    session_key,
+    created_at_ms,
+    expires_at_ms,
+    consumed_at_ms,
+    consumed_binding_id,
+    consumed_route_key
+  )
+  VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+`);
+
+const stmtSelectActivePairingTokenByHash = db.prepare(`
+  SELECT tenant_id, channel, session_key
+  FROM pairing_tokens
+  WHERE token_hash = ? AND consumed_at_ms IS NULL AND expires_at_ms > ?
+  LIMIT 1
+`);
+
+const stmtConsumePairingToken = db.prepare(`
+  UPDATE pairing_tokens
+  SET consumed_at_ms = ?
+  WHERE token_hash = ? AND consumed_at_ms IS NULL AND expires_at_ms > ?
+`);
+
+const stmtAttachPairingTokenBinding = db.prepare(`
+  UPDATE pairing_tokens
+  SET consumed_binding_id = ?, consumed_route_key = ?
+  WHERE token_hash = ?
+`);
+
 const stmtInsertBinding = db.prepare(`
   INSERT INTO bindings (
     binding_id,
@@ -223,12 +382,59 @@ const stmtResolveSessionRouteBinding = db.prepare(`
   LIMIT 1
 `);
 
+const stmtSelectSessionKeyByBinding = db.prepare(`
+  SELECT session_key
+  FROM session_routes
+  WHERE tenant_id = ? AND channel = ? AND binding_id = ?
+  ORDER BY updated_at_ms DESC
+  LIMIT 1
+`);
+
+const stmtSelectActiveBindingByRouteKey = db.prepare(`
+  SELECT tenant_id, binding_id
+  FROM bindings
+  WHERE channel = ? AND route_key = ? AND status = 'active'
+  LIMIT 1
+`);
+
+const stmtSelectActiveBindingByTenantAndRoute = db.prepare(`
+  SELECT binding_id
+  FROM bindings
+  WHERE tenant_id = ? AND channel = ? AND route_key = ? AND status = 'active'
+  ORDER BY updated_at_ms DESC
+  LIMIT 1
+`);
+
+const stmtSelectTelegramOffset = db.prepare(`
+  SELECT last_update_id
+  FROM telegram_offsets
+  WHERE id = 1
+`);
+
+const stmtUpsertTelegramOffset = db.prepare(`
+  INSERT INTO telegram_offsets (id, last_update_id, updated_at_ms)
+  VALUES (1, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    last_update_id = excluded.last_update_id,
+    updated_at_ms = excluded.updated_at_ms
+`);
+
 const stmtInsertAuditLog = db.prepare(`
   INSERT INTO audit_logs (tenant_id, event_type, payload_json, created_at_ms)
   VALUES (?, ?, ?, ?)
 `);
 
 const idempotencyInflight = new Map<string, InflightEntry>();
+const tenantInboundTargets = new Map<string, TenantInboundTarget>();
+for (const tenant of tenantSeeds) {
+  if (tenant.inboundUrl && tenant.inboundToken) {
+    tenantInboundTargets.set(tenant.id, {
+      url: tenant.inboundUrl,
+      token: tenant.inboundToken,
+      timeoutMs: tenant.inboundTimeoutMs,
+    });
+  }
+}
 
 function hashApiKey(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -265,7 +471,19 @@ function resolveTenantSeeds(): TenantSeed[] {
   const raw = process.env.MUX_TENANTS_JSON?.trim();
   if (!raw) {
     const apiKey = process.env.MUX_API_KEY || "outbound-secret";
-    return [{ id: "tenant-default", name: "default", apiKey }];
+    const inboundUrl = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_URL) ?? undefined;
+    const inboundToken = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_TOKEN) ?? undefined;
+    const inboundTimeoutMs = readPositiveInt(process.env.MUX_OPENCLAW_INBOUND_TIMEOUT_MS) ?? 15_000;
+    return [
+      {
+        id: "tenant-default",
+        name: "default",
+        apiKey,
+        inboundUrl,
+        inboundToken,
+        inboundTimeoutMs,
+      },
+    ];
   }
 
   const parsed = JSON.parse(raw) as unknown;
@@ -286,6 +504,20 @@ function resolveTenantSeeds(): TenantSeed[] {
     const apiKey = typeof candidate.apiKey === "string" ? candidate.apiKey.trim() : "";
     const name =
       typeof candidate.name === "string" && candidate.name.trim() ? candidate.name.trim() : id;
+    const inboundUrl =
+      typeof candidate.inboundUrl === "string" && candidate.inboundUrl.trim()
+        ? candidate.inboundUrl.trim()
+        : undefined;
+    const inboundToken =
+      typeof candidate.inboundToken === "string" && candidate.inboundToken.trim()
+        ? candidate.inboundToken.trim()
+        : undefined;
+    const inboundTimeoutMs =
+      typeof candidate.inboundTimeoutMs === "number" &&
+      Number.isFinite(candidate.inboundTimeoutMs) &&
+      candidate.inboundTimeoutMs > 0
+        ? Math.trunc(candidate.inboundTimeoutMs)
+        : 15_000;
 
     if (!id) {
       throw new Error("tenant.id is required");
@@ -303,7 +535,7 @@ function resolveTenantSeeds(): TenantSeed[] {
 
     seenIds.add(id);
     seenHashes.add(keyHash);
-    seeds.push({ id, name, apiKey });
+    seeds.push({ id, name, apiKey, inboundUrl, inboundToken, inboundTimeoutMs });
   }
 
   return seeds;
@@ -388,6 +620,20 @@ function initializeDatabase(database: DatabaseSync) {
     );
     CREATE INDEX IF NOT EXISTS idx_pairing_codes_expires ON pairing_codes(expires_at_ms);
 
+    CREATE TABLE IF NOT EXISTS pairing_tokens (
+      token_hash TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      session_key TEXT,
+      created_at_ms INTEGER NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      consumed_at_ms INTEGER,
+      consumed_binding_id TEXT,
+      consumed_route_key TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pairing_tokens_tenant_channel
+      ON pairing_tokens(tenant_id, channel, expires_at_ms);
+
     CREATE TABLE IF NOT EXISTS bindings (
       binding_id TEXT PRIMARY KEY,
       tenant_id TEXT NOT NULL,
@@ -431,6 +677,12 @@ function initializeDatabase(database: DatabaseSync) {
     );
     CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created
       ON audit_logs(tenant_id, created_at_ms);
+
+    CREATE TABLE IF NOT EXISTS telegram_offsets (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_update_id INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
   `);
 }
 
@@ -509,7 +761,7 @@ async function readBody<T extends object>(req: IncomingMessage): Promise<T> {
 }
 
 async function sendTelegram(method: "sendMessage" | "sendPhoto", body: Record<string, unknown>) {
-  const response = await fetch(`https://api.telegram.org/bot${telegramBotToken}/${method}`, {
+  const response = await fetch(`${telegramApiBaseUrl}/bot${telegramBotToken}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -569,6 +821,371 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function normalizeTtlSec(ttlSec: number): number {
+  const safeDefault = Math.max(1, Math.trunc(pairingTokenTtlSec));
+  const safeMax = Math.max(safeDefault, Math.trunc(pairingTokenMaxTtlSec));
+  if (!Number.isFinite(ttlSec) || ttlSec <= 0) {
+    return safeDefault;
+  }
+  return Math.min(Math.max(1, Math.trunc(ttlSec)), safeMax);
+}
+
+function generatePairingToken(): string {
+  return `mpt_${randomBytes(24).toString("base64url")}`;
+}
+
+function hashPairingToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+function purgeExpiredPairingTokens(nowMs: number) {
+  stmtDeleteExpiredPairingTokens.run(nowMs);
+}
+
+function issuePairingTokenForTenant(params: {
+  tenant: TenantIdentity;
+  channel: string;
+  sessionKey?: string;
+  ttlSec?: number;
+}) {
+  if (params.channel !== "telegram") {
+    return {
+      statusCode: 400,
+      payload: { ok: false, error: "unsupported channel for token pairing" },
+    };
+  }
+
+  const nowMs = Date.now();
+  purgeExpiredPairingTokens(nowMs);
+  const ttlSec = normalizeTtlSec(params.ttlSec ?? pairingTokenTtlSec);
+  const token = generatePairingToken();
+  const tokenHash = hashPairingToken(token);
+  const expiresAtMs = nowMs + ttlSec * 1_000;
+  const sessionKey = readNonEmptyString(params.sessionKey);
+
+  stmtInsertPairingToken.run(
+    tokenHash,
+    params.tenant.id,
+    params.channel,
+    sessionKey,
+    nowMs,
+    expiresAtMs,
+  );
+
+  const deepLink =
+    params.channel === "telegram" && telegramBotUsername
+      ? `https://t.me/${telegramBotUsername}?start=${encodeURIComponent(token)}`
+      : null;
+
+  writeAuditLog(
+    params.tenant.id,
+    "pairing_token_issued",
+    {
+      channel: params.channel,
+      expiresAtMs,
+      hasSessionKey: Boolean(sessionKey),
+    },
+    nowMs,
+  );
+
+  return {
+    statusCode: 200,
+    payload: {
+      ok: true,
+      channel: params.channel,
+      token,
+      expiresAtMs,
+      startCommand: params.channel === "telegram" ? `/start ${token}` : null,
+      deepLink,
+    },
+  };
+}
+
+function extractTokenFromStartCommand(input: string): string | null {
+  const match = input.match(/^\/start(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?$/i);
+  if (!match) {
+    return null;
+  }
+  return readNonEmptyString(match[1]);
+}
+
+function extractPairingTokenFromTelegramMessage(message: TelegramIncomingMessage): string | null {
+  const text = readNonEmptyString(message.text) ?? readNonEmptyString(message.caption);
+  if (!text) {
+    return null;
+  }
+  const fromStart = extractTokenFromStartCommand(text);
+  if (fromStart && /^mpt_[A-Za-z0-9_-]{20,200}$/.test(fromStart)) {
+    return fromStart;
+  }
+  const direct = text.match(/\b(mpt_[A-Za-z0-9_-]{20,200})\b/);
+  return direct?.[1] ?? null;
+}
+
+function isTelegramCommandText(input: string | null): boolean {
+  if (!input) {
+    return false;
+  }
+  return /^\/[A-Za-z0-9_]+/.test(input.trim());
+}
+
+function isImageMimeType(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith("image/");
+}
+
+function inferImageMimeTypeFromPath(filePath: string | undefined): string | undefined {
+  if (!filePath) {
+    return undefined;
+  }
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (lower.endsWith(".png")) {
+    return "image/png";
+  }
+  if (lower.endsWith(".webp")) {
+    return "image/webp";
+  }
+  if (lower.endsWith(".gif")) {
+    return "image/gif";
+  }
+  if (lower.endsWith(".bmp")) {
+    return "image/bmp";
+  }
+  return undefined;
+}
+
+function pickBestTelegramPhotoSize(
+  sizes: TelegramPhotoSize[] | undefined,
+): TelegramPhotoSize | null {
+  if (!Array.isArray(sizes) || sizes.length === 0) {
+    return null;
+  }
+  const candidates = sizes.filter((entry) => readNonEmptyString(entry.file_id));
+  if (candidates.length === 0) {
+    return null;
+  }
+  candidates.sort((a, b) => {
+    const aSize = readPositiveInt(a.file_size) ?? 0;
+    const bSize = readPositiveInt(b.file_size) ?? 0;
+    if (aSize !== bSize) {
+      return bSize - aSize;
+    }
+    const aArea = (readPositiveInt(a.width) ?? 0) * (readPositiveInt(a.height) ?? 0);
+    const bArea = (readPositiveInt(b.width) ?? 0) * (readPositiveInt(b.height) ?? 0);
+    return bArea - aArea;
+  });
+  return candidates[0] ?? null;
+}
+
+async function resolveTelegramFilePath(fileId: string): Promise<string | null> {
+  const response = await fetch(`${telegramApiBaseUrl}/bot${telegramBotToken}/getFile`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file_id: fileId }),
+  });
+  if (!response.ok) {
+    return null;
+  }
+  const result = (await response.json()) as {
+    ok?: boolean;
+    result?: { file_path?: unknown } | null;
+  };
+  if (result.ok !== true) {
+    return null;
+  }
+  return readNonEmptyString(result.result?.file_path);
+}
+
+async function downloadTelegramFileBase64(filePath: string): Promise<string | null> {
+  const normalizedPath = filePath.replace(/^\/+/, "");
+  if (!normalizedPath) {
+    return null;
+  }
+  const response = await fetch(
+    `${telegramApiBaseUrl}/file/bot${telegramBotToken}/${normalizedPath}`,
+  );
+  if (!response.ok) {
+    return null;
+  }
+  const maxBytes =
+    Number.isFinite(telegramInboundMediaMaxBytes) && telegramInboundMediaMaxBytes > 0
+      ? Math.trunc(telegramInboundMediaMaxBytes)
+      : 5_000_000;
+  const contentLength = readPositiveInt(response.headers.get("content-length"));
+  if (contentLength && contentLength > maxBytes) {
+    return null;
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.byteLength === 0 || buffer.byteLength > maxBytes) {
+    return null;
+  }
+  return buffer.toString("base64");
+}
+
+async function resolveTelegramImageAttachment(params: {
+  updateId: number;
+  kind: string;
+  fileId: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  width?: number;
+  height?: number;
+  durationSec?: number;
+}): Promise<{ attachment?: TelegramInboundAttachment; summary: TelegramInboundMediaSummary }> {
+  const summary: TelegramInboundMediaSummary = {
+    kind: params.kind,
+    fileId: params.fileId,
+    fileName: params.fileName,
+    mimeType: params.mimeType,
+    fileSize: params.fileSize,
+    width: params.width,
+    height: params.height,
+    durationSec: params.durationSec,
+  };
+  try {
+    const filePath = await resolveTelegramFilePath(params.fileId);
+    if (!filePath) {
+      log({
+        type: "telegram_media_get_file_failed",
+        updateId: params.updateId,
+        fileId: params.fileId,
+        kind: params.kind,
+      });
+      return { summary };
+    }
+    summary.filePath = filePath;
+    const inferredMime = inferImageMimeTypeFromPath(filePath);
+    summary.mimeType = inferredMime || summary.mimeType;
+    summary.fileName = summary.fileName || path.basename(filePath);
+    const content = await downloadTelegramFileBase64(filePath);
+    if (!content) {
+      log({
+        type: "telegram_media_download_failed",
+        updateId: params.updateId,
+        fileId: params.fileId,
+        kind: params.kind,
+        filePath,
+      });
+      return { summary };
+    }
+    const attachment: TelegramInboundAttachment = {
+      type: "image",
+      mimeType: summary.mimeType || "image/jpeg",
+      fileName: summary.fileName || `${params.kind}-${params.fileId}.jpg`,
+      content,
+    };
+    return { attachment, summary };
+  } catch (error) {
+    log({
+      type: "telegram_media_fetch_error",
+      updateId: params.updateId,
+      fileId: params.fileId,
+      kind: params.kind,
+      error: String(error),
+    });
+    return { summary };
+  }
+}
+
+async function extractTelegramInboundMedia(params: {
+  message: TelegramIncomingMessage;
+  updateId: number;
+}): Promise<{ attachments: TelegramInboundAttachment[]; media: TelegramInboundMediaSummary[] }> {
+  const attachments: TelegramInboundAttachment[] = [];
+  const media: TelegramInboundMediaSummary[] = [];
+
+  const bestPhoto = pickBestTelegramPhotoSize(params.message.photo);
+  const photoFileId = readNonEmptyString(bestPhoto?.file_id);
+  if (photoFileId) {
+    const result = await resolveTelegramImageAttachment({
+      updateId: params.updateId,
+      kind: "photo",
+      fileId: photoFileId,
+      mimeType: "image/jpeg",
+      fileSize: readPositiveInt(bestPhoto?.file_size),
+      width: readPositiveInt(bestPhoto?.width),
+      height: readPositiveInt(bestPhoto?.height),
+    });
+    media.push(result.summary);
+    if (result.attachment) {
+      attachments.push(result.attachment);
+    }
+  }
+
+  const document = params.message.document;
+  const docFileId = readNonEmptyString(document?.file_id);
+  const docMimeType = readNonEmptyString(document?.mime_type)?.toLowerCase();
+  const docFileName = readNonEmptyString(document?.file_name);
+  const docMimeFromPath = inferImageMimeTypeFromPath(docFileName ?? undefined);
+  if (docFileId && (isImageMimeType(docMimeType) || Boolean(docMimeFromPath))) {
+    const result = await resolveTelegramImageAttachment({
+      updateId: params.updateId,
+      kind: "document",
+      fileId: docFileId,
+      fileName: docFileName ?? undefined,
+      mimeType: docMimeType ?? docMimeFromPath,
+      fileSize: readPositiveInt(document?.file_size),
+    });
+    media.push(result.summary);
+    if (result.attachment) {
+      attachments.push(result.attachment);
+    }
+  }
+
+  const video = params.message.video;
+  const videoFileId = readNonEmptyString(video?.file_id);
+  if (videoFileId) {
+    media.push({
+      kind: "video",
+      fileId: videoFileId,
+      fileName: readNonEmptyString(video?.file_name) ?? undefined,
+      mimeType: readNonEmptyString(video?.mime_type)?.toLowerCase() ?? undefined,
+      fileSize: readPositiveInt(video?.file_size),
+      width: readPositiveInt(video?.width),
+      height: readPositiveInt(video?.height),
+      durationSec: readPositiveInt(video?.duration),
+    });
+  }
+
+  const animation = params.message.animation;
+  const animationFileId = readNonEmptyString(animation?.file_id);
+  if (animationFileId) {
+    media.push({
+      kind: "animation",
+      fileId: animationFileId,
+      fileName: readNonEmptyString(animation?.file_name) ?? undefined,
+      mimeType: readNonEmptyString(animation?.mime_type)?.toLowerCase() ?? undefined,
+      fileSize: readPositiveInt(animation?.file_size),
+      width: readPositiveInt(animation?.width),
+      height: readPositiveInt(animation?.height),
+      durationSec: readPositiveInt(animation?.duration),
+    });
+  }
+
+  return { attachments, media };
+}
+
+async function sendTelegramPairingNotice(params: {
+  chatId: string;
+  topicId?: number;
+  text: string;
+}) {
+  const body: Record<string, unknown> = {
+    chat_id: params.chatId,
+    text: params.text,
+  };
+  if (params.topicId) {
+    body.message_thread_id = params.topicId;
+  }
+  const { response, result } = await sendTelegram("sendMessage", body);
+  if (!response.ok || result.ok !== true) {
+    throw new Error(`telegram pairing notice failed (${response.status})`);
+  }
+}
+
 function normalizeChannel(value: unknown): string | null {
   if (typeof value !== "string" || !value.trim()) {
     return null;
@@ -603,6 +1220,50 @@ function resolveTelegramBoundRoute(params: {
     return null;
   }
   return parseTelegramRouteKey(String(row.route_key));
+}
+
+function buildTelegramRouteKey(chatId: string, topicId?: number): string {
+  if (topicId) {
+    return `telegram:default:chat:${chatId}:topic:${topicId}`;
+  }
+  return `telegram:default:chat:${chatId}`;
+}
+
+function deriveTelegramSessionKey(chatId: string, topicId?: number): string {
+  const base = chatId.startsWith("-") ? `tg:group:${chatId}` : `tg:chat:${chatId}`;
+  return topicId ? `${base}:thread:${topicId}` : base;
+}
+
+function resolveTelegramBindingForIncoming(
+  chatId: string,
+  topicId?: number,
+): { tenantId: string; bindingId: string; routeKey: string } | null {
+  const topicRouteKey = topicId ? buildTelegramRouteKey(chatId, topicId) : null;
+  if (topicRouteKey) {
+    const topicRow = stmtSelectActiveBindingByRouteKey.get("telegram", topicRouteKey) as
+      | ActiveBindingLookupRow
+      | undefined;
+    if (topicRow?.tenant_id && topicRow?.binding_id) {
+      return {
+        tenantId: String(topicRow.tenant_id),
+        bindingId: String(topicRow.binding_id),
+        routeKey: topicRouteKey,
+      };
+    }
+  }
+
+  const chatRouteKey = buildTelegramRouteKey(chatId);
+  const chatRow = stmtSelectActiveBindingByRouteKey.get("telegram", chatRouteKey) as
+    | ActiveBindingLookupRow
+    | undefined;
+  if (!chatRow?.tenant_id || !chatRow?.binding_id) {
+    return null;
+  }
+  return {
+    tenantId: String(chatRow.tenant_id),
+    bindingId: String(chatRow.binding_id),
+    routeKey: chatRouteKey,
+  };
 }
 
 function writeAuditLog(
@@ -670,6 +1331,59 @@ function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?
   };
 }
 
+function claimTelegramPairingToken(params: {
+  token: string;
+  chatId: string;
+  topicId?: number;
+}): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
+  const now = Date.now();
+  purgeExpiredPairingTokens(now);
+  const tokenHash = hashPairingToken(params.token);
+  const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
+  if (!row || String(row.channel) !== "telegram") {
+    return null;
+  }
+
+  const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+  if (consumeResult.changes === 0) {
+    return null;
+  }
+
+  const tenantId = String(row.tenant_id);
+  const routeKey = buildTelegramRouteKey(params.chatId, params.topicId);
+  const existing = stmtSelectActiveBindingByTenantAndRoute.get(tenantId, "telegram", routeKey) as
+    | ExistingBindingRow
+    | undefined;
+
+  const bindingId = (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
+  if (!existing?.binding_id) {
+    stmtInsertBinding.run(
+      bindingId,
+      tenantId,
+      "telegram",
+      params.topicId ? "topic" : "chat",
+      routeKey,
+      now,
+      now,
+    );
+  }
+
+  const preferredSessionKey = readNonEmptyString(row.session_key);
+  const sessionKey = preferredSessionKey || deriveTelegramSessionKey(params.chatId, params.topicId);
+  stmtUpsertSessionRoute.run(
+    tenantId,
+    "telegram",
+    sessionKey,
+    bindingId,
+    JSON.stringify({ routeKey }),
+    now,
+  );
+
+  stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+  writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey }, now);
+  return { tenantId, bindingId, routeKey, sessionKey };
+}
+
 function listPairingsForTenant(tenant: TenantIdentity) {
   const rows = stmtListActiveBindingsByTenant.all(tenant.id) as ActiveBindingRow[];
   return {
@@ -697,6 +1411,333 @@ function unbindPairingForTenant(tenant: TenantIdentity, bindingId: string) {
   return { statusCode: 200, payload: { ok: true } };
 }
 
+function resolveStoredTelegramOffset(): number {
+  const row = stmtSelectTelegramOffset.get() as { last_update_id?: unknown } | undefined;
+  if (!row || typeof row.last_update_id !== "number" || !Number.isFinite(row.last_update_id)) {
+    return 0;
+  }
+  return Math.trunc(row.last_update_id);
+}
+
+function storeTelegramOffset(lastUpdateId: number) {
+  stmtUpsertTelegramOffset.run(lastUpdateId, Date.now());
+}
+
+function extractTelegramMessage(update: TelegramUpdate): TelegramIncomingMessage | null {
+  const candidate = update.message ?? update.edited_message;
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  return candidate;
+}
+
+async function fetchTelegramUpdates(offset: number): Promise<TelegramUpdate[]> {
+  const response = await fetch(`${telegramApiBaseUrl}/bot${telegramBotToken}/getUpdates`, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({
+      offset,
+      timeout: Math.max(1, Math.trunc(telegramPollTimeoutSec)),
+      allowed_updates: ["message", "edited_message"],
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`telegram getUpdates failed (${response.status})`);
+  }
+  const json = (await response.json()) as { ok?: boolean; result?: unknown };
+  if (json.ok !== true || !Array.isArray(json.result)) {
+    throw new Error("telegram getUpdates returned invalid payload");
+  }
+  return json.result as TelegramUpdate[];
+}
+
+async function bootstrapTelegramOffsetIfNeeded() {
+  if (!telegramBootstrapLatest) {
+    return;
+  }
+  const current = resolveStoredTelegramOffset();
+  if (current > 0) {
+    return;
+  }
+  const response = await fetch(`${telegramApiBaseUrl}/bot${telegramBotToken}/getUpdates`, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({
+      timeout: 0,
+      limit: 1,
+      allowed_updates: ["message", "edited_message"],
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`telegram bootstrap getUpdates failed (${response.status})`);
+  }
+  const json = (await response.json()) as { ok?: boolean; result?: unknown };
+  if (json.ok !== true || !Array.isArray(json.result) || json.result.length === 0) {
+    return;
+  }
+  const lastUpdate = json.result[json.result.length - 1] as TelegramUpdate;
+  const updateId =
+    typeof lastUpdate.update_id === "number" && Number.isFinite(lastUpdate.update_id)
+      ? Math.trunc(lastUpdate.update_id)
+      : 0;
+  if (updateId > 0) {
+    storeTelegramOffset(updateId);
+  }
+}
+
+async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
+  const updateId =
+    typeof update.update_id === "number" && Number.isFinite(update.update_id)
+      ? Math.trunc(update.update_id)
+      : 0;
+  if (updateId <= 0) {
+    return;
+  }
+
+  const message = extractTelegramMessage(update);
+  if (!message) {
+    return;
+  }
+
+  const chatId =
+    typeof message.chat?.id === "number" && Number.isFinite(message.chat.id)
+      ? String(Math.trunc(message.chat.id))
+      : "";
+  if (!chatId) {
+    return;
+  }
+  const topicId = readPositiveInt(message.message_thread_id);
+  const body = readNonEmptyString(message.text) ?? readNonEmptyString(message.caption);
+  const pairingToken = extractPairingTokenFromTelegramMessage(message);
+  const binding = resolveTelegramBindingForIncoming(chatId, topicId);
+  if (!binding) {
+    if (!pairingToken) {
+      if (isTelegramCommandText(body)) {
+        try {
+          await sendTelegramPairingNotice({
+            chatId,
+            topicId,
+            text: unpairedHintText,
+          });
+        } catch (error) {
+          log({
+            type: "telegram_unpaired_command_notice_error",
+            updateId,
+            error: String(error),
+          });
+        }
+      }
+      return;
+    }
+    const claimed = claimTelegramPairingToken({
+      token: pairingToken,
+      chatId,
+      topicId,
+    });
+    if (!claimed) {
+      try {
+        await sendTelegramPairingNotice({
+          chatId,
+          topicId,
+          text: pairingInvalidText,
+        });
+      } catch (error) {
+        log({
+          type: "telegram_pairing_invalid_notice_error",
+          updateId,
+          error: String(error),
+        });
+      }
+      log({
+        type: "telegram_pairing_token_invalid",
+        updateId,
+        chatId,
+        topicId: topicId ?? null,
+      });
+      return;
+    }
+
+    try {
+      await sendTelegramPairingNotice({
+        chatId,
+        topicId,
+        text: pairingSuccessText,
+      });
+    } catch (error) {
+      log({
+        type: "telegram_pairing_notice_error",
+        tenantId: claimed.tenantId,
+        updateId,
+        error: String(error),
+      });
+    }
+    log({
+      type: "telegram_pairing_token_claimed",
+      tenantId: claimed.tenantId,
+      updateId,
+      routeKey: claimed.routeKey,
+      sessionKey: claimed.sessionKey,
+    });
+    return;
+  }
+  if (pairingToken) {
+    log({
+      type: "telegram_pairing_token_ignored_bound_route",
+      tenantId: binding.tenantId,
+      updateId,
+      routeKey: binding.routeKey,
+    });
+    return;
+  }
+
+  const target = tenantInboundTargets.get(binding.tenantId);
+  if (!target) {
+    log({
+      type: "telegram_inbound_drop_no_target",
+      tenantId: binding.tenantId,
+      updateId,
+      routeKey: binding.routeKey,
+    });
+    return;
+  }
+
+  const inboundMedia = await extractTelegramInboundMedia({ message, updateId });
+  const forwardedBody = body ?? "";
+  if (!forwardedBody && inboundMedia.attachments.length === 0) {
+    return;
+  }
+  const messageId =
+    typeof message.message_id === "number" && Number.isFinite(message.message_id)
+      ? String(Math.trunc(message.message_id))
+      : `tg-msg:${updateId}`;
+  const fromId =
+    typeof message.from?.id === "number" && Number.isFinite(message.from.id)
+      ? String(Math.trunc(message.from.id))
+      : "unknown";
+  const timestampMs =
+    typeof message.date === "number" && Number.isFinite(message.date)
+      ? Math.trunc(message.date) * 1_000
+      : Date.now();
+  const chatType = message.chat?.type === "private" ? "direct" : "group";
+
+  const existingRoute = stmtSelectSessionKeyByBinding.get(
+    binding.tenantId,
+    "telegram",
+    binding.bindingId,
+  ) as { session_key?: unknown } | undefined;
+  const sessionKey =
+    (typeof existingRoute?.session_key === "string" && existingRoute.session_key.trim()) ||
+    deriveTelegramSessionKey(chatId, topicId);
+
+  stmtUpsertSessionRoute.run(
+    binding.tenantId,
+    "telegram",
+    sessionKey,
+    binding.bindingId,
+    JSON.stringify({ routeKey: binding.routeKey }),
+    Date.now(),
+  );
+
+  const payload = {
+    eventId: `tg:${updateId}`,
+    channel: "telegram",
+    sessionKey,
+    body: forwardedBody,
+    from: `telegram:${fromId}`,
+    to: `telegram:${chatId}`,
+    accountId: "default",
+    chatType,
+    messageId,
+    timestampMs,
+    threadId: topicId,
+    channelData: {
+      accountId: "default",
+      messageId,
+      chatId,
+      topicId: topicId ?? null,
+      routeKey: binding.routeKey,
+      updateId,
+      telegram: {
+        media: inboundMedia.media,
+        rawMessage: message,
+        rawUpdate: update,
+      },
+    },
+    ...(inboundMedia.attachments.length > 0 ? { attachments: inboundMedia.attachments } : {}),
+  };
+
+  const response = await fetch(target.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${target.token}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(target.timeoutMs),
+  });
+
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
+  }
+
+  log({
+    type: "telegram_inbound_forwarded",
+    tenantId: binding.tenantId,
+    sessionKey,
+    updateId,
+    messageId,
+  });
+}
+
+async function runTelegramInboundLoop() {
+  if (!telegramInboundEnabled) {
+    return;
+  }
+
+  try {
+    await bootstrapTelegramOffsetIfNeeded();
+  } catch (error) {
+    log({ type: "telegram_inbound_bootstrap_error", error: String(error) });
+  }
+
+  let running = true;
+  process.on("SIGINT", () => {
+    running = false;
+  });
+  process.on("SIGTERM", () => {
+    running = false;
+  });
+
+  while (running) {
+    try {
+      const offset = resolveStoredTelegramOffset() + 1;
+      const updates = await fetchTelegramUpdates(offset);
+      for (const update of updates) {
+        const updateId =
+          typeof update.update_id === "number" && Number.isFinite(update.update_id)
+            ? Math.trunc(update.update_id)
+            : 0;
+        if (updateId <= 0) {
+          continue;
+        }
+        try {
+          await forwardTelegramUpdateToTenant(update);
+        } catch (error) {
+          log({ type: "telegram_inbound_forward_error", updateId, error: String(error) });
+        } finally {
+          storeTelegramOffset(updateId);
+        }
+      }
+    } catch (error) {
+      log({ type: "telegram_inbound_poll_error", error: String(error) });
+      await new Promise((resolveSleep) =>
+        setTimeout(resolveSleep, Math.max(100, Math.trunc(telegramPollRetryMs))),
+      );
+    }
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -715,6 +1756,25 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && pathname === "/v1/pairings") {
       const result = listPairingsForTenant(tenant);
+      sendJson(res, result.statusCode, result.payload);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/v1/pairings/token") {
+      const body = await readBody<Record<string, unknown>>(req);
+      const channel = normalizeChannel(body.channel);
+      if (!channel) {
+        sendJson(res, 400, { ok: false, error: "channel required" });
+        return;
+      }
+      const sessionKey = readNonEmptyString(body.sessionKey) ?? undefined;
+      const ttlSec = readPositiveInt(body.ttlSec);
+      const result = issuePairingTokenForTenant({
+        tenant,
+        channel,
+        sessionKey,
+        ttlSec,
+      });
       sendJson(res, result.statusCode, result.payload);
       return;
     }
@@ -955,4 +2015,16 @@ server.listen(port, host, () => {
     pairingCodeSeedCount: pairingCodeSeeds.length,
   });
   console.log(`mux server listening on http://${host}:${port}`);
+  if (telegramInboundEnabled) {
+    log({
+      type: "telegram_inbound_started",
+      tenantTargetCount: tenantInboundTargets.size,
+      pollTimeoutSec: Math.max(1, Math.trunc(telegramPollTimeoutSec)),
+      pollRetryMs: Math.max(100, Math.trunc(telegramPollRetryMs)),
+      bootstrapLatest: telegramBootstrapLatest,
+    });
+    void runTelegramInboundLoop().catch((error) => {
+      log({ type: "telegram_inbound_loop_fatal", error: String(error) });
+    });
+  }
 });

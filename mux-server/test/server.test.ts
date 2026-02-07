@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -15,7 +16,12 @@ type RunningServer = {
   cleanupTempDir: boolean;
 };
 
+type RunningHttpServer = {
+  server: http.Server;
+};
+
 const runningServers: RunningServer[] = [];
+const runningHttpServers: RunningHttpServer[] = [];
 
 async function getFreePort(): Promise<number> {
   return await new Promise((resolvePort, reject) => {
@@ -63,6 +69,7 @@ async function startServer(options?: {
   apiKey?: string;
   tenantsJson?: string;
   pairingCodesJson?: string;
+  extraEnv?: Record<string, string>;
 }): Promise<RunningServer> {
   const port = await getFreePort();
   const tempDir = options?.tempDir ?? mkdtempSync(resolve(tmpdir(), "mux-server-test-"));
@@ -76,6 +83,7 @@ async function startServer(options?: {
       MUX_API_KEY: options?.apiKey ?? "test-key",
       ...(options?.tenantsJson ? { MUX_TENANTS_JSON: options.tenantsJson } : {}),
       ...(options?.pairingCodesJson ? { MUX_PAIRING_CODES_JSON: options.pairingCodesJson } : {}),
+      ...(options?.extraEnv ?? {}),
       MUX_PORT: String(port),
       MUX_LOG_PATH: resolve(tempDir, "mux-server.log"),
       MUX_DB_PATH: dbPath,
@@ -118,11 +126,69 @@ function removeRunningServer(server: RunningServer) {
   }
 }
 
+async function startHttpServer(
+  handler: (req: http.IncomingMessage, res: http.ServerResponse) => void | Promise<void>,
+): Promise<{ url: string; server: RunningHttpServer }> {
+  const port = await getFreePort();
+  const server = http.createServer((req, res) => {
+    void handler(req, res);
+  });
+  await new Promise<void>((resolveServer, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolveServer();
+    });
+  });
+  const running = { server };
+  runningHttpServers.push(running);
+  return { url: `http://127.0.0.1:${port}`, server: running };
+}
+
+async function stopHttpServer(running: RunningHttpServer): Promise<void> {
+  await new Promise<void>((resolveServer) => {
+    running.server.close(() => resolveServer());
+  });
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    return {};
+  }
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+async function waitForCondition(
+  condition: () => boolean,
+  timeoutMs: number,
+  errorMessage: string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) {
+      return;
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 50));
+  }
+  throw new Error(errorMessage);
+}
+
 afterEach(async () => {
   while (runningServers.length > 0) {
     const server = runningServers.pop();
     if (server) {
       await stopServer(server);
+    }
+  }
+  while (runningHttpServers.length > 0) {
+    const server = runningHttpServers.pop();
+    if (server) {
+      await stopHttpServer(server);
     }
   }
 });
@@ -185,6 +251,27 @@ async function unbindPairing(params: { port: number; apiKey: string; bindingId: 
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ bindingId: params.bindingId }),
+  });
+}
+
+async function createPairingToken(params: {
+  port: number;
+  apiKey: string;
+  channel: string;
+  sessionKey?: string;
+  ttlSec?: number;
+}) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/pairings/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      channel: params.channel,
+      ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+      ...(params.ttlSec ? { ttlSec: params.ttlSec } : {}),
+    }),
   });
 }
 
@@ -377,6 +464,491 @@ describe("mux server", () => {
     expect(await outbound.json()).toEqual({
       ok: false,
       error: "text or mediaUrl required",
+    });
+  });
+
+  test("forwards inbound Telegram updates to tenant inbound endpoint", async () => {
+    const inboundRequests: Array<{
+      authorization: string | undefined;
+      payload: Record<string, unknown>;
+    }> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const payload = await readJsonBody(req);
+      const authorization =
+        typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
+      inboundRequests.push({ authorization, payload });
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    let releaseUpdates = false;
+    let hasSentUpdate = false;
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/botdummy-token/getUpdates") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const body = await readJsonBody(req);
+      telegramRequests.push(body);
+      const hasOffset = typeof body.offset === "number";
+      const shouldSend = hasOffset && releaseUpdates && !hasSentUpdate;
+      if (shouldSend) {
+        hasSentUpdate = true;
+      }
+      const result = shouldSend
+        ? [
+            {
+              update_id: 461,
+              message: {
+                message_id: 462,
+                date: 1_700_000_000,
+                text: "hello from mux inbound",
+                from: { id: 1234 },
+                chat: { id: -100555, type: "supergroup" },
+              },
+            },
+          ]
+        : [];
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, result }));
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundToken: "tenant-a-inbound-token",
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-IN-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100555",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_INBOUND_ENABLED: "true",
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-IN-1",
+      sessionKey: "tg:group:-100555",
+    });
+    expect(claim.status).toBe(200);
+    releaseUpdates = true;
+
+    await waitForCondition(
+      () => inboundRequests.length > 0,
+      5_000,
+      "timed out waiting for inbound forward",
+    );
+
+    expect(inboundRequests).toHaveLength(1);
+    expect(inboundRequests[0]?.authorization).toBe("Bearer tenant-a-inbound-token");
+    expect(inboundRequests[0]?.payload).toMatchObject({
+      eventId: "tg:461",
+      channel: "telegram",
+      sessionKey: "tg:group:-100555",
+      body: "hello from mux inbound",
+      from: "telegram:1234",
+      to: "telegram:-100555",
+      accountId: "default",
+      chatType: "group",
+      messageId: "462",
+      channelData: {
+        accountId: "default",
+        messageId: "462",
+        chatId: "-100555",
+        topicId: null,
+        routeKey: "telegram:default:chat:-100555",
+        updateId: 461,
+      },
+    });
+    expect(
+      telegramRequests.some(
+        (request) => typeof request.offset === "number" && Number(request.offset) >= 1,
+      ),
+    ).toBe(true);
+  });
+
+  test("forwards media-only Telegram photo updates with attachment payload", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5ZfXkAAAAASUVORK5CYII=";
+    const pngBuffer = Buffer.from(pngBase64, "base64");
+    let releaseUpdates = false;
+    let hasSentUpdate = false;
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/getUpdates") {
+        const body = await readJsonBody(req);
+        const hasOffset = typeof body.offset === "number";
+        const shouldSend = hasOffset && releaseUpdates && !hasSentUpdate;
+        if (shouldSend) {
+          hasSentUpdate = true;
+        }
+        const result = shouldSend
+          ? [
+              {
+                update_id: 4901,
+                message: {
+                  message_id: 9001,
+                  date: 1_700_000_100,
+                  from: { id: 1234 },
+                  chat: { id: 999, type: "private" },
+                  photo: [
+                    { file_id: "small-photo-id", width: 16, height: 16, file_size: 100 },
+                    { file_id: "best-photo-id", width: 1024, height: 1024, file_size: 4096 },
+                  ],
+                },
+              },
+            ]
+          : [];
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/botdummy-token/getFile") {
+        const body = await readJsonBody(req);
+        if (body.file_id !== "best-photo-id") {
+          res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result: { file_path: "photos/cat.png" } }));
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/file/botdummy-token/photos/cat.png") {
+        res.writeHead(200, {
+          "content-type": "image/png",
+          "content-length": String(pngBuffer.byteLength),
+        });
+        res.end(pngBuffer);
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundToken: "tenant-a-inbound-token",
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-IN-MEDIA-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:999",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_INBOUND_ENABLED: "true",
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-IN-MEDIA-1",
+      sessionKey: "tg:chat:999",
+    });
+    expect(claim.status).toBe(200);
+
+    releaseUpdates = true;
+    await waitForCondition(
+      () => inboundRequests.length > 0,
+      5_000,
+      "timed out waiting for media-only inbound forward",
+    );
+
+    expect(inboundRequests).toHaveLength(1);
+    const payload = inboundRequests[0] as Record<string, unknown>;
+    expect(payload.channel).toBe("telegram");
+    expect(payload.sessionKey).toBe("tg:chat:999");
+    expect(payload.body).toBe("");
+    expect(payload.messageId).toBe("9001");
+
+    const attachments = Array.isArray(payload.attachments)
+      ? (payload.attachments as Array<Record<string, unknown>>)
+      : [];
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]?.mimeType).toBe("image/png");
+    expect(typeof attachments[0]?.content).toBe("string");
+    expect(String(attachments[0]?.content)).toBe(pngBase64);
+
+    const channelData =
+      payload.channelData && typeof payload.channelData === "object"
+        ? (payload.channelData as Record<string, unknown>)
+        : {};
+    const telegramData =
+      channelData.telegram && typeof channelData.telegram === "object"
+        ? (channelData.telegram as Record<string, unknown>)
+        : {};
+    const media = Array.isArray(telegramData.media)
+      ? (telegramData.media as Array<Record<string, unknown>>)
+      : [];
+    expect(media).toHaveLength(1);
+    expect(media[0]?.kind).toBe("photo");
+    expect(media[0]?.fileId).toBe("best-photo-id");
+    expect(media[0]?.filePath).toBe("photos/cat.png");
+    expect(channelData.telegram).toBeDefined();
+    const rawTelegram =
+      channelData.telegram && typeof channelData.telegram === "object"
+        ? (channelData.telegram as Record<string, unknown>)
+        : {};
+    const rawMessage =
+      rawTelegram.rawMessage && typeof rawTelegram.rawMessage === "object"
+        ? (rawTelegram.rawMessage as Record<string, unknown>)
+        : {};
+    expect(rawMessage.message_id).toBe(9001);
+    const rawUpdate =
+      rawTelegram.rawUpdate && typeof rawTelegram.rawUpdate === "object"
+        ? (rawTelegram.rawUpdate as Record<string, unknown>)
+        : {};
+    expect(rawUpdate.update_id).toBe(4901);
+  });
+
+  test("pairs from dashboard token sent via /start and forwards later message", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const pendingUpdates: Array<Record<string, unknown>> = [];
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      if (req.url === "/botdummy-token/getUpdates") {
+        const body = await readJsonBody(req);
+        const offset = typeof body.offset === "number" ? Number(body.offset) : 0;
+        const deliverable = pendingUpdates
+          .map((entry) => {
+            const updateId = Number(entry.update_id ?? 0);
+            return { entry, updateId };
+          })
+          .filter((entry) => Number.isFinite(entry.updateId) && entry.updateId >= offset)
+          .sort((a, b) => a.updateId - b.updateId);
+        const result = deliverable.map((entry) => entry.entry);
+        if (deliverable.length > 0) {
+          const maxDelivered = deliverable[deliverable.length - 1]?.updateId ?? 0;
+          for (let i = pendingUpdates.length - 1; i >= 0; i -= 1) {
+            const updateId = Number(pendingUpdates[i]?.update_id ?? 0);
+            if (Number.isFinite(updateId) && updateId <= maxDelivered) {
+              pendingUpdates.splice(i, 1);
+            }
+          }
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+      if (req.url === "/botdummy-token/sendMessage") {
+        sentMessages.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: {
+              message_id: 901,
+              chat: { id: -100777, type: "supergroup", title: "pairing-test" },
+            },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundToken: "tenant-a-inbound-token",
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_INBOUND_ENABLED: "true",
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+        MUX_TELEGRAM_BOT_USERNAME: "dummy_bot",
+        MUX_PAIRING_INVALID_TEXT: "Invalid token. Request a new link.",
+        MUX_UNPAIRED_HINT_TEXT: "This chat is not paired.",
+      },
+    });
+
+    const tokenResponse = await createPairingToken({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      channel: "telegram",
+      sessionKey: "tg:group:-100777:thread:2",
+      ttlSec: 120,
+    });
+    expect(tokenResponse.status).toBe(200);
+    const tokenBody = (await tokenResponse.json()) as {
+      token: string;
+      deepLink?: string | null;
+      startCommand?: string | null;
+    };
+    expect(tokenBody.token.startsWith("mpt_")).toBe(true);
+    expect(tokenBody.deepLink).toContain(tokenBody.token);
+    expect(tokenBody.startCommand).toContain(tokenBody.token);
+
+    pendingUpdates.push({
+      update_id: 3001,
+      message: {
+        message_id: 8001,
+        text: `/start ${tokenBody.token}`,
+        date: 1_700_000_000,
+        from: { id: 1234 },
+        chat: { id: -100777, type: "supergroup" },
+        message_thread_id: 2,
+      },
+    });
+    pendingUpdates.push({
+      update_id: 3002,
+      message: {
+        message_id: 8002,
+        text: "hello after pair",
+        date: 1_700_000_001,
+        from: { id: 1234 },
+        chat: { id: -100777, type: "supergroup" },
+        message_thread_id: 2,
+      },
+    });
+    pendingUpdates.push({
+      update_id: 3003,
+      message: {
+        message_id: 8003,
+        text: `/start ${tokenBody.token}`,
+        date: 1_700_000_002,
+        from: { id: 1234 },
+        chat: { id: 999, type: "private" },
+      },
+    });
+    pendingUpdates.push({
+      update_id: 3004,
+      message: {
+        message_id: 8004,
+        text: "/help",
+        date: 1_700_000_003,
+        from: { id: 1234 },
+        chat: { id: 999, type: "private" },
+      },
+    });
+
+    await waitForCondition(
+      () => inboundRequests.length >= 1 && sentMessages.length >= 3,
+      5_000,
+      "timed out waiting for post-pair inbound forward and notices",
+    );
+
+    expect(inboundRequests).toHaveLength(1);
+    expect(inboundRequests[0]).toMatchObject({
+      channel: "telegram",
+      sessionKey: "tg:group:-100777:thread:2",
+      body: "hello after pair",
+      messageId: "8002",
+      threadId: 2,
+      channelData: {
+        chatId: "-100777",
+        topicId: 2,
+        routeKey: "telegram:default:chat:-100777:topic:2",
+      },
+    });
+
+    expect(sentMessages.some((message) => String(message.text ?? "").includes("Paired"))).toBe(
+      true,
+    );
+    expect(
+      sentMessages.some(
+        (message) =>
+          String(message.chat_id ?? "") === "999" &&
+          String(message.text ?? "").includes("Invalid token"),
+      ),
+    ).toBe(true);
+    expect(
+      sentMessages.some(
+        (message) =>
+          String(message.chat_id ?? "") === "999" &&
+          String(message.text ?? "").includes("This chat is not paired"),
+      ),
+    ).toBe(true);
+
+    const pairings = await listPairings({ port: server.port, apiKey: "tenant-a-key" });
+    expect(pairings.status).toBe(200);
+    expect(await pairings.json()).toEqual({
+      items: [
+        {
+          bindingId: expect.stringContaining("bind_"),
+          channel: "telegram",
+          scope: "topic",
+          routeKey: "telegram:default:chat:-100777:topic:2",
+        },
+      ],
     });
   });
 
