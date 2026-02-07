@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -33,10 +33,33 @@ type TenantIdentity = {
   name: string;
 };
 
+type PairingCodeSeed = {
+  code: string;
+  channel: string;
+  routeKey: string;
+  scope: string;
+  expiresAtMs: number;
+};
+
 type CachedIdempotencyRow = {
   request_fingerprint: string;
   response_status: number;
   response_body: string;
+};
+
+type PairingCodeRow = {
+  channel: string;
+  route_key: string;
+  scope: string;
+  expires_at_ms: number;
+  claimed_by_tenant_id: string | null;
+};
+
+type ActiveBindingRow = {
+  binding_id: string;
+  channel: string;
+  scope: string;
+  route_key: string;
 };
 
 const host = process.env.MUX_HOST || "127.0.0.1";
@@ -61,12 +84,21 @@ try {
   process.exit(1);
 }
 
+let pairingCodeSeeds: PairingCodeSeed[] = [];
+try {
+  pairingCodeSeeds = resolvePairingCodeSeeds();
+} catch (error) {
+  console.error(`failed to resolve pairing code seeds: ${String(error)}`);
+  process.exit(1);
+}
+
 fs.mkdirSync(path.dirname(logPath), { recursive: true });
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 const db = new DatabaseSync(dbPath);
 initializeDatabase(db);
 seedTenants(db, tenantSeeds);
+seedPairingCodes(db, pairingCodeSeeds);
 
 const stmtSelectTenantByHash = db.prepare(`
   SELECT id, name
@@ -103,6 +135,56 @@ const stmtUpsertIdempotency = db.prepare(`
     response_status = excluded.response_status,
     response_body = excluded.response_body,
     expires_at_ms = excluded.expires_at_ms
+`);
+
+const stmtSelectPairingCodeByCode = db.prepare(`
+  SELECT channel, route_key, scope, expires_at_ms, claimed_by_tenant_id
+  FROM pairing_codes
+  WHERE code = ?
+  LIMIT 1
+`);
+
+const stmtClaimPairingCode = db.prepare(`
+  UPDATE pairing_codes
+  SET claimed_by_tenant_id = ?, claimed_at_ms = ?
+  WHERE code = ? AND claimed_by_tenant_id IS NULL AND expires_at_ms > ?
+`);
+
+const stmtInsertBinding = db.prepare(`
+  INSERT INTO bindings (
+    binding_id,
+    tenant_id,
+    channel,
+    scope,
+    route_key,
+    status,
+    created_at_ms,
+    updated_at_ms
+  )
+  VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+`);
+
+const stmtListActiveBindingsByTenant = db.prepare(`
+  SELECT binding_id, channel, scope, route_key
+  FROM bindings
+  WHERE tenant_id = ? AND status = 'active'
+  ORDER BY created_at_ms DESC
+`);
+
+const stmtUnbindActiveBinding = db.prepare(`
+  UPDATE bindings
+  SET status = 'inactive', updated_at_ms = ?
+  WHERE binding_id = ? AND tenant_id = ? AND status = 'active'
+`);
+
+const stmtDeleteSessionRoutesByBinding = db.prepare(`
+  DELETE FROM session_routes
+  WHERE binding_id = ? AND tenant_id = ?
+`);
+
+const stmtInsertAuditLog = db.prepare(`
+  INSERT INTO audit_logs (tenant_id, event_type, payload_json, created_at_ms)
+  VALUES (?, ?, ?, ?)
 `);
 
 const idempotencyInflight = new Map<string, InflightEntry>();
@@ -181,6 +263,59 @@ function resolveTenantSeeds(): TenantSeed[] {
     seenIds.add(id);
     seenHashes.add(keyHash);
     seeds.push({ id, name, apiKey });
+  }
+
+  return seeds;
+}
+
+function resolvePairingCodeSeeds(): PairingCodeSeed[] {
+  const raw = process.env.MUX_PAIRING_CODES_JSON?.trim();
+  if (!raw) {
+    return [];
+  }
+
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("MUX_PAIRING_CODES_JSON must be a JSON array");
+  }
+
+  const now = Date.now();
+  const seeds: PairingCodeSeed[] = [];
+  const seenCodes = new Set<string>();
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") {
+      throw new Error("each pairing code entry must be an object");
+    }
+    const candidate = item as Record<string, unknown>;
+    const code = typeof candidate.code === "string" ? candidate.code.trim() : "";
+    const channel = typeof candidate.channel === "string" ? candidate.channel.trim() : "";
+    const routeKey = typeof candidate.routeKey === "string" ? candidate.routeKey.trim() : "";
+    const scope = typeof candidate.scope === "string" ? candidate.scope.trim() : "";
+    const expiresAtMs =
+      typeof candidate.expiresAtMs === "number" &&
+      Number.isFinite(candidate.expiresAtMs) &&
+      candidate.expiresAtMs > 0
+        ? Math.trunc(candidate.expiresAtMs)
+        : now + 24 * 60 * 60 * 1000;
+
+    if (!code) {
+      throw new Error("pairing code entry requires code");
+    }
+    if (!channel) {
+      throw new Error(`pairing code ${code} requires channel`);
+    }
+    if (!routeKey) {
+      throw new Error(`pairing code ${code} requires routeKey`);
+    }
+    if (!scope) {
+      throw new Error(`pairing code ${code} requires scope`);
+    }
+    if (seenCodes.has(code)) {
+      throw new Error(`duplicate pairing code seed: ${code}`);
+    }
+
+    seenCodes.add(code);
+    seeds.push({ code, channel, routeKey, scope, expiresAtMs });
   }
 
   return seeds;
@@ -274,6 +409,28 @@ function seedTenants(database: DatabaseSync, tenants: TenantSeed[]) {
   }
 }
 
+function seedPairingCodes(database: DatabaseSync, codes: PairingCodeSeed[]) {
+  if (codes.length === 0) {
+    return;
+  }
+  const insert = database.prepare(`
+    INSERT INTO pairing_codes (
+      code,
+      channel,
+      route_key,
+      scope,
+      expires_at_ms,
+      claimed_by_tenant_id,
+      claimed_at_ms
+    )
+    VALUES (?, ?, ?, ?, ?, NULL, NULL)
+    ON CONFLICT(code) DO NOTHING
+  `);
+  for (const code of codes) {
+    insert.run(code.code, code.channel, code.routeKey, code.scope, code.expiresAtMs);
+  }
+}
+
 function log(entry: Record<string, unknown>) {
   fs.appendFileSync(logPath, `${new Date().toISOString()} ${JSON.stringify(entry)}\n`);
 }
@@ -298,16 +455,16 @@ function readPositiveInt(value: unknown): number | undefined {
   return undefined;
 }
 
-async function readBody(req: IncomingMessage): Promise<MuxPayload> {
+async function readBody<T extends object>(req: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) {
-    return {};
+    return {} as T;
   }
-  return JSON.parse(raw) as MuxPayload;
+  return JSON.parse(raw) as T;
 }
 
 async function sendTelegram(method: "sendMessage" | "sendPhoto", body: Record<string, unknown>) {
@@ -367,15 +524,97 @@ function storeIdempotency(params: {
   );
 }
 
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function writeAuditLog(
+  tenantId: string,
+  eventType: string,
+  payload: Record<string, unknown>,
+  timestampMs = Date.now(),
+) {
+  stmtInsertAuditLog.run(tenantId, eventType, JSON.stringify(payload), timestampMs);
+}
+
+function claimPairingForTenant(tenant: TenantIdentity, code: string) {
+  const now = Date.now();
+  const row = stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
+  if (!row || Number(row.expires_at_ms) <= now) {
+    return { statusCode: 404, payload: { ok: false, error: "pairing code not found or expired" } };
+  }
+  if (row.claimed_by_tenant_id) {
+    return { statusCode: 409, payload: { ok: false, error: "pairing code already claimed" } };
+  }
+
+  const claimResult = stmtClaimPairingCode.run(tenant.id, now, code, now);
+  if (claimResult.changes === 0) {
+    const postCheck = stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
+    if (!postCheck || Number(postCheck.expires_at_ms) <= now) {
+      return {
+        statusCode: 404,
+        payload: { ok: false, error: "pairing code not found or expired" },
+      };
+    }
+    return { statusCode: 409, payload: { ok: false, error: "pairing code already claimed" } };
+  }
+
+  const bindingId = `bind_${randomUUID()}`;
+  stmtInsertBinding.run(
+    bindingId,
+    tenant.id,
+    String(row.channel),
+    String(row.scope),
+    String(row.route_key),
+    now,
+    now,
+  );
+  writeAuditLog(tenant.id, "pairing_claimed", { bindingId, code, routeKey: row.route_key }, now);
+  return {
+    statusCode: 200,
+    payload: {
+      bindingId,
+      channel: String(row.channel),
+      scope: String(row.scope),
+      routeKey: String(row.route_key),
+    },
+  };
+}
+
+function listPairingsForTenant(tenant: TenantIdentity) {
+  const rows = stmtListActiveBindingsByTenant.all(tenant.id) as ActiveBindingRow[];
+  return {
+    statusCode: 200,
+    payload: {
+      items: rows.map((row) => ({
+        bindingId: String(row.binding_id),
+        channel: String(row.channel),
+        scope: String(row.scope),
+        routeKey: String(row.route_key),
+      })),
+    },
+  };
+}
+
+function unbindPairingForTenant(tenant: TenantIdentity, bindingId: string) {
+  const now = Date.now();
+  const unbindResult = stmtUnbindActiveBinding.run(now, bindingId, tenant.id);
+  if (unbindResult.changes === 0) {
+    return { statusCode: 404, payload: { ok: false, error: "binding not found" } };
+  }
+
+  stmtDeleteSessionRoutesByBinding.run(bindingId, tenant.id);
+  writeAuditLog(tenant.id, "pairing_unbound", { bindingId }, now);
+  return { statusCode: 200, payload: { ok: true } };
+}
+
 const server = http.createServer(async (req, res) => {
   try {
-    if (req.url === "/health") {
-      sendJson(res, 200, { ok: true });
-      return;
-    }
+    const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+    const pathname = requestUrl.pathname;
 
-    if (req.method !== "POST" || req.url !== "/v1/mux/outbound/send") {
-      sendJson(res, 404, { ok: false, error: "not found" });
+    if (pathname === "/health") {
+      sendJson(res, 200, { ok: true });
       return;
     }
 
@@ -385,7 +624,42 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const payload = await readBody(req);
+    if (req.method === "GET" && pathname === "/v1/pairings") {
+      const result = listPairingsForTenant(tenant);
+      sendJson(res, result.statusCode, result.payload);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/v1/pairings/claim") {
+      const body = await readBody<Record<string, unknown>>(req);
+      const code = readNonEmptyString(body.code);
+      if (!code) {
+        sendJson(res, 400, { ok: false, error: "code required" });
+        return;
+      }
+      const result = claimPairingForTenant(tenant, code);
+      sendJson(res, result.statusCode, result.payload);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/v1/pairings/unbind") {
+      const body = await readBody<Record<string, unknown>>(req);
+      const bindingId = readNonEmptyString(body.bindingId);
+      if (!bindingId) {
+        sendJson(res, 400, { ok: false, error: "bindingId required" });
+        return;
+      }
+      const result = unbindPairingForTenant(tenant, bindingId);
+      sendJson(res, result.statusCode, result.payload);
+      return;
+    }
+
+    if (req.method !== "POST" || pathname !== "/v1/mux/outbound/send") {
+      sendJson(res, 404, { ok: false, error: "not found" });
+      return;
+    }
+
+    const payload = await readBody<MuxPayload>(req);
     const idempotencyKey =
       typeof req.headers["idempotency-key"] === "string"
         ? req.headers["idempotency-key"]
@@ -556,6 +830,7 @@ server.listen(port, host, () => {
     port,
     dbPath,
     tenantCount: tenantSeeds.length,
+    pairingCodeSeedCount: pairingCodeSeeds.length,
   });
   console.log(`mux server listening on http://${host}:${port}`);
 });

@@ -62,6 +62,7 @@ async function startServer(options?: {
   dbPath?: string;
   apiKey?: string;
   tenantsJson?: string;
+  pairingCodesJson?: string;
 }): Promise<RunningServer> {
   const port = await getFreePort();
   const tempDir = options?.tempDir ?? mkdtempSync(resolve(tmpdir(), "mux-server-test-"));
@@ -74,6 +75,7 @@ async function startServer(options?: {
       TELEGRAM_BOT_TOKEN: "dummy-token",
       MUX_API_KEY: options?.apiKey ?? "test-key",
       ...(options?.tenantsJson ? { MUX_TENANTS_JSON: options.tenantsJson } : {}),
+      ...(options?.pairingCodesJson ? { MUX_PAIRING_CODES_JSON: options.pairingCodesJson } : {}),
       MUX_PORT: String(port),
       MUX_LOG_PATH: resolve(tempDir, "mux-server.log"),
       MUX_DB_PATH: dbPath,
@@ -150,6 +152,34 @@ async function sendWithIdempotency(params: {
   });
 }
 
+async function claimPairing(params: { port: number; apiKey: string; code: string }) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/pairings/claim`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ code: params.code }),
+  });
+}
+
+async function listPairings(params: { port: number; apiKey: string }) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/pairings`, {
+    headers: { Authorization: `Bearer ${params.apiKey}` },
+  });
+}
+
+async function unbindPairing(params: { port: number; apiKey: string; bindingId: string }) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/pairings/unbind`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ bindingId: params.bindingId }),
+  });
+}
+
 describe("mux server", () => {
   test("health endpoint responds", async () => {
     const server = await startServer();
@@ -202,6 +232,93 @@ describe("mux server", () => {
     });
     expect(legacy.status).toBe(401);
     expect(await legacy.json()).toEqual({ ok: false, error: "unauthorized" });
+  });
+
+  test("supports pairing claim/list/unbind", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    const claim = await claimPairing({ port: server.port, apiKey: "tenant-a-key", code: "PAIR-1" });
+    expect(claim.status).toBe(200);
+    const claimBody = (await claim.json()) as {
+      bindingId: string;
+      channel: string;
+      scope: string;
+      routeKey: string;
+    };
+    expect(claimBody.channel).toBe("telegram");
+    expect(claimBody.scope).toBe("chat");
+    expect(claimBody.routeKey).toBe("telegram:default:chat:-100123");
+    expect(claimBody.bindingId).toContain("bind_");
+
+    const listedBeforeUnbind = await listPairings({ port: server.port, apiKey: "tenant-a-key" });
+    expect(listedBeforeUnbind.status).toBe(200);
+    expect(await listedBeforeUnbind.json()).toEqual({
+      items: [
+        {
+          bindingId: claimBody.bindingId,
+          channel: "telegram",
+          scope: "chat",
+          routeKey: "telegram:default:chat:-100123",
+        },
+      ],
+    });
+
+    const unbind = await unbindPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      bindingId: claimBody.bindingId,
+    });
+    expect(unbind.status).toBe(200);
+    expect(await unbind.json()).toEqual({ ok: true });
+
+    const listedAfterUnbind = await listPairings({ port: server.port, apiKey: "tenant-a-key" });
+    expect(listedAfterUnbind.status).toBe(200);
+    expect(await listedAfterUnbind.json()).toEqual({ items: [] });
+  });
+
+  test("rejects duplicate pairing claim", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        { id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" },
+        { id: "tenant-b", name: "Tenant B", apiKey: "tenant-b-key" },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-2",
+          channel: "discord",
+          routeKey: "discord:default:guild:123456",
+          scope: "guild",
+        },
+      ]),
+    });
+
+    const firstClaim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-2",
+    });
+    expect(firstClaim.status).toBe(200);
+
+    const secondClaim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-b-key",
+      code: "PAIR-2",
+    });
+    expect(secondClaim.status).toBe(409);
+    expect(await secondClaim.json()).toEqual({
+      ok: false,
+      error: "pairing code already claimed",
+    });
   });
 
   test("idempotency replays same payload and rejects mismatched payload", async () => {

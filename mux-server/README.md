@@ -5,6 +5,9 @@ This directory contains a standalone TypeScript mux server for staged rollout an
 ## Scope
 
 - Implements `GET /health`
+- Implements `GET /v1/pairings`
+- Implements `POST /v1/pairings/claim`
+- Implements `POST /v1/pairings/unbind`
 - Implements `POST /v1/mux/outbound/send`
 - Supports Telegram outbound via Bot API:
   - `sendMessage` (text)
@@ -68,6 +71,7 @@ node --import tsx mux-server/src/server.ts
 - `MUX_LOG_PATH` (default `./mux-server/logs/mux-server.log`)
 - `MUX_DB_PATH` (default `./mux-server/data/mux-server.sqlite`)
 - `MUX_IDEMPOTENCY_TTL_MS` (default `600000`)
+- `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
 
 `MUX_TENANTS_JSON` format:
 
@@ -75,6 +79,19 @@ node --import tsx mux-server/src/server.ts
 [
   { "id": "tenant-a", "name": "Tenant A", "apiKey": "tenant-a-key" },
   { "id": "tenant-b", "name": "Tenant B", "apiKey": "tenant-b-key" }
+]
+```
+
+`MUX_PAIRING_CODES_JSON` format:
+
+```json
+[
+  {
+    "code": "PAIR-1",
+    "channel": "telegram",
+    "routeKey": "telegram:default:chat:-100123",
+    "scope": "chat"
+  }
 ]
 ```
 
@@ -113,6 +130,72 @@ Behavior:
 - If `mediaUrl` is present, server uses Telegram `sendPhoto` and `text` becomes caption.
 - `threadId` maps to Telegram `message_thread_id`.
 - `replyToId` maps to Telegram `reply_to_message_id`.
+
+### `POST /v1/pairings/claim`
+
+Headers:
+
+- `Authorization: Bearer <tenant_api_key>`
+
+Body:
+
+```json
+{
+  "code": "PAIR-1"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "bindingId": "bind_...",
+  "channel": "telegram",
+  "scope": "chat",
+  "routeKey": "telegram:default:chat:-100123"
+}
+```
+
+### `GET /v1/pairings`
+
+Headers:
+
+- `Authorization: Bearer <tenant_api_key>`
+
+Response `200`:
+
+```json
+{
+  "items": [
+    {
+      "bindingId": "bind_...",
+      "channel": "telegram",
+      "scope": "chat",
+      "routeKey": "telegram:default:chat:-100123"
+    }
+  ]
+}
+```
+
+### `POST /v1/pairings/unbind`
+
+Headers:
+
+- `Authorization: Bearer <tenant_api_key>`
+
+Body:
+
+```json
+{
+  "bindingId": "bind_..."
+}
+```
+
+Response `200`:
+
+```json
+{ "ok": true }
+```
 
 ## Reliability Notes
 
@@ -165,5 +248,7 @@ Current test coverage (`mux-server/test/server.test.ts`):
 - health endpoint responds
 - outbound endpoint rejects unauthorized requests
 - multi-tenant auth via `MUX_TENANTS_JSON`
+- pairing claim/list/unbind flow
+- duplicate pairing claim conflict handling
 - idempotency replay + payload mismatch handling
 - idempotency persistence across process restart
