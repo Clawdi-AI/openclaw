@@ -142,6 +142,10 @@ describe("handleMuxInboundHttpRequest", () => {
             SessionKey?: string;
             MessageSid?: string;
             CommandAuthorized?: boolean;
+            Body?: string;
+            RawBody?: string;
+            CommandBody?: string;
+            ChannelData?: Record<string, unknown>;
           };
           replyOptions?: { images?: unknown[] };
         }
@@ -153,9 +157,76 @@ describe("handleMuxInboundHttpRequest", () => {
       OriginatingTo: "telegram:123",
       SessionKey: "main",
       MessageSid: "mux-msg-1",
+      Body: "hello mux",
+      RawBody: "hello mux",
+      CommandBody: "hello mux",
       CommandAuthorized: true,
     });
+    expect(call?.ctx?.ChannelData).toBeUndefined();
     expect(call?.replyOptions?.images).toBeUndefined();
+  });
+
+  test("passes through channelData without transport mutation", async () => {
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              token: "mux-secret",
+            },
+          },
+        },
+      },
+    });
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer mux-secret",
+      },
+      body: {
+        channel: "discord",
+        sessionKey: "dc:dm:42",
+        to: "discord:dm:42",
+        from: "discord:user:42",
+        body: "hello from dm",
+        messageId: "dc-msg-1",
+        channelData: {
+          routeKey: "discord:default:dm:user:42",
+          discord: {
+            rawMessage: {
+              id: "1234567890",
+              content: "hello from dm",
+            },
+          },
+        },
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    const call = mocks.dispatchInboundMessage.mock.calls[0]?.[0] as
+      | {
+          ctx?: {
+            Body?: string;
+            RawBody?: string;
+            ChannelData?: Record<string, unknown>;
+          };
+        }
+      | undefined;
+    expect(call?.ctx?.Body).toBe("hello from dm");
+    expect(call?.ctx?.RawBody).toBe("hello from dm");
+    expect(call?.ctx?.ChannelData).toEqual({
+      routeKey: "discord:default:dm:user:42",
+      discord: {
+        rawMessage: {
+          id: "1234567890",
+          content: "hello from dm",
+        },
+      },
+    });
   });
 
   test("parses image attachments into replyOptions.images", async () => {

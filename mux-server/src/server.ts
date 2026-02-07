@@ -10,6 +10,7 @@ type MuxPayload = {
   to?: unknown;
   text?: unknown;
   mediaUrl?: unknown;
+  mediaUrls?: unknown;
   replyToId?: unknown;
   threadId?: unknown;
 };
@@ -75,6 +76,7 @@ type ActiveBindingRow = {
 
 type ExistingBindingRow = {
   binding_id: string;
+  status?: string;
 };
 
 type SessionRouteBindingRow = {
@@ -87,10 +89,39 @@ type ActiveBindingLookupRow = {
   binding_id: string;
 };
 
+type ActiveDiscordBindingRow = {
+  tenant_id: string;
+  binding_id: string;
+  route_key: string;
+  status: string;
+};
+
 type TelegramBoundRoute = {
   chatId: string;
   topicId?: number;
 };
+
+type DiscordBoundRoute =
+  | {
+      kind: "dm";
+      userId: string;
+    }
+  | {
+      kind: "guild";
+      guildId: string;
+      channelId?: string;
+      threadId?: string;
+    };
+
+type DiscordOutboundTarget =
+  | {
+      kind: "user";
+      id: string;
+    }
+  | {
+      kind: "channel";
+      id: string;
+    };
 
 type TenantInboundTarget = {
   url: string;
@@ -166,6 +197,21 @@ type TelegramInboundMediaSummary = {
   filePath?: string;
 };
 
+type DiscordInboundAttachment = {
+  type?: string;
+  mimeType?: string;
+  fileName?: string;
+  content: string;
+};
+
+type DiscordInboundMediaSummary = {
+  id?: string;
+  fileName?: string;
+  mimeType?: string;
+  size?: number;
+  url?: string;
+};
+
 type TelegramUpdate = {
   update_id?: number;
   message?: TelegramIncomingMessage;
@@ -175,6 +221,7 @@ type TelegramUpdate = {
 const host = process.env.MUX_HOST || "127.0.0.1";
 const port = Number(process.env.MUX_PORT || 18891);
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+const discordBotToken = process.env.DISCORD_BOT_TOKEN;
 const logPath =
   process.env.MUX_LOG_PATH || path.resolve(process.cwd(), "mux-server", "logs", "mux-server.log");
 const dbPath =
@@ -183,12 +230,21 @@ const idempotencyTtlMs = Number(process.env.MUX_IDEMPOTENCY_TTL_MS || 10 * 60 * 
 const telegramApiBaseUrl = (
   process.env.MUX_TELEGRAM_API_BASE_URL || "https://api.telegram.org"
 ).replace(/\/+$/, "");
+const discordApiBaseUrl = (
+  process.env.MUX_DISCORD_API_BASE_URL || "https://discord.com/api/v10"
+).replace(/\/+$/, "");
 const telegramInboundEnabled = process.env.MUX_TELEGRAM_INBOUND_ENABLED === "true";
 const telegramPollTimeoutSec = Number(process.env.MUX_TELEGRAM_POLL_TIMEOUT_SEC || 25);
 const telegramPollRetryMs = Number(process.env.MUX_TELEGRAM_POLL_RETRY_MS || 1_000);
 const telegramBootstrapLatest = process.env.MUX_TELEGRAM_BOOTSTRAP_LATEST !== "false";
 const telegramInboundMediaMaxBytes = Number(
   process.env.MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
+);
+const discordInboundEnabled = process.env.MUX_DISCORD_INBOUND_ENABLED === "true";
+const discordPollIntervalMs = Number(process.env.MUX_DISCORD_POLL_INTERVAL_MS || 2_000);
+const discordBootstrapLatest = process.env.MUX_DISCORD_BOOTSTRAP_LATEST !== "false";
+const discordInboundMediaMaxBytes = Number(
+  process.env.MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
 const pairingTokenTtlSec = Number(process.env.MUX_PAIRING_TOKEN_TTL_SEC || 15 * 60);
 const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
@@ -203,8 +259,12 @@ const unpairedHintText =
   readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT) ||
   "This chat is not paired yet. Open your dashboard and use a new pairing link.";
 
-if (!telegramBotToken?.trim()) {
-  console.error("TELEGRAM_BOT_TOKEN is required");
+if (telegramInboundEnabled && !telegramBotToken?.trim()) {
+  console.error("TELEGRAM_BOT_TOKEN is required when MUX_TELEGRAM_INBOUND_ENABLED=true");
+  process.exit(1);
+}
+if (discordInboundEnabled && !discordBotToken?.trim()) {
+  console.error("DISCORD_BOT_TOKEN is required when MUX_DISCORD_INBOUND_ENABLED=true");
   process.exit(1);
 }
 
@@ -335,6 +395,26 @@ const stmtInsertBinding = db.prepare(`
   VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
 `);
 
+const stmtInsertPendingBinding = db.prepare(`
+  INSERT INTO bindings (
+    binding_id,
+    tenant_id,
+    channel,
+    scope,
+    route_key,
+    status,
+    created_at_ms,
+    updated_at_ms
+  )
+  VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+`);
+
+const stmtActivatePendingBinding = db.prepare(`
+  UPDATE bindings
+  SET status = 'active', updated_at_ms = ?
+  WHERE binding_id = ? AND tenant_id = ? AND status = 'pending'
+`);
+
 const stmtListActiveBindingsByTenant = db.prepare(`
   SELECT binding_id, channel, scope, route_key
   FROM bindings
@@ -398,11 +478,18 @@ const stmtSelectActiveBindingByRouteKey = db.prepare(`
 `);
 
 const stmtSelectActiveBindingByTenantAndRoute = db.prepare(`
-  SELECT binding_id
+  SELECT binding_id, status
   FROM bindings
-  WHERE tenant_id = ? AND channel = ? AND route_key = ? AND status = 'active'
+  WHERE tenant_id = ? AND channel = ? AND route_key = ? AND status IN ('active', 'pending')
   ORDER BY updated_at_ms DESC
   LIMIT 1
+`);
+
+const stmtListActiveDiscordBindings = db.prepare(`
+  SELECT tenant_id, binding_id, route_key, status
+  FROM bindings
+  WHERE channel = 'discord' AND status IN ('active', 'pending')
+  ORDER BY updated_at_ms ASC
 `);
 
 const stmtSelectTelegramOffset = db.prepare(`
@@ -419,6 +506,21 @@ const stmtUpsertTelegramOffset = db.prepare(`
     updated_at_ms = excluded.updated_at_ms
 `);
 
+const stmtSelectDiscordOffsetByBinding = db.prepare(`
+  SELECT last_message_id
+  FROM discord_offsets
+  WHERE binding_id = ?
+  LIMIT 1
+`);
+
+const stmtUpsertDiscordOffsetByBinding = db.prepare(`
+  INSERT INTO discord_offsets (binding_id, last_message_id, updated_at_ms)
+  VALUES (?, ?, ?)
+  ON CONFLICT(binding_id) DO UPDATE SET
+    last_message_id = excluded.last_message_id,
+    updated_at_ms = excluded.updated_at_ms
+`);
+
 const stmtInsertAuditLog = db.prepare(`
   INSERT INTO audit_logs (tenant_id, event_type, payload_json, created_at_ms)
   VALUES (?, ?, ?, ?)
@@ -426,6 +528,10 @@ const stmtInsertAuditLog = db.prepare(`
 
 const idempotencyInflight = new Map<string, InflightEntry>();
 const tenantInboundTargets = new Map<string, TenantInboundTarget>();
+const discordChannelGuildCache = new Map<string, { guildId: string | null; expiresAtMs: number }>();
+const discordChannelGuildCacheTtlMs = 30_000;
+const discordDmChannelCache = new Map<string, { channelId: string; expiresAtMs: number }>();
+const discordDmChannelCacheTtlMs = 10 * 60_000;
 for (const tenant of tenantSeeds) {
   if (tenant.inboundUrl && tenant.inboundToken) {
     tenantInboundTargets.set(tenant.id, {
@@ -683,6 +789,12 @@ function initializeDatabase(database: DatabaseSync) {
       last_update_id INTEGER NOT NULL,
       updated_at_ms INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS discord_offsets (
+      binding_id TEXT PRIMARY KEY,
+      last_message_id TEXT NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
   `);
 }
 
@@ -748,6 +860,20 @@ function readPositiveInt(value: unknown): number | undefined {
   return undefined;
 }
 
+function readUnsignedNumericString(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return String(Math.trunc(value));
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
 async function readBody<T extends object>(req: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -760,14 +886,271 @@ async function readBody<T extends object>(req: IncomingMessage): Promise<T> {
   return JSON.parse(raw) as T;
 }
 
+function requireTelegramBotToken(): string {
+  const token = telegramBotToken?.trim();
+  if (!token) {
+    throw new Error("TELEGRAM_BOT_TOKEN is required for telegram transport");
+  }
+  return token;
+}
+
+function requireDiscordBotToken(): string {
+  const token = discordBotToken?.trim();
+  if (!token) {
+    throw new Error("DISCORD_BOT_TOKEN is required for discord transport");
+  }
+  return token;
+}
+
 async function sendTelegram(method: "sendMessage" | "sendPhoto", body: Record<string, unknown>) {
-  const response = await fetch(`${telegramApiBaseUrl}/bot${telegramBotToken}/${method}`, {
+  const token = requireTelegramBotToken();
+  const response = await fetch(`${telegramApiBaseUrl}/bot${token}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   const result = (await response.json()) as Record<string, unknown>;
   return { response, result };
+}
+
+function parseDiscordJsonBody(text: string): Record<string, unknown> {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return { raw: trimmed };
+  }
+}
+
+async function discordRequest(params: {
+  method: "GET" | "POST";
+  path: string;
+  body?: Record<string, unknown>;
+}): Promise<{ response: Response; result: Record<string, unknown> }> {
+  const token = requireDiscordBotToken();
+  const response = await fetch(`${discordApiBaseUrl}${params.path}`, {
+    method: params.method,
+    headers: {
+      Authorization: `Bot ${token}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    ...(params.body ? { body: JSON.stringify(params.body) } : {}),
+  });
+  const result = parseDiscordJsonBody(await response.text());
+  return { response, result };
+}
+
+async function resolveDiscordDmChannelId(userId: string): Promise<string> {
+  const { response, result } = await discordRequest({
+    method: "POST",
+    path: "/users/@me/channels",
+    body: { recipient_id: userId },
+  });
+  if (!response.ok) {
+    throw new Error(`discord create dm failed (${response.status})`);
+  }
+  const channelId = readUnsignedNumericString(result.id);
+  if (!channelId) {
+    throw new Error("discord create dm returned invalid channel id");
+  }
+  return channelId;
+}
+
+async function resolveDiscordDmChannelIdCached(userId: string): Promise<string> {
+  const now = Date.now();
+  const cached = discordDmChannelCache.get(userId);
+  if (cached && cached.expiresAtMs > now) {
+    return cached.channelId;
+  }
+  const channelId = await resolveDiscordDmChannelId(userId);
+  discordDmChannelCache.set(userId, {
+    channelId,
+    expiresAtMs: now + discordDmChannelCacheTtlMs,
+  });
+  return channelId;
+}
+
+async function resolveDiscordChannelGuildId(channelId: string): Promise<string | null> {
+  const now = Date.now();
+  const cached = discordChannelGuildCache.get(channelId);
+  if (cached && cached.expiresAtMs > now) {
+    return cached.guildId;
+  }
+  const { response, result } = await discordRequest({
+    method: "GET",
+    path: `/channels/${channelId}`,
+  });
+  if (!response.ok) {
+    throw new Error(`discord channel lookup failed (${response.status})`);
+  }
+  const guildId = readUnsignedNumericString(result.guild_id) ?? null;
+  discordChannelGuildCache.set(channelId, {
+    guildId,
+    expiresAtMs: now + discordChannelGuildCacheTtlMs,
+  });
+  return guildId;
+}
+
+async function sendDiscordMessage(params: {
+  channelId: string;
+  content?: string;
+  mediaUrls?: string[];
+  replyToMessageId?: string;
+}): Promise<{ response: Response; result: Record<string, unknown> }> {
+  const body: Record<string, unknown> = {};
+  if (typeof params.content === "string") {
+    body.content = params.content;
+  }
+  if (Array.isArray(params.mediaUrls) && params.mediaUrls.length > 0) {
+    const embeds = params.mediaUrls
+      .slice(0, 10)
+      .map((url) => ({ image: { url } }))
+      .filter((embed) => typeof embed.image.url === "string" && embed.image.url.trim().length > 0);
+    if (embeds.length > 0) {
+      body.embeds = embeds;
+    }
+  }
+  if (params.replyToMessageId) {
+    body.message_reference = {
+      message_id: params.replyToMessageId,
+      fail_if_not_exists: false,
+    };
+  }
+  return await discordRequest({
+    method: "POST",
+    path: `/channels/${params.channelId}/messages`,
+    body,
+  });
+}
+
+function parseSnowflake(value: unknown): bigint | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    try {
+      return BigInt(Math.trunc(value));
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  try {
+    return BigInt(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function sortDiscordMessagesAsc(messages: Record<string, unknown>[]): Record<string, unknown>[] {
+  return [...messages].sort((a, b) => {
+    const aId = parseSnowflake(a.id);
+    const bId = parseSnowflake(b.id);
+    if (aId === null && bId === null) {
+      return 0;
+    }
+    if (aId === null) {
+      return -1;
+    }
+    if (bId === null) {
+      return 1;
+    }
+    if (aId < bId) {
+      return -1;
+    }
+    if (aId > bId) {
+      return 1;
+    }
+    return 0;
+  });
+}
+
+async function downloadDiscordFileBase64(url: string): Promise<string | null> {
+  const maxBytes =
+    Number.isFinite(discordInboundMediaMaxBytes) && discordInboundMediaMaxBytes > 0
+      ? Math.trunc(discordInboundMediaMaxBytes)
+      : 5_000_000;
+  const response = await fetch(url);
+  if (!response.ok) {
+    return null;
+  }
+  const contentLength = readPositiveInt(response.headers.get("content-length"));
+  if (contentLength && contentLength > maxBytes) {
+    return null;
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.byteLength === 0 || buffer.byteLength > maxBytes) {
+    return null;
+  }
+  return buffer.toString("base64");
+}
+
+function listDiscordAttachmentCandidates(
+  attachments: unknown,
+): Array<{ id?: string; fileName?: string; mimeType?: string; url?: string; size?: number }> {
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+  return attachments
+    .map((item) => {
+      const entry = item as Record<string, unknown>;
+      return {
+        id: readUnsignedNumericString(entry.id),
+        fileName: readNonEmptyString(entry.filename) ?? undefined,
+        mimeType: readNonEmptyString(entry.content_type)?.toLowerCase() ?? undefined,
+        url: readNonEmptyString(entry.url) ?? undefined,
+        size: readPositiveInt(entry.size),
+      };
+    })
+    .filter((entry) => Boolean(entry.url));
+}
+
+async function extractDiscordInboundMedia(params: {
+  message: Record<string, unknown>;
+  messageId: string;
+}): Promise<{ attachments: DiscordInboundAttachment[]; media: DiscordInboundMediaSummary[] }> {
+  const summaries: DiscordInboundMediaSummary[] = [];
+  const attachments: DiscordInboundAttachment[] = [];
+  for (const item of listDiscordAttachmentCandidates(params.message.attachments)) {
+    summaries.push({
+      id: item.id,
+      fileName: item.fileName,
+      mimeType: item.mimeType,
+      size: item.size,
+      url: item.url,
+    });
+    const inferredMime = inferImageMimeTypeFromPath(item.fileName ?? item.url);
+    if (!isImageMimeType(item.mimeType) && !inferredMime) {
+      continue;
+    }
+    if (!item.url) {
+      continue;
+    }
+    const content = await downloadDiscordFileBase64(item.url);
+    if (!content) {
+      log({
+        type: "discord_media_download_failed",
+        messageId: params.messageId,
+        attachmentId: item.id,
+        url: item.url,
+      });
+      continue;
+    }
+    attachments.push({
+      type: "image",
+      mimeType: item.mimeType || inferredMime || "image/jpeg",
+      fileName: item.fileName || item.id || `discord-${params.messageId}.jpg`,
+      content,
+    });
+  }
+  return { attachments, media: summaries };
 }
 
 function purgeExpiredIdempotency(now: number) {
@@ -846,9 +1229,10 @@ function issuePairingTokenForTenant(params: {
   tenant: TenantIdentity;
   channel: string;
   sessionKey?: string;
+  routeKey?: string;
   ttlSec?: number;
 }) {
-  if (params.channel !== "telegram") {
+  if (params.channel !== "telegram" && params.channel !== "discord") {
     return {
       statusCode: 400,
       payload: { ok: false, error: "unsupported channel for token pairing" },
@@ -862,6 +1246,47 @@ function issuePairingTokenForTenant(params: {
   const tokenHash = hashPairingToken(token);
   const expiresAtMs = nowMs + ttlSec * 1_000;
   const sessionKey = readNonEmptyString(params.sessionKey);
+
+  let routeKeyForAudit: string | undefined;
+  if (params.channel === "discord") {
+    const routeKey = readNonEmptyString(params.routeKey);
+    if (!routeKey) {
+      return {
+        statusCode: 400,
+        payload: { ok: false, error: "routeKey required for discord token pairing" },
+      };
+    }
+    const route = parseDiscordRouteKey(routeKey);
+    if (!route || route.kind !== "dm") {
+      return {
+        statusCode: 400,
+        payload: { ok: false, error: "discord token pairing currently supports dm routeKey only" },
+      };
+    }
+    const existing = stmtSelectActiveBindingByTenantAndRoute.get(
+      params.tenant.id,
+      "discord",
+      routeKey,
+    ) as ExistingBindingRow | undefined;
+    if (existing?.status === "active") {
+      return {
+        statusCode: 409,
+        payload: { ok: false, error: "route already bound" },
+      };
+    }
+    if (!existing?.binding_id) {
+      stmtInsertPendingBinding.run(
+        `bind_${randomUUID()}`,
+        params.tenant.id,
+        "discord",
+        "dm",
+        routeKey,
+        nowMs,
+        nowMs,
+      );
+    }
+    routeKeyForAudit = routeKey;
+  }
 
   stmtInsertPairingToken.run(
     tokenHash,
@@ -884,6 +1309,7 @@ function issuePairingTokenForTenant(params: {
       channel: params.channel,
       expiresAtMs,
       hasSessionKey: Boolean(sessionKey),
+      ...(routeKeyForAudit ? { routeKey: routeKeyForAudit } : {}),
     },
     nowMs,
   );
@@ -926,6 +1352,23 @@ function isTelegramCommandText(input: string | null): boolean {
   if (!input) {
     return false;
   }
+  return /^\/[A-Za-z0-9_]+/.test(input.trim());
+}
+
+function extractPairingTokenFromText(input: string | null): string | null {
+  if (!input) {
+    return null;
+  }
+  const direct = input.match(/\b(mpt_[A-Za-z0-9_-]{20,200})\b/);
+  return direct?.[1] ?? null;
+}
+
+function extractPairingTokenFromDiscordMessage(message: Record<string, unknown>): string | null {
+  const text = readNonEmptyString(message.content);
+  return extractPairingTokenFromText(text);
+}
+
+function isDiscordCommandText(input: string): boolean {
   return /^\/[A-Za-z0-9_]+/.test(input.trim());
 }
 
@@ -980,7 +1423,8 @@ function pickBestTelegramPhotoSize(
 }
 
 async function resolveTelegramFilePath(fileId: string): Promise<string | null> {
-  const response = await fetch(`${telegramApiBaseUrl}/bot${telegramBotToken}/getFile`, {
+  const token = requireTelegramBotToken();
+  const response = await fetch(`${telegramApiBaseUrl}/bot${token}/getFile`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ file_id: fileId }),
@@ -999,13 +1443,12 @@ async function resolveTelegramFilePath(fileId: string): Promise<string | null> {
 }
 
 async function downloadTelegramFileBase64(filePath: string): Promise<string | null> {
+  const token = requireTelegramBotToken();
   const normalizedPath = filePath.replace(/^\/+/, "");
   if (!normalizedPath) {
     return null;
   }
-  const response = await fetch(
-    `${telegramApiBaseUrl}/file/bot${telegramBotToken}/${normalizedPath}`,
-  );
+  const response = await fetch(`${telegramApiBaseUrl}/file/bot${token}/${normalizedPath}`);
   if (!response.ok) {
     return null;
   }
@@ -1206,6 +1649,67 @@ function parseTelegramRouteKey(routeKey: string): TelegramBoundRoute | null {
   return topicId ? { chatId, topicId } : { chatId };
 }
 
+function parseDiscordRouteKey(routeKey: string): DiscordBoundRoute | null {
+  const dmMatch = routeKey.match(/^discord:[^:]+:dm:user:(\d+)$/);
+  if (dmMatch?.[1]) {
+    return { kind: "dm", userId: dmMatch[1] };
+  }
+  const guildMatch = routeKey.match(
+    /^discord:[^:]+:guild:(\d+)(?::channel:(\d+))?(?::thread:(\d+))?$/,
+  );
+  if (!guildMatch?.[1]) {
+    return null;
+  }
+  const guildId = guildMatch[1];
+  const channelId = guildMatch[2];
+  const threadId = guildMatch[3];
+  return {
+    kind: "guild",
+    guildId,
+    ...(channelId ? { channelId } : {}),
+    ...(threadId ? { threadId } : {}),
+  };
+}
+
+function parseDiscordOutboundTarget(value: unknown): DiscordOutboundTarget | null {
+  const raw = readNonEmptyString(value);
+  if (!raw) {
+    return null;
+  }
+  const directChannel = raw.match(/^channel:(\d+)$/i);
+  if (directChannel?.[1]) {
+    return { kind: "channel", id: directChannel[1] };
+  }
+  const directUser = raw.match(/^user:(\d+)$/i);
+  if (directUser?.[1]) {
+    return { kind: "user", id: directUser[1] };
+  }
+  const discordChannel = raw.match(/^discord:channel:(\d+)$/i);
+  if (discordChannel?.[1]) {
+    return { kind: "channel", id: discordChannel[1] };
+  }
+  const discordUser = raw.match(/^discord:user:(\d+)$/i);
+  if (discordUser?.[1]) {
+    return { kind: "user", id: discordUser[1] };
+  }
+  const discordLegacy = raw.match(/^discord:(\d+)$/i);
+  if (discordLegacy?.[1]) {
+    return { kind: "user", id: discordLegacy[1] };
+  }
+  const userMention = raw.match(/^<@!?(\d+)>$/);
+  if (userMention?.[1]) {
+    return { kind: "user", id: userMention[1] };
+  }
+  const channelMention = raw.match(/^<#(\d+)>$/);
+  if (channelMention?.[1]) {
+    return { kind: "channel", id: channelMention[1] };
+  }
+  if (/^\d+$/.test(raw)) {
+    return { kind: "channel", id: raw };
+  }
+  return null;
+}
+
 function resolveTelegramBoundRoute(params: {
   tenantId: string;
   channel: string;
@@ -1220,6 +1724,71 @@ function resolveTelegramBoundRoute(params: {
     return null;
   }
   return parseTelegramRouteKey(String(row.route_key));
+}
+
+function resolveDiscordBoundRoute(params: {
+  tenantId: string;
+  channel: string;
+  sessionKey: string;
+}): DiscordBoundRoute | null {
+  const row = stmtResolveSessionRouteBinding.get(
+    params.tenantId,
+    params.channel,
+    params.sessionKey,
+  ) as SessionRouteBindingRow | undefined;
+  if (!row) {
+    return null;
+  }
+  return parseDiscordRouteKey(String(row.route_key));
+}
+
+async function resolveDiscordOutboundChannelId(params: {
+  boundRoute: DiscordBoundRoute;
+  requestedTo: unknown;
+  requestedThreadId?: string;
+}): Promise<{ ok: true; channelId: string } | { ok: false; statusCode: number; error: string }> {
+  if (params.boundRoute.kind === "dm") {
+    const channelId = await resolveDiscordDmChannelId(params.boundRoute.userId);
+    return { ok: true, channelId };
+  }
+
+  let channelId =
+    params.boundRoute.threadId ?? params.requestedThreadId ?? params.boundRoute.channelId;
+  if (!channelId) {
+    const target = parseDiscordOutboundTarget(params.requestedTo);
+    if (target?.kind === "user") {
+      return {
+        ok: false,
+        statusCode: 403,
+        error: "discord route is guild-bound and cannot target DMs",
+      };
+    }
+    channelId = target?.id;
+  }
+  if (!channelId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "discord guild-bound route requires channel target (to or routeKey channel)",
+    };
+  }
+
+  const guildId = await resolveDiscordChannelGuildId(channelId);
+  if (!guildId) {
+    return {
+      ok: false,
+      statusCode: 403,
+      error: "discord channel is not in a guild for guild-bound route",
+    };
+  }
+  if (guildId !== params.boundRoute.guildId) {
+    return {
+      ok: false,
+      statusCode: 403,
+      error: "discord channel not allowed for this bound guild",
+    };
+  }
+  return { ok: true, channelId };
 }
 
 function buildTelegramRouteKey(chatId: string, topicId?: number): string {
@@ -1384,6 +1953,73 @@ function claimTelegramPairingToken(params: {
   return { tenantId, bindingId, routeKey, sessionKey };
 }
 
+function claimDiscordPairingToken(params: {
+  token: string;
+  tenantId: string;
+  bindingId: string;
+  routeKey: string;
+  channelId: string;
+}): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
+  const now = Date.now();
+  purgeExpiredPairingTokens(now);
+  const tokenHash = hashPairingToken(params.token);
+  const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
+  if (!row || String(row.channel) !== "discord" || String(row.tenant_id) !== params.tenantId) {
+    return null;
+  }
+
+  const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+  if (consumeResult.changes === 0) {
+    return null;
+  }
+
+  const activateResult = stmtActivatePendingBinding.run(now, params.bindingId, params.tenantId);
+  if (activateResult.changes === 0) {
+    return null;
+  }
+
+  const route = parseDiscordRouteKey(params.routeKey);
+  if (!route) {
+    return null;
+  }
+
+  const preferredSessionKey = readNonEmptyString(row.session_key);
+  const sessionKey =
+    preferredSessionKey || deriveDiscordSessionKey({ route, channelId: params.channelId });
+  stmtUpsertSessionRoute.run(
+    params.tenantId,
+    "discord",
+    sessionKey,
+    params.bindingId,
+    JSON.stringify({ routeKey: params.routeKey, channelId: params.channelId }),
+    now,
+  );
+
+  stmtAttachPairingTokenBinding.run(params.bindingId, params.routeKey, tokenHash);
+  writeAuditLog(
+    params.tenantId,
+    "pairing_token_claimed",
+    { bindingId: params.bindingId, routeKey: params.routeKey },
+    now,
+  );
+  return {
+    tenantId: params.tenantId,
+    bindingId: params.bindingId,
+    routeKey: params.routeKey,
+    sessionKey,
+  };
+}
+
+async function sendDiscordPairingNotice(params: { channelId: string; text: string }) {
+  const { response } = await sendDiscordMessage({
+    channelId: params.channelId,
+    content: params.text,
+  });
+  if (!response.ok) {
+    throw new Error(`discord pairing notice failed (${response.status})`);
+  }
+}
+
 function listPairingsForTenant(tenant: TenantIdentity) {
   const rows = stmtListActiveBindingsByTenant.all(tenant.id) as ActiveBindingRow[];
   return {
@@ -1423,6 +2059,44 @@ function storeTelegramOffset(lastUpdateId: number) {
   stmtUpsertTelegramOffset.run(lastUpdateId, Date.now());
 }
 
+function resolveStoredDiscordOffset(bindingId: string): string | null {
+  const row = stmtSelectDiscordOffsetByBinding.get(bindingId) as
+    | { last_message_id?: unknown }
+    | undefined;
+  const offset = readUnsignedNumericString(row?.last_message_id);
+  return offset ?? null;
+}
+
+function storeDiscordOffset(bindingId: string, lastMessageId: string) {
+  stmtUpsertDiscordOffsetByBinding.run(bindingId, lastMessageId, Date.now());
+}
+
+function deriveDiscordSessionKey(params: { route: DiscordBoundRoute; channelId: string }): string {
+  if (params.route.kind === "dm") {
+    return `dc:dm:${params.route.userId}`;
+  }
+  if (params.route.threadId) {
+    return `dc:guild:${params.route.guildId}:thread:${params.route.threadId}`;
+  }
+  if (params.route.channelId) {
+    return `dc:guild:${params.route.guildId}:channel:${params.route.channelId}`;
+  }
+  return `dc:guild:${params.route.guildId}:channel:${params.channelId}`;
+}
+
+async function resolveDiscordInboundChannelId(route: DiscordBoundRoute): Promise<string | null> {
+  if (route.kind === "dm") {
+    return await resolveDiscordDmChannelIdCached(route.userId);
+  }
+  if (route.threadId) {
+    return route.threadId;
+  }
+  if (route.channelId) {
+    return route.channelId;
+  }
+  return null;
+}
+
 function extractTelegramMessage(update: TelegramUpdate): TelegramIncomingMessage | null {
   const candidate = update.message ?? update.edited_message;
   if (!candidate || typeof candidate !== "object") {
@@ -1432,7 +2106,8 @@ function extractTelegramMessage(update: TelegramUpdate): TelegramIncomingMessage
 }
 
 async function fetchTelegramUpdates(offset: number): Promise<TelegramUpdate[]> {
-  const response = await fetch(`${telegramApiBaseUrl}/bot${telegramBotToken}/getUpdates`, {
+  const token = requireTelegramBotToken();
+  const response = await fetch(`${telegramApiBaseUrl}/bot${token}/getUpdates`, {
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({
@@ -1459,7 +2134,8 @@ async function bootstrapTelegramOffsetIfNeeded() {
   if (current > 0) {
     return;
   }
-  const response = await fetch(`${telegramApiBaseUrl}/bot${telegramBotToken}/getUpdates`, {
+  const token = requireTelegramBotToken();
+  const response = await fetch(`${telegramApiBaseUrl}/bot${token}/getUpdates`, {
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({
@@ -1690,6 +2366,341 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   });
 }
 
+async function fetchDiscordChannelMessages(params: {
+  channelId: string;
+  afterMessageId?: string;
+  limit?: number;
+}): Promise<Record<string, unknown>[]> {
+  const token = requireDiscordBotToken();
+  const qs = new URLSearchParams();
+  qs.set("limit", String(Math.max(1, Math.min(100, params.limit ?? 50))));
+  if (params.afterMessageId) {
+    qs.set("after", params.afterMessageId);
+  }
+  const response = await fetch(`${discordApiBaseUrl}/channels/${params.channelId}/messages?${qs}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bot ${token}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+  });
+  const bodyText = await response.text();
+  let parsed: unknown = [];
+  if (bodyText.trim()) {
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      parsed = [];
+    }
+  }
+  if (!response.ok) {
+    throw new Error(`discord list messages failed (${response.status})`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("discord list messages returned invalid payload");
+  }
+  return parsed.filter((item): item is Record<string, unknown> =>
+    Boolean(item && typeof item === "object"),
+  );
+}
+
+async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
+  const route = parseDiscordRouteKey(params.route_key);
+  if (!route) {
+    return;
+  }
+  let pending = params.status === "pending";
+
+  const channelId = await resolveDiscordInboundChannelId(route);
+  if (!channelId) {
+    log({
+      type: "discord_inbound_skip_unresolvable_route",
+      tenantId: params.tenant_id,
+      bindingId: params.binding_id,
+      routeKey: params.route_key,
+    });
+    return;
+  }
+
+  const existingOffset = resolveStoredDiscordOffset(params.binding_id);
+  if (!existingOffset && discordBootstrapLatest) {
+    const latest = await fetchDiscordChannelMessages({ channelId, limit: 1 });
+    const last = latest[0];
+    const lastMessageId = readUnsignedNumericString(last?.id);
+    if (lastMessageId) {
+      storeDiscordOffset(params.binding_id, lastMessageId);
+    }
+    return;
+  }
+
+  const updates = await fetchDiscordChannelMessages({
+    channelId,
+    afterMessageId: existingOffset ?? undefined,
+    limit: 50,
+  });
+  if (updates.length === 0) {
+    return;
+  }
+
+  const sorted = sortDiscordMessagesAsc(updates);
+  let lastSeenMessageId = existingOffset ?? null;
+
+  for (const message of sorted) {
+    const messageId = readUnsignedNumericString(message.id);
+    if (!messageId) {
+      continue;
+    }
+    lastSeenMessageId = messageId;
+
+    const author =
+      message.author && typeof message.author === "object"
+        ? (message.author as Record<string, unknown>)
+        : undefined;
+    const fromId = readUnsignedNumericString(author?.id);
+    const isBot = author?.bot === true;
+    if (!fromId || isBot) {
+      continue;
+    }
+
+    const body = typeof message.content === "string" ? message.content : "";
+    const pairingToken = extractPairingTokenFromDiscordMessage(message);
+    if (pending) {
+      if (!pairingToken) {
+        if (body.trim() && isDiscordCommandText(body)) {
+          try {
+            await sendDiscordPairingNotice({
+              channelId,
+              text: unpairedHintText,
+            });
+          } catch (error) {
+            log({
+              type: "discord_unpaired_command_notice_error",
+              tenantId: params.tenant_id,
+              bindingId: params.binding_id,
+              messageId,
+              error: String(error),
+            });
+          }
+        }
+        continue;
+      }
+      const claimed = claimDiscordPairingToken({
+        token: pairingToken,
+        tenantId: params.tenant_id,
+        bindingId: params.binding_id,
+        routeKey: params.route_key,
+        channelId,
+      });
+      if (!claimed) {
+        try {
+          await sendDiscordPairingNotice({
+            channelId,
+            text: pairingInvalidText,
+          });
+        } catch (error) {
+          log({
+            type: "discord_pairing_invalid_notice_error",
+            tenantId: params.tenant_id,
+            bindingId: params.binding_id,
+            messageId,
+            error: String(error),
+          });
+        }
+        log({
+          type: "discord_pairing_token_invalid",
+          tenantId: params.tenant_id,
+          bindingId: params.binding_id,
+          messageId,
+          channelId,
+        });
+        continue;
+      }
+      try {
+        await sendDiscordPairingNotice({
+          channelId,
+          text: pairingSuccessText,
+        });
+      } catch (error) {
+        log({
+          type: "discord_pairing_notice_error",
+          tenantId: params.tenant_id,
+          bindingId: params.binding_id,
+          messageId,
+          error: String(error),
+        });
+      }
+      log({
+        type: "discord_pairing_token_claimed",
+        tenantId: claimed.tenantId,
+        bindingId: claimed.bindingId,
+        routeKey: claimed.routeKey,
+        sessionKey: claimed.sessionKey,
+        channelId,
+        messageId,
+      });
+      pending = false;
+      continue;
+    }
+
+    if (pairingToken) {
+      log({
+        type: "discord_pairing_token_ignored_bound_route",
+        tenantId: params.tenant_id,
+        bindingId: params.binding_id,
+        routeKey: params.route_key,
+        messageId,
+      });
+      continue;
+    }
+
+    const target = tenantInboundTargets.get(params.tenant_id);
+    if (!target) {
+      log({
+        type: "discord_inbound_drop_no_target",
+        tenantId: params.tenant_id,
+        bindingId: params.binding_id,
+        routeKey: params.route_key,
+      });
+      return;
+    }
+
+    const inboundMedia = await extractDiscordInboundMedia({
+      message,
+      messageId,
+    });
+    if (!body.trim() && inboundMedia.attachments.length === 0) {
+      continue;
+    }
+
+    const existingRoute = stmtSelectSessionKeyByBinding.get(
+      params.tenant_id,
+      "discord",
+      params.binding_id,
+    ) as { session_key?: unknown } | undefined;
+    const sessionKey =
+      (typeof existingRoute?.session_key === "string" && existingRoute.session_key.trim()) ||
+      deriveDiscordSessionKey({ route, channelId });
+
+    stmtUpsertSessionRoute.run(
+      params.tenant_id,
+      "discord",
+      sessionKey,
+      params.binding_id,
+      JSON.stringify({ routeKey: params.route_key, channelId }),
+      Date.now(),
+    );
+
+    const timestampMs = (() => {
+      const timestampRaw =
+        typeof message.timestamp === "string" ? Date.parse(message.timestamp) : NaN;
+      return Number.isFinite(timestampRaw) ? Math.trunc(timestampRaw) : Date.now();
+    })();
+
+    const payload = {
+      eventId: `dc:${messageId}`,
+      channel: "discord",
+      sessionKey,
+      body,
+      from: `discord:${fromId}`,
+      to: `channel:${channelId}`,
+      accountId: "default",
+      chatType: route.kind === "dm" ? "direct" : "group",
+      messageId,
+      timestampMs,
+      ...(route.kind === "guild" && route.threadId ? { threadId: route.threadId } : {}),
+      channelData: {
+        accountId: "default",
+        messageId,
+        channelId,
+        guildId: route.kind === "guild" ? route.guildId : null,
+        routeKey: params.route_key,
+        discord: {
+          media: inboundMedia.media,
+          rawMessage: message,
+        },
+      },
+      ...(inboundMedia.attachments.length > 0 ? { attachments: inboundMedia.attachments } : {}),
+    };
+
+    const response = await fetch(target.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(target.timeoutMs),
+    });
+    if (!response.ok) {
+      const bodyText = await response.text();
+      throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
+    }
+
+    log({
+      type: "discord_inbound_forwarded",
+      tenantId: params.tenant_id,
+      bindingId: params.binding_id,
+      channelId,
+      sessionKey,
+      messageId,
+    });
+  }
+
+  if (lastSeenMessageId) {
+    storeDiscordOffset(params.binding_id, lastSeenMessageId);
+  }
+}
+
+async function runDiscordInboundPollPass() {
+  const bindings = stmtListActiveDiscordBindings.all() as ActiveDiscordBindingRow[];
+  for (const binding of bindings) {
+    try {
+      await forwardDiscordBindingInbound(binding);
+    } catch (error) {
+      const err = error instanceof Error ? error : undefined;
+      log({
+        type: "discord_inbound_forward_error",
+        tenantId: binding.tenant_id,
+        bindingId: binding.binding_id,
+        error: String(error),
+        message: err?.message,
+        cause: err?.cause ? String(err.cause) : undefined,
+        stack: err?.stack,
+      });
+    }
+  }
+}
+
+async function runDiscordInboundLoop() {
+  if (!discordInboundEnabled) {
+    return;
+  }
+  let running = true;
+  process.on("SIGINT", () => {
+    running = false;
+  });
+  process.on("SIGTERM", () => {
+    running = false;
+  });
+
+  const pollMs = Math.max(200, Math.trunc(discordPollIntervalMs));
+  while (running) {
+    try {
+      await runDiscordInboundPollPass();
+    } catch (error) {
+      const err = error instanceof Error ? error : undefined;
+      log({
+        type: "discord_inbound_poll_error",
+        error: String(error),
+        message: err?.message,
+        cause: err?.cause ? String(err.cause) : undefined,
+        stack: err?.stack,
+      });
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
+  }
+}
+
 async function runTelegramInboundLoop() {
   if (!telegramInboundEnabled) {
     return;
@@ -1768,11 +2779,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const sessionKey = readNonEmptyString(body.sessionKey) ?? undefined;
+      const routeKey = readNonEmptyString(body.routeKey) ?? undefined;
       const ttlSec = readPositiveInt(body.ttlSec);
       const result = issuePairingTokenForTenant({
         tenant,
         channel,
         sessionKey,
+        routeKey,
         ttlSec,
       });
       sendJson(res, result.statusCode, result.payload);
@@ -1878,21 +2891,35 @@ const server = http.createServer(async (req, res) => {
 
       const channel = normalizeChannel(payload.channel);
       const sessionKey = readNonEmptyString(payload.sessionKey);
-      const text = String(payload.text || "").trim();
-      const mediaUrl = String(payload.mediaUrl || "").trim();
+      const text = typeof payload.text === "string" ? payload.text : "";
+      const hasText = text.trim().length > 0;
+      const mediaUrls = (() => {
+        const collected: string[] = [];
+        const single = typeof payload.mediaUrl === "string" ? payload.mediaUrl.trim() : "";
+        if (single) {
+          collected.push(single);
+        }
+        const list = Array.isArray(payload.mediaUrls) ? payload.mediaUrls : [];
+        for (const item of list) {
+          if (typeof item !== "string") {
+            continue;
+          }
+          const trimmed = item.trim();
+          if (trimmed) {
+            collected.push(trimmed);
+          }
+        }
+        return Array.from(new Set(collected));
+      })();
       const replyToMessageId = readPositiveInt(payload.replyToId);
+      const replyToDiscordMessageId = readUnsignedNumericString(payload.replyToId);
       const requestedThreadId = readPositiveInt(payload.threadId);
+      const requestedDiscordThreadId = readUnsignedNumericString(payload.threadId);
 
       if (!channel) {
         return {
           statusCode: 400,
           bodyText: JSON.stringify({ ok: false, error: "channel required" }),
-        };
-      }
-      if (channel !== "telegram") {
-        return {
-          statusCode: 400,
-          bodyText: JSON.stringify({ ok: false, error: "unsupported channel" }),
         };
       }
       if (!sessionKey) {
@@ -1901,81 +2928,193 @@ const server = http.createServer(async (req, res) => {
           bodyText: JSON.stringify({ ok: false, error: "sessionKey required" }),
         };
       }
-
-      const boundRoute = resolveTelegramBoundRoute({
-        tenantId: tenant.id,
-        channel,
-        sessionKey,
-      });
-      if (!boundRoute) {
+      if (!hasText && mediaUrls.length === 0) {
         return {
-          statusCode: 403,
+          statusCode: 400,
+          bodyText: JSON.stringify({ ok: false, error: "text or mediaUrl(s) required" }),
+        };
+      }
+      if (channel === "telegram") {
+        const boundRoute = resolveTelegramBoundRoute({
+          tenantId: tenant.id,
+          channel,
+          sessionKey,
+        });
+        if (!boundRoute) {
+          return {
+            statusCode: 403,
+            bodyText: JSON.stringify({
+              ok: false,
+              error: "route not bound",
+              code: "ROUTE_NOT_BOUND",
+            }),
+          };
+        }
+
+        const to = boundRoute.chatId;
+        const messageThreadId = requestedThreadId ?? boundRoute.topicId;
+
+        const firstMediaUrl = mediaUrls[0];
+        let method: "sendMessage" | "sendPhoto" = "sendMessage";
+        let telegramBody: Record<string, unknown> = { chat_id: to, text };
+        if (firstMediaUrl) {
+          method = "sendPhoto";
+          telegramBody = {
+            chat_id: to,
+            photo: firstMediaUrl,
+            caption: hasText ? text : undefined,
+          };
+        }
+        if (replyToMessageId) {
+          telegramBody.reply_to_message_id = replyToMessageId;
+        }
+        if (messageThreadId) {
+          telegramBody.message_thread_id = messageThreadId;
+        }
+
+        const { response, result } = await sendTelegram(method, telegramBody);
+        log({
+          type: "telegram_send_result",
+          tenantId: tenant.id,
+          method,
+          status: response.status,
+          result,
+        });
+
+        const ok = result.ok === true;
+        if (!response.ok || !ok) {
+          return {
+            statusCode: 502,
+            bodyText: JSON.stringify({ ok: false, error: "telegram send failed", details: result }),
+          };
+        }
+
+        const resultData =
+          typeof result.result === "object" && result.result
+            ? (result.result as Record<string, unknown>)
+            : {};
+        const chat =
+          typeof resultData.chat === "object" && resultData.chat
+            ? (resultData.chat as Record<string, unknown>)
+            : {};
+        const providerMessageIds: string[] = [];
+        const messageId = String(resultData.message_id ?? "unknown");
+        providerMessageIds.push(messageId);
+        const chatId = String(chat.id ?? to);
+        if (mediaUrls.length > 1) {
+          for (const extraMediaUrl of mediaUrls.slice(1)) {
+            const extraBody: Record<string, unknown> = {
+              chat_id: to,
+              photo: extraMediaUrl,
+            };
+            if (messageThreadId) {
+              extraBody.message_thread_id = messageThreadId;
+            }
+            const extra = await sendTelegram("sendPhoto", extraBody);
+            log({
+              type: "telegram_send_result",
+              tenantId: tenant.id,
+              method: "sendPhoto",
+              status: extra.response.status,
+              result: extra.result,
+              extra: true,
+            });
+            const extraOk = extra.result.ok === true;
+            if (!extra.response.ok || !extraOk) {
+              return {
+                statusCode: 502,
+                bodyText: JSON.stringify({
+                  ok: false,
+                  error: "telegram send failed",
+                  details: extra.result,
+                }),
+              };
+            }
+            const extraData =
+              typeof extra.result.result === "object" && extra.result.result
+                ? (extra.result.result as Record<string, unknown>)
+                : {};
+            providerMessageIds.push(String(extraData.message_id ?? "unknown"));
+          }
+        }
+
+        return {
+          statusCode: 200,
           bodyText: JSON.stringify({
-            ok: false,
-            error: "route not bound",
-            code: "ROUTE_NOT_BOUND",
+            ok: true,
+            messageId,
+            chatId,
+            providerMessageIds,
           }),
         };
       }
-      if (!text && !mediaUrl) {
+
+      if (channel === "discord") {
+        const boundRoute = resolveDiscordBoundRoute({
+          tenantId: tenant.id,
+          channel,
+          sessionKey,
+        });
+        if (!boundRoute) {
+          return {
+            statusCode: 403,
+            bodyText: JSON.stringify({
+              ok: false,
+              error: "route not bound",
+              code: "ROUTE_NOT_BOUND",
+            }),
+          };
+        }
+
+        const resolvedTarget = await resolveDiscordOutboundChannelId({
+          boundRoute,
+          requestedTo: payload.to,
+          requestedThreadId: requestedDiscordThreadId,
+        });
+        if (!resolvedTarget.ok) {
+          return {
+            statusCode: resolvedTarget.statusCode,
+            bodyText: JSON.stringify({ ok: false, error: resolvedTarget.error }),
+          };
+        }
+
+        const { response, result } = await sendDiscordMessage({
+          channelId: resolvedTarget.channelId,
+          content: hasText ? text : undefined,
+          mediaUrls,
+          replyToMessageId: replyToDiscordMessageId,
+        });
+        log({
+          type: "discord_send_result",
+          tenantId: tenant.id,
+          channelId: resolvedTarget.channelId,
+          status: response.status,
+          result,
+        });
+
+        if (!response.ok) {
+          return {
+            statusCode: 502,
+            bodyText: JSON.stringify({ ok: false, error: "discord send failed", details: result }),
+          };
+        }
+
+        const messageId = readUnsignedNumericString(result.id) ?? "unknown";
+        const channelId = readUnsignedNumericString(result.channel_id) ?? resolvedTarget.channelId;
         return {
-          statusCode: 400,
-          bodyText: JSON.stringify({ ok: false, error: "text or mediaUrl required" }),
+          statusCode: 200,
+          bodyText: JSON.stringify({
+            ok: true,
+            messageId,
+            channelId,
+            providerMessageIds: [messageId],
+          }),
         };
       }
-
-      const to = boundRoute.chatId;
-      const messageThreadId = requestedThreadId ?? boundRoute.topicId;
-
-      let method: "sendMessage" | "sendPhoto" = "sendMessage";
-      let telegramBody: Record<string, unknown> = { chat_id: to, text };
-      if (mediaUrl) {
-        method = "sendPhoto";
-        telegramBody = { chat_id: to, photo: mediaUrl, caption: text || undefined };
-      }
-      if (replyToMessageId) {
-        telegramBody.reply_to_message_id = replyToMessageId;
-      }
-      if (messageThreadId) {
-        telegramBody.message_thread_id = messageThreadId;
-      }
-
-      const { response, result } = await sendTelegram(method, telegramBody);
-      log({
-        type: "telegram_send_result",
-        tenantId: tenant.id,
-        method,
-        status: response.status,
-        result,
-      });
-
-      const ok = result.ok === true;
-      if (!response.ok || !ok) {
-        return {
-          statusCode: 502,
-          bodyText: JSON.stringify({ ok: false, error: "telegram send failed", details: result }),
-        };
-      }
-
-      const resultData =
-        typeof result.result === "object" && result.result
-          ? (result.result as Record<string, unknown>)
-          : {};
-      const chat =
-        typeof resultData.chat === "object" && resultData.chat
-          ? (resultData.chat as Record<string, unknown>)
-          : {};
-      const messageId = String(resultData.message_id ?? "unknown");
-      const chatId = String(chat.id ?? to);
 
       return {
-        statusCode: 200,
-        bodyText: JSON.stringify({
-          ok: true,
-          messageId,
-          chatId,
-          providerMessageIds: [messageId],
-        }),
+        statusCode: 400,
+        bodyText: JSON.stringify({ ok: false, error: "unsupported channel" }),
       };
     };
 
@@ -2025,6 +3164,17 @@ server.listen(port, host, () => {
     });
     void runTelegramInboundLoop().catch((error) => {
       log({ type: "telegram_inbound_loop_fatal", error: String(error) });
+    });
+  }
+  if (discordInboundEnabled) {
+    log({
+      type: "discord_inbound_started",
+      tenantTargetCount: tenantInboundTargets.size,
+      pollIntervalMs: Math.max(200, Math.trunc(discordPollIntervalMs)),
+      bootstrapLatest: discordBootstrapLatest,
+    });
+    void runDiscordInboundLoop().catch((error) => {
+      log({ type: "discord_inbound_loop_fatal", error: String(error) });
     });
   }
 });

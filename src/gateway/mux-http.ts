@@ -124,14 +124,16 @@ async function parseInboundImages(params: {
     content: string;
   }>;
   logWarn: (message: string) => void;
-}): Promise<{ message: string; images: ChatImageContent[] }> {
+}): Promise<ChatImageContent[]> {
   if (params.attachments.length === 0) {
-    return { message: params.message, images: [] };
+    return [];
   }
-  return await parseMessageWithAttachments(params.message, params.attachments, {
+  const parsed = await parseMessageWithAttachments(params.message, params.attachments, {
     maxBytes: 5_000_000,
     log: { warn: params.logWarn },
   });
+  // Transport layer contract: parse attachments, but never rewrite inbound text.
+  return parsed.images;
 }
 
 export async function handleMuxInboundHttpRequest(
@@ -206,28 +208,25 @@ export async function handleMuxInboundHttpRequest(
     return true;
   }
 
-  let parsedMessage = rawMessage;
   let parsedImages: ChatImageContent[] = [];
   try {
-    const parsed = await parseInboundImages({
+    parsedImages = await parseInboundImages({
       message: rawMessage,
       attachments,
       // Keep request handling resilient when non-image attachments are provided.
       logWarn: () => {},
     });
-    parsedMessage = parsed.message;
-    parsedImages = parsed.images;
   } catch (err) {
     sendJson(res, 400, { ok: false, error: String(err) });
     return true;
   }
 
   const ctx: MsgContext = {
-    Body: parsedMessage,
-    BodyForAgent: parsedMessage,
-    BodyForCommands: parsedMessage,
-    RawBody: parsedMessage,
-    CommandBody: parsedMessage,
+    Body: rawMessage,
+    BodyForAgent: rawMessage,
+    BodyForCommands: rawMessage,
+    RawBody: rawMessage,
+    CommandBody: rawMessage,
     SessionKey: sessionKey,
     From: readOptionalString(payload.from),
     To: originatingTo,
@@ -240,6 +239,7 @@ export async function handleMuxInboundHttpRequest(
     OriginatingChannel: channel,
     OriginatingTo: originatingTo,
     MessageThreadId: resolveThreadId(payload.threadId, channelData),
+    ChannelData: channelData,
     CommandAuthorized: true,
   };
 

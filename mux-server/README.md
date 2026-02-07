@@ -10,9 +10,13 @@ This directory contains a standalone TypeScript mux server for staged rollout an
 - Implements `POST /v1/pairings/unbind`
 - Implements `POST /v1/mux/outbound/send`
 - Implements Telegram inbound polling + forwarding to OpenClaw `POST /v1/mux/inbound`
+- Implements Discord inbound polling + forwarding to OpenClaw `POST /v1/mux/inbound`
 - Supports Telegram outbound via Bot API:
   - `sendMessage` (text)
   - `sendPhoto` (image with optional caption)
+- Supports Discord outbound via Bot API:
+  - `POST /channels/{id}/messages` (text)
+  - DM route via `POST /users/@me/channels` + channel message send
 - Supports idempotency via `Idempotency-Key`:
   - Same key + same payload: cached replay
   - Same key + different payload: `409`
@@ -42,7 +46,7 @@ This repo now has 3 mux-related pieces:
 3. `mux-server/src/server.ts`
 
 - External mux service implementation (this directory)
-- Telegram outbound + inbound (poll + forward)
+- Telegram + Discord outbound + inbound (poll + forward)
 
 In short: OpenClaw inbound/outbound adapters are in `src/`; the standalone mux service is here.
 
@@ -65,6 +69,7 @@ node --import tsx mux-server/src/server.ts
 ## Environment
 
 - `TELEGRAM_BOT_TOKEN` (required): Telegram bot token.
+- `DISCORD_BOT_TOKEN` (required for Discord transport): Discord bot token.
 - `MUX_API_KEY` (default `outbound-secret`): legacy single-tenant key; seeds default tenant when `MUX_TENANTS_JSON` is unset.
 - `MUX_TENANTS_JSON` (optional): JSON array for multi-tenant auth seed.
 - `MUX_HOST` (default `127.0.0.1`)
@@ -77,11 +82,16 @@ node --import tsx mux-server/src/server.ts
 - `MUX_OPENCLAW_INBOUND_TOKEN` (optional, default tenant only): bearer token for OpenClaw mux inbound.
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
+- `MUX_DISCORD_API_BASE_URL` (default `https://discord.com/api/v10`): Discord API base URL.
 - `MUX_TELEGRAM_INBOUND_ENABLED` (default `false`): enable Telegram inbound polling and forwarding.
 - `MUX_TELEGRAM_POLL_TIMEOUT_SEC` (default `25`): Telegram long-poll timeout.
 - `MUX_TELEGRAM_POLL_RETRY_MS` (default `1000`): backoff after poll errors.
 - `MUX_TELEGRAM_BOOTSTRAP_LATEST` (default `true`): when enabled, skips historical backlog on cold start.
 - `MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size fetched from Telegram for inbound image attachments.
+- `MUX_DISCORD_INBOUND_ENABLED` (default `false`): enable Discord inbound polling and forwarding.
+- `MUX_DISCORD_POLL_INTERVAL_MS` (default `2000`): Discord poll interval.
+- `MUX_DISCORD_BOOTSTRAP_LATEST` (default `true`): when enabled, skips historical backlog on cold start.
+- `MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size fetched from Discord attachment URLs for inbound image attachments.
 - `MUX_TELEGRAM_BOT_USERNAME` (optional): enables Telegram deep link in pairing-token response.
 - `MUX_PAIRING_TOKEN_TTL_SEC` (default `900`): default one-time pairing-token TTL in seconds.
 - `MUX_PAIRING_TOKEN_MAX_TTL_SEC` (default `3600`): max allowed one-time pairing-token TTL.
@@ -141,6 +151,7 @@ Body:
   "to": "-100123",
   "text": "hello",
   "mediaUrl": "https://... or Telegram file_id",
+  "mediaUrls": ["https://..."],
   "replyToId": "123",
   "threadId": 2
 }
@@ -148,15 +159,22 @@ Body:
 
 Behavior:
 
-- `channel` is required (`telegram` currently).
+- `channel` is required (`telegram` or `discord`).
 - `sessionKey` is required.
-- At least one of `text` or `mediaUrl` is required.
+- At least one of `text`, `mediaUrl`, or `mediaUrls` is required.
 - Destination is resolved from mux route mapping `(tenant, channel, sessionKey)`.
-- `to` from request is ignored in route-locked mode.
+- `to` from request is ignored for Telegram and DM-bound Discord routes.
 - If no route mapping exists, returns `403` with `code: "ROUTE_NOT_BOUND"`.
-- If `mediaUrl` is present, server uses Telegram `sendPhoto` and `text` becomes caption.
+- Telegram: first media URL uses `sendPhoto` (with optional caption from `text`), extra media URLs are sent as additional `sendPhoto` messages.
+- Discord: outbound sends text as `content` and media URLs as `embeds[].image.url` (no text+URL folding).
 - `threadId` maps to Telegram `message_thread_id`.
 - `replyToId` maps to Telegram `reply_to_message_id`.
+- Discord guild-bound routes validate that destination channel belongs to the bound guild.
+
+Transport contract:
+
+- Transport layers preserve original text and provider payload structures.
+- Parsing is allowed for validation/routing and image decode, but transport must not rewrite user text.
 
 ### `POST /v1/pairings/claim`
 
@@ -201,6 +219,17 @@ Body:
 }
 ```
 
+Discord body variant:
+
+```json
+{
+  "channel": "discord",
+  "routeKey": "discord:default:dm:user:4242",
+  "sessionKey": "dc:dm:4242",
+  "ttlSec": 900
+}
+```
+
 Response `200`:
 
 ```json
@@ -217,10 +246,12 @@ Response `200`:
 Behavior:
 
 - Token is opaque, one-time, and tenant-scoped.
-- User sends token to Telegram bot (manual token message or `/start <token>` deep link).
+- Telegram: user sends token to bot (manual token message or `/start <token>` deep link).
+- Discord: `routeKey` is required and currently supports `dm` route only (`discord:default:dm:user:<userId>`).
+- Discord: token issuance creates a pending DM binding; sending token in that DM activates it.
 - Mux binds route from the incoming chat/topic to this tenant and consumes token.
 - The token message is not forwarded to OpenClaw; subsequent messages are forwarded.
-- Invalid or reused tokens return a user-facing Telegram notice (configured by `MUX_PAIRING_INVALID_TEXT`).
+- Invalid or reused tokens return a user-facing notice (configured by `MUX_PAIRING_INVALID_TEXT`).
 - Unpaired slash commands (for example `/help`) return a pairing hint notice (configured by `MUX_UNPAIRED_HINT_TEXT`).
 
 ### `GET /v1/pairings`
