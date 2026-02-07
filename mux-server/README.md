@@ -125,8 +125,12 @@ Body:
 
 Behavior:
 
-- `to` is required.
+- `channel` is required (`telegram` currently).
+- `sessionKey` is required.
 - At least one of `text` or `mediaUrl` is required.
+- Destination is resolved from mux route mapping `(tenant, channel, sessionKey)`.
+- `to` from request is ignored in route-locked mode.
+- If no route mapping exists, returns `403` with `code: "ROUTE_NOT_BOUND"`.
 - If `mediaUrl` is present, server uses Telegram `sendPhoto` and `text` becomes caption.
 - `threadId` maps to Telegram `message_thread_id`.
 - `replyToId` maps to Telegram `reply_to_message_id`.
@@ -141,7 +145,8 @@ Body:
 
 ```json
 {
-  "code": "PAIR-1"
+  "code": "PAIR-1",
+  "sessionKey": "tg:group:-100123:thread:2"
 }
 ```
 
@@ -152,7 +157,8 @@ Response `200`:
   "bindingId": "bind_...",
   "channel": "telegram",
   "scope": "chat",
-  "routeKey": "telegram:default:chat:-100123"
+  "routeKey": "telegram:default:chat:-100123",
+  "sessionKey": "tg:group:-100123:thread:2"
 }
 ```
 
@@ -250,5 +256,6 @@ Current test coverage (`mux-server/test/server.test.ts`):
 - multi-tenant auth via `MUX_TENANTS_JSON`
 - pairing claim/list/unbind flow
 - duplicate pairing claim conflict handling
+- outbound route resolution from `(tenant, channel, sessionKey)` mapping
 - idempotency replay + payload mismatch handling
 - idempotency persistence across process restart

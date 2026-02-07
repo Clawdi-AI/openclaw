@@ -5,6 +5,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 type MuxPayload = {
+  channel?: unknown;
+  sessionKey?: unknown;
   to?: unknown;
   text?: unknown;
   mediaUrl?: unknown;
@@ -60,6 +62,16 @@ type ActiveBindingRow = {
   channel: string;
   scope: string;
   route_key: string;
+};
+
+type SessionRouteBindingRow = {
+  binding_id: string;
+  route_key: string;
+};
+
+type TelegramBoundRoute = {
+  chatId: string;
+  topicId?: number;
 };
 
 const host = process.env.MUX_HOST || "127.0.0.1";
@@ -180,6 +192,35 @@ const stmtUnbindActiveBinding = db.prepare(`
 const stmtDeleteSessionRoutesByBinding = db.prepare(`
   DELETE FROM session_routes
   WHERE binding_id = ? AND tenant_id = ?
+`);
+
+const stmtUpsertSessionRoute = db.prepare(`
+  INSERT INTO session_routes (
+    tenant_id,
+    channel,
+    session_key,
+    binding_id,
+    channel_context_json,
+    updated_at_ms
+  )
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(tenant_id, channel, session_key) DO UPDATE SET
+    binding_id = excluded.binding_id,
+    channel_context_json = excluded.channel_context_json,
+    updated_at_ms = excluded.updated_at_ms
+`);
+
+const stmtResolveSessionRouteBinding = db.prepare(`
+  SELECT sr.binding_id, b.route_key
+  FROM session_routes sr
+  JOIN bindings b ON b.binding_id = sr.binding_id
+  WHERE sr.tenant_id = ?
+    AND sr.channel = ?
+    AND sr.session_key = ?
+    AND b.tenant_id = sr.tenant_id
+    AND b.channel = sr.channel
+    AND b.status = 'active'
+  LIMIT 1
 `);
 
 const stmtInsertAuditLog = db.prepare(`
@@ -528,6 +569,42 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function normalizeChannel(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  return value.trim().toLowerCase();
+}
+
+function parseTelegramRouteKey(routeKey: string): TelegramBoundRoute | null {
+  const match = routeKey.match(/^telegram:[^:]+:chat:([^:]+)(?::topic:([^:]+))?$/);
+  if (!match) {
+    return null;
+  }
+  const chatId = match[1]?.trim();
+  if (!chatId) {
+    return null;
+  }
+  const topicId = readPositiveInt(match[2]);
+  return topicId ? { chatId, topicId } : { chatId };
+}
+
+function resolveTelegramBoundRoute(params: {
+  tenantId: string;
+  channel: string;
+  sessionKey: string;
+}): TelegramBoundRoute | null {
+  const row = stmtResolveSessionRouteBinding.get(
+    params.tenantId,
+    params.channel,
+    params.sessionKey,
+  ) as SessionRouteBindingRow | undefined;
+  if (!row) {
+    return null;
+  }
+  return parseTelegramRouteKey(String(row.route_key));
+}
+
 function writeAuditLog(
   tenantId: string,
   eventType: string,
@@ -537,7 +614,7 @@ function writeAuditLog(
   stmtInsertAuditLog.run(tenantId, eventType, JSON.stringify(payload), timestampMs);
 }
 
-function claimPairingForTenant(tenant: TenantIdentity, code: string) {
+function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?: string) {
   const now = Date.now();
   const row = stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
   if (!row || Number(row.expires_at_ms) <= now) {
@@ -569,6 +646,17 @@ function claimPairingForTenant(tenant: TenantIdentity, code: string) {
     now,
     now,
   );
+  const resolvedSessionKey = readNonEmptyString(sessionKey);
+  if (resolvedSessionKey) {
+    stmtUpsertSessionRoute.run(
+      tenant.id,
+      String(row.channel),
+      resolvedSessionKey,
+      bindingId,
+      JSON.stringify({ routeKey: String(row.route_key) }),
+      now,
+    );
+  }
   writeAuditLog(tenant.id, "pairing_claimed", { bindingId, code, routeKey: row.route_key }, now);
   return {
     statusCode: 200,
@@ -577,6 +665,7 @@ function claimPairingForTenant(tenant: TenantIdentity, code: string) {
       channel: String(row.channel),
       scope: String(row.scope),
       routeKey: String(row.route_key),
+      ...(resolvedSessionKey ? { sessionKey: resolvedSessionKey } : {}),
     },
   };
 }
@@ -637,7 +726,8 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { ok: false, error: "code required" });
         return;
       }
-      const result = claimPairingForTenant(tenant, code);
+      const sessionKey = readNonEmptyString(body.sessionKey) ?? undefined;
+      const result = claimPairingForTenant(tenant, code, sessionKey);
       sendJson(res, result.statusCode, result.payload);
       return;
     }
@@ -726,16 +816,45 @@ const server = http.createServer(async (req, res) => {
         payload,
       });
 
-      const to = String(payload.to || "").trim();
+      const channel = normalizeChannel(payload.channel);
+      const sessionKey = readNonEmptyString(payload.sessionKey);
       const text = String(payload.text || "").trim();
       const mediaUrl = String(payload.mediaUrl || "").trim();
       const replyToMessageId = readPositiveInt(payload.replyToId);
-      const messageThreadId = readPositiveInt(payload.threadId);
+      const requestedThreadId = readPositiveInt(payload.threadId);
 
-      if (!to) {
+      if (!channel) {
         return {
           statusCode: 400,
-          bodyText: JSON.stringify({ ok: false, error: "to required" }),
+          bodyText: JSON.stringify({ ok: false, error: "channel required" }),
+        };
+      }
+      if (channel !== "telegram") {
+        return {
+          statusCode: 400,
+          bodyText: JSON.stringify({ ok: false, error: "unsupported channel" }),
+        };
+      }
+      if (!sessionKey) {
+        return {
+          statusCode: 400,
+          bodyText: JSON.stringify({ ok: false, error: "sessionKey required" }),
+        };
+      }
+
+      const boundRoute = resolveTelegramBoundRoute({
+        tenantId: tenant.id,
+        channel,
+        sessionKey,
+      });
+      if (!boundRoute) {
+        return {
+          statusCode: 403,
+          bodyText: JSON.stringify({
+            ok: false,
+            error: "route not bound",
+            code: "ROUTE_NOT_BOUND",
+          }),
         };
       }
       if (!text && !mediaUrl) {
@@ -744,6 +863,9 @@ const server = http.createServer(async (req, res) => {
           bodyText: JSON.stringify({ ok: false, error: "text or mediaUrl required" }),
         };
       }
+
+      const to = boundRoute.chatId;
+      const messageThreadId = requestedThreadId ?? boundRoute.topicId;
 
       let method: "sendMessage" | "sendPhoto" = "sendMessage";
       let telegramBody: Record<string, unknown> = { chat_id: to, text };

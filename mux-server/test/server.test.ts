@@ -152,14 +152,22 @@ async function sendWithIdempotency(params: {
   });
 }
 
-async function claimPairing(params: { port: number; apiKey: string; code: string }) {
+async function claimPairing(params: {
+  port: number;
+  apiKey: string;
+  code: string;
+  sessionKey?: string;
+}) {
   return await fetch(`http://127.0.0.1:${params.port}/v1/pairings/claim`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${params.apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ code: params.code }),
+    body: JSON.stringify({
+      code: params.code,
+      ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+    }),
   });
 }
 
@@ -217,10 +225,14 @@ describe("mux server", () => {
         Authorization: "Bearer tenant-a-key",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(requestPayload("missing to should return 400")),
+      body: JSON.stringify(requestPayload("message without binding")),
     });
-    expect(valid.status).toBe(400);
-    expect(await valid.json()).toEqual({ ok: false, error: "to required" });
+    expect(valid.status).toBe(403);
+    expect(await valid.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
 
     const legacy = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
       method: "POST",
@@ -247,7 +259,12 @@ describe("mux server", () => {
       ]),
     });
 
-    const claim = await claimPairing({ port: server.port, apiKey: "tenant-a-key", code: "PAIR-1" });
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-1",
+      sessionKey: "tg:group:-100123:thread:2",
+    });
     expect(claim.status).toBe(200);
     const claimBody = (await claim.json()) as {
       bindingId: string;
@@ -259,6 +276,7 @@ describe("mux server", () => {
     expect(claimBody.scope).toBe("chat");
     expect(claimBody.routeKey).toBe("telegram:default:chat:-100123");
     expect(claimBody.bindingId).toContain("bind_");
+    expect((claimBody as Record<string, unknown>).sessionKey).toBe("tg:group:-100123:thread:2");
 
     const listedBeforeUnbind = await listPairings({ port: server.port, apiKey: "tenant-a-key" });
     expect(listedBeforeUnbind.status).toBe(200);
@@ -321,25 +339,74 @@ describe("mux server", () => {
     });
   });
 
+  test("outbound resolves route from (tenant, channel, sessionKey) mapping", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-3",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-3",
+      sessionKey: "tg:group:-100123:thread:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "tg:group:-100123:thread:2",
+        to: "this-is-ignored-on-purpose",
+        text: "",
+      }),
+    });
+    expect(outbound.status).toBe(400);
+    expect(await outbound.json()).toEqual({
+      ok: false,
+      error: "text or mediaUrl required",
+    });
+  });
+
   test("idempotency replays same payload and rejects mismatched payload", async () => {
     const server = await startServer();
     const first = await sendWithIdempotency({
       port: server.port,
       apiKey: "test-key",
       idempotencyKey: "idem-test-1",
-      text: "missing to should return 400",
+      text: "route not bound check",
     });
-    expect(first.status).toBe(400);
-    expect(await first.json()).toEqual({ ok: false, error: "to required" });
+    expect(first.status).toBe(403);
+    expect(await first.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
 
     const replay = await sendWithIdempotency({
       port: server.port,
       apiKey: "test-key",
       idempotencyKey: "idem-test-1",
-      text: "missing to should return 400",
+      text: "route not bound check",
     });
-    expect(replay.status).toBe(400);
-    expect(await replay.json()).toEqual({ ok: false, error: "to required" });
+    expect(replay.status).toBe(403);
+    expect(await replay.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
 
     const mismatch = await sendWithIdempotency({
       port: server.port,
@@ -367,10 +434,14 @@ describe("mux server", () => {
       port: firstServer.port,
       apiKey: "test-key",
       idempotencyKey: "idem-test-restart",
-      text: "missing to should return 400",
+      text: "route not bound before restart",
     });
-    expect(first.status).toBe(400);
-    expect(await first.json()).toEqual({ ok: false, error: "to required" });
+    expect(first.status).toBe(403);
+    expect(await first.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
 
     await stopServer(firstServer);
     removeRunningServer(firstServer);
@@ -384,10 +455,14 @@ describe("mux server", () => {
       port: secondServer.port,
       apiKey: "test-key",
       idempotencyKey: "idem-test-restart",
-      text: "missing to should return 400",
+      text: "route not bound before restart",
     });
-    expect(replay.status).toBe(400);
-    expect(await replay.json()).toEqual({ ok: false, error: "to required" });
+    expect(replay.status).toBe(403);
+    expect(await replay.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
 
     const mismatch = await sendWithIdempotency({
       port: secondServer.port,
