@@ -71,4 +71,6 @@ USER.md
 
 # local tooling
 .serena/
+mux-server/logs/
 phala-deploy/secrets/
+phala-deploy/.onboarding/

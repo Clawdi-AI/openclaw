@@ -4,6 +4,7 @@ import { shouldLogVerbose } from "../../../globals.js";
 import { missingTargetError } from "../../../infra/outbound/target-errors.js";
 import { sendPollWhatsApp } from "../../../web/outbound.js";
 import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "../../../whatsapp/normalize.js";
+import { isMuxEnabled, sendViaMux } from "./mux.js";
 
 export const whatsappOutbound: ChannelOutboundAdapter = {
   deliveryMode: "gateway",
@@ -57,7 +58,18 @@ export const whatsappOutbound: ChannelOutboundAdapter = {
       error: missingTargetError("WhatsApp", "<E.164|group JID> or channels.whatsapp.allowFrom[0]"),
     };
   },
-  sendText: async ({ to, text, accountId, deps, gifPlayback }) => {
+  sendText: async ({ cfg, to, text, accountId, deps, gifPlayback, sessionKey }) => {
+    if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+      const result = await sendViaMux({
+        cfg,
+        channel: "whatsapp",
+        accountId: accountId ?? undefined,
+        sessionKey,
+        to,
+        text,
+      });
+      return { channel: "whatsapp", ...result };
+    }
     const send =
       deps?.sendWhatsApp ?? (await import("../../../web/outbound.js")).sendMessageWhatsApp;
     const result = await send(to, text, {
@@ -67,7 +79,19 @@ export const whatsappOutbound: ChannelOutboundAdapter = {
     });
     return { channel: "whatsapp", ...result };
   },
-  sendMedia: async ({ to, text, mediaUrl, accountId, deps, gifPlayback }) => {
+  sendMedia: async ({ cfg, to, text, mediaUrl, accountId, deps, gifPlayback, sessionKey }) => {
+    if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+      const result = await sendViaMux({
+        cfg,
+        channel: "whatsapp",
+        accountId: accountId ?? undefined,
+        sessionKey,
+        to,
+        text,
+        mediaUrl,
+      });
+      return { channel: "whatsapp", ...result };
+    }
     const send =
       deps?.sendWhatsApp ?? (await import("../../../web/outbound.js")).sendMessageWhatsApp;
     const result = await send(to, text, {
@@ -78,9 +102,13 @@ export const whatsappOutbound: ChannelOutboundAdapter = {
     });
     return { channel: "whatsapp", ...result };
   },
-  sendPoll: async ({ to, poll, accountId }) =>
-    await sendPollWhatsApp(to, poll, {
+  sendPoll: async ({ cfg, to, poll, accountId }) => {
+    if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+      throw new Error("whatsapp mux poll delivery requires sessionKey; use routed replies instead");
+    }
+    return await sendPollWhatsApp(to, poll, {
       verbose: shouldLogVerbose(),
       accountId: accountId ?? undefined,
-    }),
+    });
+  },
 };

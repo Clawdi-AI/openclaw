@@ -87,7 +87,6 @@ export async function readJsonBody(
       if (total > maxBytes) {
         done = true;
         resolve({ ok: false, error: "payload too large" });
-        req.destroy();
         return;
       }
       chunks.push(chunk);

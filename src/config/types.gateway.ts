@@ -191,10 +191,20 @@ export type GatewayHttpResponsesImagesConfig = {
 export type GatewayHttpEndpointsConfig = {
   chatCompletions?: GatewayHttpChatCompletionsConfig;
   responses?: GatewayHttpResponsesConfig;
+  mux?: GatewayHttpMuxConfig;
 };
 
 export type GatewayHttpConfig = {
   endpoints?: GatewayHttpEndpointsConfig;
+};
+
+export type GatewayHttpMuxConfig = {
+  /** Enable mux inbound HTTP endpoint (`POST /v1/mux/inbound`). */
+  enabled?: boolean;
+  /** Shared bearer token required for mux inbound requests. */
+  token?: string;
+  /** Max inbound payload bytes. Default: 10MB. */
+  maxBodyBytes?: number;
 };
 
 export type GatewayNodesConfig = {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   applyAccountNameToChannelSection,
   buildChannelConfigSchema,
@@ -61,6 +62,148 @@ function parseThreadId(threadId?: string | number | null) {
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
+
+const DEFAULT_MUX_TIMEOUT_MS = 30_000;
+
+type ChannelMuxConfig = {
+  enabled?: boolean;
+  baseUrl?: string;
+  apiKey?: string;
+  timeoutMs?: number;
+};
+
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeBaseUrl(value?: string): string | undefined {
+  const trimmed = readNonEmptyString(value);
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+function resolveTelegramMuxConfig(params: { cfg: OpenClawConfig; accountId?: string }): {
+  enabled: boolean;
+  baseUrl?: string;
+  apiKey?: string;
+  timeoutMs: number;
+} {
+  const channelCfg = params.cfg.channels?.telegram;
+  const resolvedAccountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
+  const accountCfg = channelCfg?.accounts?.[resolvedAccountId] as
+    | { mux?: ChannelMuxConfig }
+    | undefined;
+  const raw = (accountCfg?.mux ?? channelCfg?.mux) as ChannelMuxConfig | undefined;
+  const timeoutMs =
+    typeof raw?.timeoutMs === "number" && Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0
+      ? Math.trunc(raw.timeoutMs)
+      : DEFAULT_MUX_TIMEOUT_MS;
+
+  return {
+    enabled: raw?.enabled === true,
+    baseUrl: normalizeBaseUrl(raw?.baseUrl),
+    apiKey: readNonEmptyString(raw?.apiKey),
+    timeoutMs,
+  };
+}
+
+function readFirstString(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+  return readNonEmptyString(value[0]);
+}
+
+function mapMuxMessageResult(payload: Record<string, unknown>): {
+  messageId: string;
+  chatId?: string;
+} {
+  const messageId =
+    readNonEmptyString(payload.messageId) ??
+    readNonEmptyString(payload.deliveryId) ??
+    readFirstString(payload.providerMessageIds) ??
+    "unknown";
+  return {
+    messageId,
+    chatId: readNonEmptyString(payload.chatId),
+  };
+}
+
+async function sendTelegramViaMux(params: {
+  cfg: OpenClawConfig;
+  to: string;
+  text: string;
+  accountId?: string;
+  replyToId?: string | null;
+  threadId?: string | number | null;
+  sessionKey?: string | null;
+  mediaUrl?: string;
+}): Promise<{ messageId: string; chatId?: string }> {
+  const mux = resolveTelegramMuxConfig({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  if (!mux.enabled) {
+    throw new Error("telegram mux is not enabled");
+  }
+  if (!mux.baseUrl) {
+    throw new Error("channels.telegram.mux.baseUrl is required when mux is enabled");
+  }
+  if (!mux.apiKey) {
+    throw new Error("channels.telegram.mux.apiKey is required when mux is enabled");
+  }
+  const sessionKey = readNonEmptyString(params.sessionKey);
+  if (!sessionKey) {
+    throw new Error("telegram mux delivery requires sessionKey; use routed replies instead");
+  }
+
+  const requestBody = {
+    requestId: randomUUID(),
+    channel: "telegram",
+    sessionKey,
+    accountId: params.accountId,
+    to: params.to,
+    text: params.text,
+    mediaUrl: params.mediaUrl,
+    replyToId: params.replyToId ?? undefined,
+    threadId: params.threadId ?? undefined,
+  };
+
+  const response = await fetch(`${mux.baseUrl}/v1/mux/outbound/send`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${mux.apiKey}`,
+      "Content-Type": "application/json; charset=utf-8",
+      "Idempotency-Key": requestBody.requestId,
+    },
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(mux.timeoutMs),
+  });
+
+  const responseText = await response.text();
+  let parsed: unknown = {};
+  if (responseText.trim()) {
+    try {
+      parsed = JSON.parse(responseText);
+    } catch {
+      parsed = { raw: responseText };
+    }
+  }
+  if (!response.ok) {
+    const summary =
+      typeof parsed === "object" && parsed !== null
+        ? JSON.stringify(parsed)
+        : responseText || `${response.status}`;
+    throw new Error(`telegram mux outbound failed (${response.status}): ${summary}`);
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return { messageId: "unknown" };
+  }
+  return mapMuxMessageResult(parsed as Record<string, unknown>);
+}
+
 export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProbe> = {
   id: "telegram",
   meta: {
@@ -267,7 +410,20 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
     chunker: (text, limit) => getTelegramRuntime().channel.text.chunkMarkdownText(text, limit),
     chunkerMode: "markdown",
     textChunkLimit: 4000,
-    sendText: async ({ to, text, accountId, deps, replyToId, threadId }) => {
+    sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, sessionKey }) => {
+      const mux = resolveTelegramMuxConfig({ cfg, accountId: accountId ?? undefined });
+      if (mux.enabled) {
+        const result = await sendTelegramViaMux({
+          cfg,
+          to,
+          text,
+          accountId: accountId ?? undefined,
+          replyToId,
+          threadId,
+          sessionKey,
+        });
+        return { channel: "telegram", ...result };
+      }
       const send = deps?.sendTelegram ?? getTelegramRuntime().channel.telegram.sendMessageTelegram;
       const replyToMessageId = parseReplyToMessageId(replyToId);
       const messageThreadId = parseThreadId(threadId);
@@ -279,7 +435,31 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
       });
       return { channel: "telegram", ...result };
     },
-    sendMedia: async ({ to, text, mediaUrl, accountId, deps, replyToId, threadId }) => {
+    sendMedia: async ({
+      cfg,
+      to,
+      text,
+      mediaUrl,
+      accountId,
+      deps,
+      replyToId,
+      threadId,
+      sessionKey,
+    }) => {
+      const mux = resolveTelegramMuxConfig({ cfg, accountId: accountId ?? undefined });
+      if (mux.enabled) {
+        const result = await sendTelegramViaMux({
+          cfg,
+          to,
+          text,
+          mediaUrl,
+          accountId: accountId ?? undefined,
+          replyToId,
+          threadId,
+          sessionKey,
+        });
+        return { channel: "telegram", ...result };
+      }
       const send = deps?.sendTelegram ?? getTelegramRuntime().channel.telegram.sendMessageTelegram;
       const replyToMessageId = parseReplyToMessageId(replyToId);
       const messageThreadId = parseThreadId(threadId);

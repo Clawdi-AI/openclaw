@@ -85,6 +85,7 @@ async function createChannelHandler(params: {
   cfg: OpenClawConfig;
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  sessionKey?: string | null;
   accountId?: string;
   replyToId?: string | null;
   threadId?: string | number | null;
@@ -100,6 +101,7 @@ async function createChannelHandler(params: {
     cfg: params.cfg,
     channel: params.channel,
     to: params.to,
+    sessionKey: params.sessionKey,
     accountId: params.accountId,
     replyToId: params.replyToId,
     threadId: params.threadId,
@@ -117,6 +119,7 @@ function createPluginHandler(params: {
   cfg: OpenClawConfig;
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  sessionKey?: string | null;
   accountId?: string;
   replyToId?: string | null;
   threadId?: string | number | null;
@@ -139,6 +142,7 @@ function createPluginHandler(params: {
       ? async (payload) =>
           outbound.sendPayload!({
             cfg: params.cfg,
+            sessionKey: params.sessionKey,
             to: params.to,
             text: payload.text ?? "",
             mediaUrl: payload.mediaUrl,
@@ -153,6 +157,7 @@ function createPluginHandler(params: {
     sendText: async (text) =>
       sendText({
         cfg: params.cfg,
+        sessionKey: params.sessionKey,
         to: params.to,
         text,
         accountId: params.accountId,
@@ -164,6 +169,7 @@ function createPluginHandler(params: {
     sendMedia: async (caption, mediaUrl) =>
       sendMedia({
         cfg: params.cfg,
+        sessionKey: params.sessionKey,
         to: params.to,
         text: caption,
         mediaUrl,
@@ -180,6 +186,7 @@ export async function deliverOutboundPayloads(params: {
   cfg: OpenClawConfig;
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  sessionKey?: string | null;
   accountId?: string;
   payloads: ReplyPayload[];
   replyToId?: string | null;
@@ -203,10 +210,12 @@ export async function deliverOutboundPayloads(params: {
   const abortSignal = params.abortSignal;
   const sendSignal = params.deps?.sendSignal ?? sendMessageSignal;
   const results: OutboundDeliveryResult[] = [];
+  const sessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
   const handler = await createChannelHandler({
     cfg,
     channel,
     to,
+    sessionKey,
     deps,
     accountId,
     replyToId: params.replyToId,

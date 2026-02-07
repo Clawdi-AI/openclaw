@@ -9,6 +9,7 @@ import { ChannelHeartbeatVisibilitySchema } from "./zod-schema.channels.js";
 import {
   BlockStreamingChunkSchema,
   BlockStreamingCoalesceSchema,
+  ChannelMuxSchema,
   DmConfigSchema,
   DmPolicySchema,
   ExecutableTokenSchema,
@@ -133,6 +134,7 @@ export const TelegramAccountSchemaBase = z
       })
       .strict()
       .optional(),
+    mux: ChannelMuxSchema,
     reactionNotifications: z.enum(["off", "own", "all"]).optional(),
     reactionLevel: z.enum(["off", "ack", "minimal", "extensive"]).optional(),
     heartbeat: ChannelHeartbeatVisibilitySchema,
@@ -324,6 +326,7 @@ export const DiscordAccountSchema = z
       .strict()
       .optional(),
     responsePrefix: z.string().optional(),
+    mux: ChannelMuxSchema,
   })
   .strict();
 

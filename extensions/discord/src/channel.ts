@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   applyAccountNameToChannelSection,
   buildChannelConfigSchema,
@@ -24,6 +25,7 @@ import {
   setAccountEnabledInConfigSection,
   type ChannelMessageActionAdapter,
   type ChannelPlugin,
+  type OpenClawConfig,
   type ResolvedDiscordAccount,
 } from "openclaw/plugin-sdk";
 import { getDiscordRuntime } from "./runtime.js";
@@ -36,6 +38,149 @@ const discordMessageActions: ChannelMessageActionAdapter = {
   handleAction: async (ctx) =>
     await getDiscordRuntime().channel.discord.messageActions.handleAction(ctx),
 };
+
+const DEFAULT_MUX_TIMEOUT_MS = 30_000;
+
+type ChannelMuxConfig = {
+  enabled?: boolean;
+  baseUrl?: string;
+  apiKey?: string;
+  timeoutMs?: number;
+};
+
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeBaseUrl(value?: string): string | undefined {
+  const trimmed = readNonEmptyString(value);
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+function resolveDiscordMuxConfig(params: { cfg: OpenClawConfig; accountId?: string }): {
+  enabled: boolean;
+  baseUrl?: string;
+  apiKey?: string;
+  timeoutMs: number;
+} {
+  const channelCfg = params.cfg.channels?.discord;
+  const resolvedAccountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
+  const accountCfg = channelCfg?.accounts?.[resolvedAccountId] as
+    | { mux?: ChannelMuxConfig }
+    | undefined;
+  const raw = (accountCfg?.mux ?? channelCfg?.mux) as ChannelMuxConfig | undefined;
+  const timeoutMs =
+    typeof raw?.timeoutMs === "number" && Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0
+      ? Math.trunc(raw.timeoutMs)
+      : DEFAULT_MUX_TIMEOUT_MS;
+
+  return {
+    enabled: raw?.enabled === true,
+    baseUrl: normalizeBaseUrl(raw?.baseUrl),
+    apiKey: readNonEmptyString(raw?.apiKey),
+    timeoutMs,
+  };
+}
+
+function readFirstString(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+  return readNonEmptyString(value[0]);
+}
+
+function mapMuxMessageResult(payload: Record<string, unknown>): {
+  messageId: string;
+  channelId?: string;
+} {
+  const messageId =
+    readNonEmptyString(payload.messageId) ??
+    readNonEmptyString(payload.deliveryId) ??
+    readFirstString(payload.providerMessageIds) ??
+    "unknown";
+  return {
+    messageId,
+    channelId: readNonEmptyString(payload.channelId),
+  };
+}
+
+async function sendDiscordViaMux(params: {
+  cfg: OpenClawConfig;
+  to: string;
+  text: string;
+  accountId?: string;
+  replyToId?: string | null;
+  threadId?: string | number | null;
+  sessionKey?: string | null;
+  mediaUrl?: string;
+  poll?: unknown;
+}): Promise<{ messageId: string; channelId?: string }> {
+  const mux = resolveDiscordMuxConfig({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  if (!mux.enabled) {
+    throw new Error("discord mux is not enabled");
+  }
+  if (!mux.baseUrl) {
+    throw new Error("channels.discord.mux.baseUrl is required when mux is enabled");
+  }
+  if (!mux.apiKey) {
+    throw new Error("channels.discord.mux.apiKey is required when mux is enabled");
+  }
+  const sessionKey = readNonEmptyString(params.sessionKey);
+  if (!sessionKey) {
+    throw new Error("discord mux delivery requires sessionKey; use routed replies instead");
+  }
+
+  const requestBody = {
+    requestId: randomUUID(),
+    channel: "discord",
+    sessionKey,
+    accountId: params.accountId,
+    to: params.to,
+    text: params.text,
+    mediaUrl: params.mediaUrl,
+    replyToId: params.replyToId ?? undefined,
+    threadId: params.threadId ?? undefined,
+    poll: params.poll,
+  };
+
+  const response = await fetch(`${mux.baseUrl}/v1/mux/outbound/send`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${mux.apiKey}`,
+      "Content-Type": "application/json; charset=utf-8",
+      "Idempotency-Key": requestBody.requestId,
+    },
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(mux.timeoutMs),
+  });
+
+  const responseText = await response.text();
+  let parsed: unknown = {};
+  if (responseText.trim()) {
+    try {
+      parsed = JSON.parse(responseText);
+    } catch {
+      parsed = { raw: responseText };
+    }
+  }
+  if (!response.ok) {
+    const summary =
+      typeof parsed === "object" && parsed !== null
+        ? JSON.stringify(parsed)
+        : responseText || `${response.status}`;
+    throw new Error(`discord mux outbound failed (${response.status}): ${summary}`);
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return { messageId: "unknown" };
+  }
+  return mapMuxMessageResult(parsed as Record<string, unknown>);
+}
 
 export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
   id: "discord",
@@ -278,7 +423,20 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
     chunker: null,
     textChunkLimit: 2000,
     pollMaxOptions: 10,
-    sendText: async ({ to, text, accountId, deps, replyToId }) => {
+    sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, sessionKey }) => {
+      const mux = resolveDiscordMuxConfig({ cfg, accountId: accountId ?? undefined });
+      if (mux.enabled) {
+        const result = await sendDiscordViaMux({
+          cfg,
+          to,
+          text,
+          accountId: accountId ?? undefined,
+          replyToId,
+          threadId,
+          sessionKey,
+        });
+        return { channel: "discord", ...result };
+      }
       const send = deps?.sendDiscord ?? getDiscordRuntime().channel.discord.sendMessageDiscord;
       const result = await send(to, text, {
         verbose: false,
@@ -287,7 +445,31 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
       });
       return { channel: "discord", ...result };
     },
-    sendMedia: async ({ to, text, mediaUrl, accountId, deps, replyToId }) => {
+    sendMedia: async ({
+      cfg,
+      to,
+      text,
+      mediaUrl,
+      accountId,
+      deps,
+      replyToId,
+      threadId,
+      sessionKey,
+    }) => {
+      const mux = resolveDiscordMuxConfig({ cfg, accountId: accountId ?? undefined });
+      if (mux.enabled) {
+        const result = await sendDiscordViaMux({
+          cfg,
+          to,
+          text,
+          mediaUrl,
+          accountId: accountId ?? undefined,
+          replyToId,
+          threadId,
+          sessionKey,
+        });
+        return { channel: "discord", ...result };
+      }
       const send = deps?.sendDiscord ?? getDiscordRuntime().channel.discord.sendMessageDiscord;
       const result = await send(to, text, {
         verbose: false,
@@ -297,10 +479,23 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
       });
       return { channel: "discord", ...result };
     },
-    sendPoll: async ({ to, poll, accountId }) =>
-      await getDiscordRuntime().channel.discord.sendPollDiscord(to, poll, {
+    sendPoll: async ({ cfg, to, poll, accountId, sessionKey }) => {
+      const mux = resolveDiscordMuxConfig({ cfg, accountId: accountId ?? undefined });
+      if (mux.enabled) {
+        const result = await sendDiscordViaMux({
+          cfg,
+          to,
+          text: "",
+          poll,
+          accountId: accountId ?? undefined,
+          sessionKey,
+        });
+        return { channel: "discord", ...result };
+      }
+      return await getDiscordRuntime().channel.discord.sendPollDiscord(to, poll, {
         accountId: accountId ?? undefined,
-      }),
+      });
+    },
   },
   status: {
     defaultRuntime: {

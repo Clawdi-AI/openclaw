@@ -1,6 +1,7 @@
 import type { ChannelOutboundAdapter } from "../types.js";
 import { markdownToTelegramHtmlChunks } from "../../../telegram/format.js";
 import { sendMessageTelegram } from "../../../telegram/send.js";
+import { isMuxEnabled, sendViaMux } from "./mux.js";
 
 function parseReplyToMessageId(replyToId?: string | null) {
   if (!replyToId) {
@@ -30,7 +31,20 @@ export const telegramOutbound: ChannelOutboundAdapter = {
   chunker: markdownToTelegramHtmlChunks,
   chunkerMode: "markdown",
   textChunkLimit: 4000,
-  sendText: async ({ to, text, accountId, deps, replyToId, threadId }) => {
+  sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, sessionKey }) => {
+    if (isMuxEnabled({ cfg, channel: "telegram", accountId: accountId ?? undefined })) {
+      const result = await sendViaMux({
+        cfg,
+        channel: "telegram",
+        accountId: accountId ?? undefined,
+        sessionKey,
+        to,
+        text,
+        replyToId,
+        threadId,
+      });
+      return { channel: "telegram", ...result };
+    }
     const send = deps?.sendTelegram ?? sendMessageTelegram;
     const replyToMessageId = parseReplyToMessageId(replyToId);
     const messageThreadId = parseThreadId(threadId);
@@ -43,7 +57,31 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     });
     return { channel: "telegram", ...result };
   },
-  sendMedia: async ({ to, text, mediaUrl, accountId, deps, replyToId, threadId }) => {
+  sendMedia: async ({
+    cfg,
+    to,
+    text,
+    mediaUrl,
+    accountId,
+    deps,
+    replyToId,
+    threadId,
+    sessionKey,
+  }) => {
+    if (isMuxEnabled({ cfg, channel: "telegram", accountId: accountId ?? undefined })) {
+      const result = await sendViaMux({
+        cfg,
+        channel: "telegram",
+        accountId: accountId ?? undefined,
+        sessionKey,
+        to,
+        text,
+        mediaUrl,
+        replyToId,
+        threadId,
+      });
+      return { channel: "telegram", ...result };
+    }
     const send = deps?.sendTelegram ?? sendMessageTelegram;
     const replyToMessageId = parseReplyToMessageId(replyToId);
     const messageThreadId = parseThreadId(threadId);
@@ -57,7 +95,26 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     });
     return { channel: "telegram", ...result };
   },
-  sendPayload: async ({ to, payload, accountId, deps, replyToId, threadId }) => {
+  sendPayload: async ({ cfg, to, payload, accountId, deps, replyToId, threadId, sessionKey }) => {
+    if (isMuxEnabled({ cfg, channel: "telegram", accountId: accountId ?? undefined })) {
+      const result = await sendViaMux({
+        cfg,
+        channel: "telegram",
+        accountId: accountId ?? undefined,
+        sessionKey,
+        to,
+        text: payload.text ?? "",
+        mediaUrl: payload.mediaUrl,
+        mediaUrls: payload.mediaUrls,
+        replyToId,
+        threadId,
+        channelData:
+          typeof payload.channelData === "object" && payload.channelData !== null
+            ? payload.channelData
+            : undefined,
+      });
+      return { channel: "telegram", ...result };
+    }
     const send = deps?.sendTelegram ?? sendMessageTelegram;
     const replyToMessageId = parseReplyToMessageId(replyToId);
     const messageThreadId = parseThreadId(threadId);
