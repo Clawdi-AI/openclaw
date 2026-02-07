@@ -86,6 +86,7 @@ type ChannelHandlerParams = {
   cfg: OpenClawConfig;
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  sessionKey?: string | null;
   accountId?: string;
   replyToId?: string | null;
   threadId?: string | number | null;
@@ -151,6 +152,7 @@ function createChannelOutboundContextBase(
   return {
     cfg: params.cfg,
     to: params.to,
+    sessionKey: params.sessionKey,
     accountId: params.accountId,
     replyToId: params.replyToId,
     threadId: params.threadId,
@@ -168,6 +170,7 @@ type DeliverOutboundPayloadsCoreParams = {
   cfg: OpenClawConfig;
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  sessionKey?: string | null;
   accountId?: string;
   payloads: ReplyPayload[];
   replyToId?: string | null;
@@ -269,10 +272,12 @@ async function deliverOutboundPayloadsCore(
     params.agentId ?? params.mirror?.agentId,
   );
   const results: OutboundDeliveryResult[] = [];
+  const sessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
   const handler = await createChannelHandler({
     cfg,
     channel,
     to,
+    sessionKey,
     deps,
     accountId,
     replyToId: params.replyToId,

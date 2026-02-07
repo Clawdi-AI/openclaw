@@ -137,6 +137,7 @@ export {
   TtsModeSchema,
   TtsProviderSchema,
 } from "../config/zod-schema.core.js";
+export { resolveMarkdownTableMode } from "../config/markdown-tables.js";
 export { ToolPolicySchema } from "../config/zod-schema.agent-runtime.js";
 export type { RuntimeEnv } from "../runtime.js";
 export type { WizardPrompter } from "../wizard/prompts.js";
@@ -364,6 +365,7 @@ export {
   resolveTelegramAccount,
   type ResolvedTelegramAccount,
 } from "../telegram/accounts.js";
+export { renderTelegramHtmlText } from "../telegram/format.js";
 export { telegramOnboardingAdapter } from "../channels/plugins/onboarding/telegram.js";
 export {
   looksLikeTelegramTargetId,
@@ -438,6 +440,8 @@ export {
   stripMarkdown,
 } from "../line/markdown-to-line.js";
 export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
+
+export { isMuxEnabled, sendViaMux } from "../channels/plugins/outbound/mux.js";
 
 // Media utilities
 export { loadWebMedia, type WebMediaResult } from "../web/media.js";
