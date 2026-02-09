@@ -8,15 +8,20 @@ This directory contains a standalone TypeScript mux server for staged rollout an
 - Implements `GET /v1/pairings`
 - Implements `POST /v1/pairings/claim`
 - Implements `POST /v1/pairings/unbind`
+- Implements `GET /v1/tenant/inbound-target`
+- Implements `POST /v1/tenant/inbound-target`
 - Implements `POST /v1/mux/outbound/send`
 - Implements Telegram inbound polling + forwarding to OpenClaw `POST /v1/mux/inbound`
 - Implements Discord inbound polling + forwarding to OpenClaw `POST /v1/mux/inbound`
+- Implements WhatsApp inbound monitoring + forwarding to OpenClaw `POST /v1/mux/inbound`
 - Supports Telegram outbound via Bot API:
   - `sendMessage` (text)
   - `sendPhoto` (image with optional caption)
 - Supports Discord outbound via Bot API:
   - `POST /channels/{id}/messages` (text)
   - DM route via `POST /users/@me/channels` + channel message send
+- Supports WhatsApp outbound via OpenClaw Web listener:
+  - text and image sends through bound session route
 - Supports idempotency via `Idempotency-Key`:
   - Same key + same payload: cached replay
   - Same key + different payload: `409`
@@ -46,7 +51,8 @@ This repo now has 3 mux-related pieces:
 3. `mux-server/src/server.ts`
 
 - External mux service implementation (this directory)
-- Telegram + Discord outbound + inbound (poll + forward)
+- Telegram + Discord + WhatsApp outbound + inbound forwarding
+- Shared payload contract helpers live in `mux-server/src/mux-envelope.ts` to keep no-transform rules centralized.
 
 In short: OpenClaw inbound/outbound adapters are in `src/`; the standalone mux service is here.
 
@@ -92,6 +98,11 @@ node --import tsx mux-server/src/server.ts
 - `MUX_DISCORD_POLL_INTERVAL_MS` (default `2000`): Discord poll interval.
 - `MUX_DISCORD_BOOTSTRAP_LATEST` (default `true`): when enabled, skips historical backlog on cold start.
 - `MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size fetched from Discord attachment URLs for inbound image attachments.
+- `MUX_WHATSAPP_INBOUND_ENABLED` (default `false`): enable WhatsApp inbound monitoring and forwarding.
+- `MUX_WHATSAPP_ACCOUNT_ID` (default `default`): WhatsApp account id to monitor.
+- `MUX_WHATSAPP_AUTH_DIR` (optional): WhatsApp auth directory; defaults to OpenClaw's default web auth dir.
+- `MUX_WHATSAPP_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size read from saved WhatsApp inbound media files for image attachments.
+- `MUX_WHATSAPP_INBOUND_RETRY_MS` (default `1000`): reconnect backoff when WhatsApp listener closes.
 - `MUX_TELEGRAM_BOT_USERNAME` (optional): enables Telegram deep link in pairing-token response.
 - `MUX_PAIRING_TOKEN_TTL_SEC` (default `900`): default one-time pairing-token TTL in seconds.
 - `MUX_PAIRING_TOKEN_MAX_TTL_SEC` (default `3600`): max allowed one-time pairing-token TTL.
@@ -159,7 +170,7 @@ Body:
 
 Behavior:
 
-- `channel` is required (`telegram` or `discord`).
+- `channel` is required (`telegram`, `discord`, or `whatsapp`).
 - `sessionKey` is required.
 - At least one of `text`, `mediaUrl`, or `mediaUrls` is required.
 - Destination is resolved from mux route mapping `(tenant, channel, sessionKey)`.
@@ -167,6 +178,7 @@ Behavior:
 - If no route mapping exists, returns `403` with `code: "ROUTE_NOT_BOUND"`.
 - Telegram: first media URL uses `sendPhoto` (with optional caption from `text`), extra media URLs are sent as additional `sendPhoto` messages.
 - Discord: outbound sends text as `content` and media URLs as `embeds[].image.url` (no text+URL folding).
+- WhatsApp: outbound route target is always resolved from route binding; first media item can carry caption from `text`, extra media items are sent as separate messages without caption.
 - `threadId` maps to Telegram `message_thread_id`.
 - `replyToId` maps to Telegram `reply_to_message_id`.
 - Discord guild-bound routes validate that destination channel belongs to the bound guild.
@@ -230,6 +242,16 @@ Discord body variant:
 }
 ```
 
+WhatsApp body variant:
+
+```json
+{
+  "channel": "whatsapp",
+  "sessionKey": "wa:chat:15550001111@s.whatsapp.net",
+  "ttlSec": 900
+}
+```
+
 Response `200`:
 
 ```json
@@ -249,6 +271,7 @@ Behavior:
 - Telegram: user sends token to bot (manual token message or `/start <token>` deep link).
 - Discord: `routeKey` is required and currently supports `dm` route only (`discord:default:dm:user:<userId>`).
 - Discord: token issuance creates a pending DM binding; sending token in that DM activates it.
+- WhatsApp: user sends token as a normal message in the target chat; mux binds that chat route to tenant/session.
 - Mux binds route from the incoming chat/topic to this tenant and consumes token.
 - The token message is not forwarded to OpenClaw; subsequent messages are forwarded.
 - Invalid or reused tokens return a user-facing notice (configured by `MUX_PAIRING_INVALID_TEXT`).
@@ -295,6 +318,44 @@ Response `200`:
 { "ok": true }
 ```
 
+### `GET /v1/tenant/inbound-target`
+
+Headers:
+
+- `Authorization: Bearer <tenant_api_key>`
+
+Response `200`:
+
+```json
+{
+  "ok": true,
+  "configured": true,
+  "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
+  "inboundTimeoutMs": 15000
+}
+```
+
+### `POST /v1/tenant/inbound-target`
+
+Headers:
+
+- `Authorization: Bearer <tenant_api_key>`
+
+Body:
+
+```json
+{
+  "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
+  "inboundToken": "tenant-a-mux-inbound-token",
+  "inboundTimeoutMs": 15000
+}
+```
+
+Behavior:
+
+- Updates the tenant's forwarding target in SQLite immediately.
+- No mux restart required.
+
 ## Reliability Notes
 
 ### Idempotency
@@ -318,6 +379,42 @@ Recommended caller contract:
 2. Reuse it as `Idempotency-Key` on every retry.
 3. Retry on network/5xx with backoff.
 4. Treat unknown-ack windows as retriable, not hard-fail.
+
+### Delivery Semantics Upgrade (Implemented)
+
+Goal: avoid silent inbound message loss when OpenClaw forwarding fails.
+
+Scope:
+
+- Telegram inbound poller (offset-based)
+- Discord inbound poller (offset-based)
+- WhatsApp inbound listener (event callback based)
+
+Behavior:
+
+- A message is acknowledged only after one of these:
+- forwarded to OpenClaw successfully
+- intentionally consumed by mux (for example pairing token command)
+- If forwarding fails, do not acknowledge that message.
+- Retry failed messages in order.
+
+Implementation checklist:
+
+- [x] Telegram: replaced commit-in-finally offset flow with ack-safe commit flow
+- [x] Telegram: stop processing newer updates after first failed forward
+- [x] Discord: commit only the last acknowledged message id per binding
+- [x] Discord: keep earlier successful messages committed even if a later message fails in the same batch
+- [x] WhatsApp: added SQLite-backed pending inbound queue
+- [x] WhatsApp: enqueue first, then forward worker marks done only on success
+- [x] WhatsApp: retry queue items with backoff; do not drop on first failure
+- [x] Logging: explicit `ack_committed` and `retry_deferred` events per channel
+- [ ] Tests: add WhatsApp failure-then-retry regression test
+
+Out of scope for this pass:
+
+- Exactly-once guarantee end-to-end
+- Distributed queue or multi-node delivery coordination
+- Cross-region failover logic
 
 ## Telegram-Specific Notes
 
@@ -368,8 +465,51 @@ sequenceDiagram
 Notes:
 
 - Forwarding target is tenant-specific (`inboundUrl`, `inboundToken` from tenant config).
+- Forwarding target is resolved dynamically from SQLite on each inbound forward.
 - Inbound auth is enforced by OpenClaw `gateway.http.endpoints.mux.token`.
-- Current offset handling stores `last_update_id` even when forwarding fails, so behavior is effectively at-most-once for inbound delivery.
+- Telegram and Discord offsets are committed only after acked processing.
+- WhatsApp inbound is persisted in SQLite queue and retried with backoff until acked.
+
+## WhatsApp Data Flow
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant UI as Dashboard (mock)
+  participant MUX as mux-server API
+  participant WA as WhatsApp user chat
+  participant WL as WA listener (monitorWebInbox)
+  participant DB as SQLite (tokens/bindings/session_routes/queue)
+  participant Q as Queue worker
+  participant OC as OpenClaw gateway (/v1/mux/inbound)
+  participant OUT as WA send (sendMessageWhatsApp)
+
+  UI->>OC: Request pairing link in dashboard chat
+  OC->>MUX: POST /v1/pairings/token
+  MUX-->>OC: token
+  OC-->>UI: pairing deep link
+  UI->>WA: User sends token in target chat
+  WA->>WL: inbound event
+  WL->>DB: enqueue snapshot (dedupe by account/chat/message id)
+  Q->>DB: pull due queue items
+  Q->>DB: resolve binding by routeKey (whatsapp:<account>:chat:<jid>)
+  alt Unbound + token message
+    Q->>DB: validate+consume one-time token
+    Q->>DB: create binding + session route
+    Q->>OUT: send pairing success notice
+    Q->>DB: ack queue row (delete)
+  else Bound normal message
+    Q->>OC: POST /v1/mux/inbound (tenant inbound token)
+    alt OpenClaw accepted
+      Q->>DB: ack queue row (delete)
+      OC->>MUX: POST /v1/mux/outbound/send
+      MUX->>OUT: outbound reply via bound route
+    else OpenClaw/network failure
+      Q->>DB: keep row, increment attempt, set next_attempt_at_ms
+      Q->>Q: retry later with exponential backoff
+    end
+  end
+```
 
 ## OpenClaw Command Note
 
@@ -409,9 +549,13 @@ Current test coverage (`mux-server/test/server.test.ts`):
 - multi-tenant auth via `MUX_TENANTS_JSON`
 - pairing claim/list/unbind flow
 - duplicate pairing claim conflict handling
+- dynamic tenant inbound target update without restart
 - outbound route resolution from `(tenant, channel, sessionKey)` mapping
 - Telegram inbound forwarding to tenant inbound endpoint
+- Telegram retry without offset advance on failed forward
 - Telegram media-only inbound forwarding with attachment payload preservation
+- Discord inbound forwarding with raw payload + media attachment preservation
+- Discord retry without replaying already-acked earlier messages
 - dashboard token pairing via `/start <token>` then forwarding subsequent messages
 - idempotency replay + payload mismatch handling
 - idempotency persistence across process restart

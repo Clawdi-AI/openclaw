@@ -1,19 +1,18 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-
-type MuxPayload = {
-  channel?: unknown;
-  sessionKey?: unknown;
-  to?: unknown;
-  text?: unknown;
-  mediaUrl?: unknown;
-  mediaUrls?: unknown;
-  replyToId?: unknown;
-  threadId?: unknown;
-};
+import {
+  buildWhatsAppInboundEnvelope,
+  buildDiscordInboundEnvelope,
+  buildTelegramInboundEnvelope,
+  collectOutboundMediaUrls,
+  type MuxInboundAttachment,
+  type MuxPayload,
+  readOutboundText,
+} from "./mux-envelope.js";
 
 type SendResult = {
   statusCode: number;
@@ -96,6 +95,13 @@ type ActiveDiscordBindingRow = {
   status: string;
 };
 
+type WhatsAppInboundQueueRow = {
+  id: number;
+  dedupe_key: string;
+  payload_json: string;
+  attempt_count: number;
+};
+
 type TelegramBoundRoute = {
   chatId: string;
   topicId?: number;
@@ -123,10 +129,79 @@ type DiscordOutboundTarget =
       id: string;
     };
 
+type WhatsAppBoundRoute = {
+  accountId: string;
+  chatJid: string;
+};
+
 type TenantInboundTarget = {
   url: string;
   token: string;
   timeoutMs: number;
+};
+
+type WebInboundMessage = {
+  id?: string;
+  from: string;
+  to: string;
+  accountId: string;
+  body: string;
+  timestamp?: number;
+  chatType: "direct" | "group";
+  chatId: string;
+  senderJid?: string;
+  senderE164?: string;
+  senderName?: string;
+  replyToId?: string;
+  replyToBody?: string;
+  replyToSender?: string;
+  replyToSenderJid?: string;
+  replyToSenderE164?: string;
+  groupSubject?: string;
+  groupParticipants?: string[];
+  mentionedJids?: string[];
+  mediaPath?: string;
+  mediaType?: string;
+  mediaUrl?: string;
+};
+
+type ActiveWebListener = {
+  close?: () => Promise<void>;
+};
+
+type WebListenerCloseReason = {
+  status?: number;
+  isLoggedOut: boolean;
+  error?: unknown;
+};
+
+type WebMonitorListener = ActiveWebListener & {
+  close: () => Promise<void>;
+  onClose: Promise<WebListenerCloseReason>;
+};
+
+type WebRuntimeModules = {
+  monitorWebInbox: (options: {
+    verbose: boolean;
+    accountId: string;
+    authDir: string;
+    onMessage: (msg: WebInboundMessage) => Promise<void>;
+    mediaMaxMb?: number;
+    sendReadReceipts?: boolean;
+    debounceMs?: number;
+    shouldDebounce?: (msg: WebInboundMessage) => boolean;
+  }) => Promise<WebMonitorListener>;
+  sendMessageWhatsApp: (
+    to: string,
+    body: string,
+    options: {
+      verbose: boolean;
+      mediaUrl?: string;
+      gifPlayback?: boolean;
+      accountId?: string;
+    },
+  ) => Promise<{ messageId: string; toJid: string }>;
+  setActiveWebListener: (accountId: string | null | undefined, listener: unknown | null) => void;
 };
 
 type TelegramIncomingMessage = {
@@ -178,12 +253,7 @@ type TelegramAnimation = {
   file_size?: number;
 };
 
-type TelegramInboundAttachment = {
-  type?: string;
-  mimeType?: string;
-  fileName?: string;
-  content: string;
-};
+type TelegramInboundAttachment = MuxInboundAttachment;
 
 type TelegramInboundMediaSummary = {
   kind: string;
@@ -197,12 +267,7 @@ type TelegramInboundMediaSummary = {
   filePath?: string;
 };
 
-type DiscordInboundAttachment = {
-  type?: string;
-  mimeType?: string;
-  fileName?: string;
-  content: string;
-};
+type DiscordInboundAttachment = MuxInboundAttachment;
 
 type DiscordInboundMediaSummary = {
   id?: string;
@@ -212,11 +277,62 @@ type DiscordInboundMediaSummary = {
   url?: string;
 };
 
+type WhatsAppInboundAttachment = MuxInboundAttachment;
+
+type WhatsAppInboundMediaSummary = {
+  mediaPath?: string;
+  mediaType?: string;
+  sizeBytes?: number;
+};
+
 type TelegramUpdate = {
   update_id?: number;
   message?: TelegramIncomingMessage;
   edited_message?: TelegramIncomingMessage;
 };
+
+function resolveDefaultWhatsAppAuthDir(): string {
+  const stateDirRaw =
+    process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  const stateDir = stateDirRaw ? path.resolve(stateDirRaw) : path.join(os.homedir(), ".openclaw");
+  const oauthDirRaw = process.env.OPENCLAW_OAUTH_DIR?.trim();
+  const oauthDir = oauthDirRaw ? path.resolve(oauthDirRaw) : path.join(stateDir, "credentials");
+  return path.join(oauthDir, "whatsapp", "default");
+}
+
+let webRuntimeModulesPromise: Promise<WebRuntimeModules> | null = null;
+
+async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
+  if (!webRuntimeModulesPromise) {
+    webRuntimeModulesPromise = (async () => {
+      const inboundModulePath = "../../src/web/" + "inbound.js";
+      const outboundModulePath = "../../src/web/" + "outbound.js";
+      const activeListenerModulePath = "../../src/web/" + "active-listener.js";
+      const inboundModule = (await import(inboundModulePath)) as {
+        monitorWebInbox?: WebRuntimeModules["monitorWebInbox"];
+      };
+      const outboundModule = (await import(outboundModulePath)) as {
+        sendMessageWhatsApp?: WebRuntimeModules["sendMessageWhatsApp"];
+      };
+      const activeListenerModule = (await import(activeListenerModulePath)) as {
+        setActiveWebListener?: WebRuntimeModules["setActiveWebListener"];
+      };
+      if (
+        typeof inboundModule.monitorWebInbox !== "function" ||
+        typeof outboundModule.sendMessageWhatsApp !== "function" ||
+        typeof activeListenerModule.setActiveWebListener !== "function"
+      ) {
+        throw new Error("failed to load WhatsApp runtime modules");
+      }
+      return {
+        monitorWebInbox: inboundModule.monitorWebInbox,
+        sendMessageWhatsApp: outboundModule.sendMessageWhatsApp,
+        setActiveWebListener: activeListenerModule.setActiveWebListener,
+      };
+    })();
+  }
+  return await webRuntimeModulesPromise;
+}
 
 const host = process.env.MUX_HOST || "127.0.0.1";
 const port = Number(process.env.MUX_PORT || 18891);
@@ -246,6 +362,20 @@ const discordBootstrapLatest = process.env.MUX_DISCORD_BOOTSTRAP_LATEST !== "fal
 const discordInboundMediaMaxBytes = Number(
   process.env.MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
+const whatsappInboundEnabled = process.env.MUX_WHATSAPP_INBOUND_ENABLED === "true";
+const whatsappAccountId = readNonEmptyString(process.env.MUX_WHATSAPP_ACCOUNT_ID) || "default";
+const whatsappAuthDir =
+  readNonEmptyString(process.env.MUX_WHATSAPP_AUTH_DIR) || resolveDefaultWhatsAppAuthDir();
+const whatsappInboundMediaMaxBytes = Number(
+  process.env.MUX_WHATSAPP_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
+);
+const whatsappInboundRetryMs = Number(process.env.MUX_WHATSAPP_INBOUND_RETRY_MS || 1_000);
+const whatsappQueuePollMs = Number(process.env.MUX_WHATSAPP_QUEUE_POLL_MS || 500);
+const whatsappQueueRetryInitialMs = Number(
+  process.env.MUX_WHATSAPP_QUEUE_RETRY_INITIAL_MS || 1_000,
+);
+const whatsappQueueRetryMaxMs = Number(process.env.MUX_WHATSAPP_QUEUE_RETRY_MAX_MS || 60_000);
+const whatsappQueueBatchSize = Number(process.env.MUX_WHATSAPP_QUEUE_BATCH_SIZE || 20);
 const pairingTokenTtlSec = Number(process.env.MUX_PAIRING_TOKEN_TTL_SEC || 15 * 60);
 const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
 const telegramBotUsername = readNonEmptyString(process.env.MUX_TELEGRAM_BOT_USERNAME);
@@ -297,6 +427,29 @@ const stmtSelectTenantByHash = db.prepare(`
   FROM tenants
   WHERE api_key_hash = ? AND status = 'active'
   LIMIT 1
+`);
+
+const stmtSelectTenantInboundTargetById = db.prepare(`
+  SELECT inbound_url, inbound_token, inbound_timeout_ms
+  FROM tenants
+  WHERE id = ? AND status = 'active'
+  LIMIT 1
+`);
+
+const stmtUpdateTenantInboundTargetById = db.prepare(`
+  UPDATE tenants
+  SET inbound_url = ?, inbound_token = ?, inbound_timeout_ms = ?, updated_at_ms = ?
+  WHERE id = ? AND status = 'active'
+`);
+
+const stmtCountActiveTenantInboundTargets = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM tenants
+  WHERE status = 'active'
+    AND inbound_url IS NOT NULL
+    AND TRIM(inbound_url) <> ''
+    AND inbound_token IS NOT NULL
+    AND TRIM(inbound_token) <> ''
 `);
 
 const stmtDeleteExpiredIdempotency = db.prepare(`
@@ -521,26 +674,54 @@ const stmtUpsertDiscordOffsetByBinding = db.prepare(`
     updated_at_ms = excluded.updated_at_ms
 `);
 
+const stmtInsertWhatsAppInboundQueue = db.prepare(`
+  INSERT INTO whatsapp_inbound_queue (
+    dedupe_key,
+    payload_json,
+    next_attempt_at_ms,
+    attempt_count,
+    last_error,
+    created_at_ms,
+    updated_at_ms
+  )
+  VALUES (?, ?, ?, 0, NULL, ?, ?)
+  ON CONFLICT(dedupe_key) DO NOTHING
+`);
+
+const stmtSelectDueWhatsAppInboundQueue = db.prepare(`
+  SELECT id, dedupe_key, payload_json, attempt_count
+  FROM whatsapp_inbound_queue
+  WHERE next_attempt_at_ms <= ?
+  ORDER BY id ASC
+  LIMIT ?
+`);
+
+const stmtDeleteWhatsAppInboundQueueById = db.prepare(`
+  DELETE FROM whatsapp_inbound_queue
+  WHERE id = ?
+`);
+
+const stmtDeferWhatsAppInboundQueueById = db.prepare(`
+  UPDATE whatsapp_inbound_queue
+  SET
+    next_attempt_at_ms = ?,
+    attempt_count = ?,
+    last_error = ?,
+    updated_at_ms = ?
+  WHERE id = ?
+`);
+
 const stmtInsertAuditLog = db.prepare(`
   INSERT INTO audit_logs (tenant_id, event_type, payload_json, created_at_ms)
   VALUES (?, ?, ?, ?)
 `);
 
 const idempotencyInflight = new Map<string, InflightEntry>();
-const tenantInboundTargets = new Map<string, TenantInboundTarget>();
 const discordChannelGuildCache = new Map<string, { guildId: string | null; expiresAtMs: number }>();
 const discordChannelGuildCacheTtlMs = 30_000;
 const discordDmChannelCache = new Map<string, { channelId: string; expiresAtMs: number }>();
 const discordDmChannelCacheTtlMs = 10 * 60_000;
-for (const tenant of tenantSeeds) {
-  if (tenant.inboundUrl && tenant.inboundToken) {
-    tenantInboundTargets.set(tenant.id, {
-      url: tenant.inboundUrl,
-      token: tenant.inboundToken,
-      timeoutMs: tenant.inboundTimeoutMs,
-    });
-  }
-}
+let activeWhatsAppListener: ActiveWebListener | null = null;
 
 function hashApiKey(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -571,6 +752,32 @@ function resolveTenantIdentity(req: IncomingMessage): TenantIdentity | null {
   }
   const name = typeof row.name === "string" && row.name.trim() ? row.name : id;
   return { id, name };
+}
+
+function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | null {
+  const row = stmtSelectTenantInboundTargetById.get(tenantId) as
+    | {
+        inbound_url?: unknown;
+        inbound_token?: unknown;
+        inbound_timeout_ms?: unknown;
+      }
+    | undefined;
+  const url = readNonEmptyString(row?.inbound_url);
+  const token = readNonEmptyString(row?.inbound_token);
+  if (!url || !token) {
+    return null;
+  }
+  const timeoutMs = readPositiveInt(row?.inbound_timeout_ms) ?? 15_000;
+  return { url, token, timeoutMs };
+}
+
+function countActiveTenantInboundTargets(): number {
+  const row = stmtCountActiveTenantInboundTargets.get() as { count?: unknown } | undefined;
+  const count = Number(row?.count);
+  if (!Number.isFinite(count) || count < 0) {
+    return 0;
+  }
+  return Math.trunc(count);
 }
 
 function resolveTenantSeeds(): TenantSeed[] {
@@ -710,6 +917,9 @@ function initializeDatabase(database: DatabaseSync) {
       name TEXT NOT NULL,
       api_key_hash TEXT NOT NULL UNIQUE,
       status TEXT NOT NULL DEFAULT 'active',
+      inbound_url TEXT,
+      inbound_token TEXT,
+      inbound_timeout_ms INTEGER,
       created_at_ms INTEGER NOT NULL,
       updated_at_ms INTEGER NOT NULL
     );
@@ -795,22 +1005,72 @@ function initializeDatabase(database: DatabaseSync) {
       last_message_id TEXT NOT NULL,
       updated_at_ms INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS whatsapp_inbound_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      payload_json TEXT NOT NULL,
+      next_attempt_at_ms INTEGER NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_whatsapp_inbound_queue_next_attempt
+      ON whatsapp_inbound_queue(next_attempt_at_ms, id);
   `);
+  ensureTenantInboundTargetColumns(database);
+}
+
+function ensureTenantInboundTargetColumns(database: DatabaseSync) {
+  const rows = database.prepare("PRAGMA table_info(tenants)").all() as Array<{ name?: unknown }>;
+  const columnNames = new Set(rows.map((row) => (typeof row.name === "string" ? row.name : "")));
+  if (!columnNames.has("inbound_url")) {
+    database.exec("ALTER TABLE tenants ADD COLUMN inbound_url TEXT");
+  }
+  if (!columnNames.has("inbound_token")) {
+    database.exec("ALTER TABLE tenants ADD COLUMN inbound_token TEXT");
+  }
+  if (!columnNames.has("inbound_timeout_ms")) {
+    database.exec("ALTER TABLE tenants ADD COLUMN inbound_timeout_ms INTEGER");
+  }
 }
 
 function seedTenants(database: DatabaseSync, tenants: TenantSeed[]) {
   const now = Date.now();
   const upsert = database.prepare(`
-    INSERT INTO tenants (id, name, api_key_hash, status, created_at_ms, updated_at_ms)
-    VALUES (?, ?, ?, 'active', ?, ?)
+    INSERT INTO tenants (
+      id,
+      name,
+      api_key_hash,
+      status,
+      inbound_url,
+      inbound_token,
+      inbound_timeout_ms,
+      created_at_ms,
+      updated_at_ms
+    )
+    VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       api_key_hash = excluded.api_key_hash,
       status = 'active',
+      inbound_url = COALESCE(tenants.inbound_url, excluded.inbound_url),
+      inbound_token = COALESCE(tenants.inbound_token, excluded.inbound_token),
+      inbound_timeout_ms = COALESCE(tenants.inbound_timeout_ms, excluded.inbound_timeout_ms),
       updated_at_ms = excluded.updated_at_ms
   `);
   for (const tenant of tenants) {
-    upsert.run(tenant.id, tenant.name, hashApiKey(tenant.apiKey), now, now);
+    upsert.run(
+      tenant.id,
+      tenant.name,
+      hashApiKey(tenant.apiKey),
+      tenant.inboundUrl ?? null,
+      tenant.inboundToken ?? null,
+      tenant.inboundTimeoutMs,
+      now,
+      now,
+    );
   }
 }
 
@@ -1009,7 +1269,7 @@ async function sendDiscordMessage(params: {
     const embeds = params.mediaUrls
       .slice(0, 10)
       .map((url) => ({ image: { url } }))
-      .filter((embed) => typeof embed.image.url === "string" && embed.image.url.trim().length > 0);
+      .filter((embed) => typeof embed.image.url === "string" && embed.image.url.length > 0);
     if (embeds.length > 0) {
       body.embeds = embeds;
     }
@@ -1077,7 +1337,12 @@ async function downloadDiscordFileBase64(url: string): Promise<string | null> {
     Number.isFinite(discordInboundMediaMaxBytes) && discordInboundMediaMaxBytes > 0
       ? Math.trunc(discordInboundMediaMaxBytes)
       : 5_000_000;
-  const response = await fetch(url);
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch {
+    return null;
+  }
   if (!response.ok) {
     return null;
   }
@@ -1232,7 +1497,11 @@ function issuePairingTokenForTenant(params: {
   routeKey?: string;
   ttlSec?: number;
 }) {
-  if (params.channel !== "telegram" && params.channel !== "discord") {
+  if (
+    params.channel !== "telegram" &&
+    params.channel !== "discord" &&
+    params.channel !== "whatsapp"
+  ) {
     return {
       statusCode: 400,
       payload: { ok: false, error: "unsupported channel for token pairing" },
@@ -1335,9 +1604,19 @@ function extractTokenFromStartCommand(input: string): string | null {
   return readNonEmptyString(match[1]);
 }
 
+function normalizeControlText(input: string | null): string | null {
+  if (typeof input !== "string") {
+    return null;
+  }
+  const trimmed = input.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function extractPairingTokenFromTelegramMessage(message: TelegramIncomingMessage): string | null {
-  const text = readNonEmptyString(message.text) ?? readNonEmptyString(message.caption);
-  if (!text) {
+  const rawText = typeof message.text === "string" ? message.text : undefined;
+  const rawCaption = typeof message.caption === "string" ? message.caption : undefined;
+  const text = normalizeControlText(rawText ?? rawCaption ?? null);
+  if (text === null) {
     return null;
   }
   const fromStart = extractTokenFromStartCommand(text);
@@ -1349,27 +1628,46 @@ function extractPairingTokenFromTelegramMessage(message: TelegramIncomingMessage
 }
 
 function isTelegramCommandText(input: string | null): boolean {
-  if (!input) {
+  const normalized = normalizeControlText(input);
+  if (!normalized) {
     return false;
   }
-  return /^\/[A-Za-z0-9_]+/.test(input.trim());
+  return /^\/[A-Za-z0-9_]+/.test(normalized);
 }
 
 function extractPairingTokenFromText(input: string | null): string | null {
-  if (!input) {
+  const normalized = normalizeControlText(input);
+  if (!normalized) {
     return null;
   }
-  const direct = input.match(/\b(mpt_[A-Za-z0-9_-]{20,200})\b/);
+  const direct = normalized.match(/\b(mpt_[A-Za-z0-9_-]{20,200})\b/);
   return direct?.[1] ?? null;
 }
 
 function extractPairingTokenFromDiscordMessage(message: Record<string, unknown>): string | null {
-  const text = readNonEmptyString(message.content);
+  const text = typeof message.content === "string" ? message.content : null;
+  return extractPairingTokenFromText(text);
+}
+
+function extractPairingTokenFromWhatsAppMessage(message: WebInboundMessage): string | null {
+  const text = typeof message.body === "string" ? message.body : null;
   return extractPairingTokenFromText(text);
 }
 
 function isDiscordCommandText(input: string): boolean {
-  return /^\/[A-Za-z0-9_]+/.test(input.trim());
+  const normalized = normalizeControlText(input);
+  if (!normalized) {
+    return false;
+  }
+  return /^\/[A-Za-z0-9_]+/.test(normalized);
+}
+
+function isWhatsAppCommandText(input: string): boolean {
+  const normalized = normalizeControlText(input);
+  if (!normalized) {
+    return false;
+  }
+  return /^[/!][A-Za-z0-9_]+/.test(normalized);
 }
 
 function isImageMimeType(value: string | undefined): boolean {
@@ -1629,6 +1927,82 @@ async function sendTelegramPairingNotice(params: {
   }
 }
 
+async function extractWhatsAppInboundMedia(params: {
+  message: WebInboundMessage;
+}): Promise<{ attachments: WhatsAppInboundAttachment[]; media: WhatsAppInboundMediaSummary[] }> {
+  const attachments: WhatsAppInboundAttachment[] = [];
+  const media: WhatsAppInboundMediaSummary[] = [];
+  const mediaPath = readNonEmptyString(params.message.mediaPath) ?? undefined;
+  const mediaType = readNonEmptyString(params.message.mediaType)?.toLowerCase() ?? undefined;
+  if (!mediaPath) {
+    return { attachments, media };
+  }
+
+  const summary: WhatsAppInboundMediaSummary = {
+    mediaPath,
+    mediaType,
+  };
+  let sizeBytes: number | undefined;
+  try {
+    const stat = fs.statSync(mediaPath);
+    if (stat.isFile() && Number.isFinite(stat.size) && stat.size > 0) {
+      sizeBytes = Math.trunc(stat.size);
+      summary.sizeBytes = sizeBytes;
+    }
+  } catch (error) {
+    log({
+      type: "whatsapp_media_stat_error",
+      mediaPath,
+      error: String(error),
+    });
+  }
+  media.push(summary);
+
+  const resolvedMime = mediaType || inferImageMimeTypeFromPath(mediaPath);
+  if (!isImageMimeType(resolvedMime)) {
+    return { attachments, media };
+  }
+  const maxBytes =
+    Number.isFinite(whatsappInboundMediaMaxBytes) && whatsappInboundMediaMaxBytes > 0
+      ? Math.trunc(whatsappInboundMediaMaxBytes)
+      : 5_000_000;
+  if (sizeBytes && sizeBytes > maxBytes) {
+    return { attachments, media };
+  }
+
+  try {
+    const buffer = fs.readFileSync(mediaPath);
+    if (buffer.byteLength === 0 || buffer.byteLength > maxBytes) {
+      return { attachments, media };
+    }
+    attachments.push({
+      type: "image",
+      mimeType: resolvedMime || "image/jpeg",
+      fileName: path.basename(mediaPath),
+      content: buffer.toString("base64"),
+    });
+  } catch (error) {
+    log({
+      type: "whatsapp_media_read_error",
+      mediaPath,
+      error: String(error),
+    });
+  }
+  return { attachments, media };
+}
+
+async function sendWhatsAppPairingNotice(params: {
+  chatJid: string;
+  accountId: string;
+  text: string;
+}) {
+  const { sendMessageWhatsApp } = await loadWebRuntimeModules();
+  await sendMessageWhatsApp(params.chatJid, params.text, {
+    verbose: false,
+    accountId: params.accountId,
+  });
+}
+
 function normalizeChannel(value: unknown): string | null {
   if (typeof value !== "string" || !value.trim()) {
     return null;
@@ -1669,6 +2043,27 @@ function parseDiscordRouteKey(routeKey: string): DiscordBoundRoute | null {
     ...(channelId ? { channelId } : {}),
     ...(threadId ? { threadId } : {}),
   };
+}
+
+function buildWhatsAppRouteKey(chatJid: string, accountId = "default"): string {
+  return `whatsapp:${accountId}:chat:${chatJid}`;
+}
+
+function parseWhatsAppRouteKey(routeKey: string): WhatsAppBoundRoute | null {
+  const match = routeKey.match(/^whatsapp:([^:]+):chat:(.+)$/);
+  if (!match?.[1] || !match?.[2]) {
+    return null;
+  }
+  const accountId = match[1].trim();
+  const chatJid = match[2].trim();
+  if (!accountId || !chatJid) {
+    return null;
+  }
+  return { accountId, chatJid };
+}
+
+function deriveWhatsAppSessionKey(chatJid: string, chatType: "direct" | "group"): string {
+  return chatType === "group" ? `wa:group:${chatJid}` : `wa:chat:${chatJid}`;
 }
 
 function parseDiscordOutboundTarget(value: unknown): DiscordOutboundTarget | null {
@@ -1740,6 +2135,22 @@ function resolveDiscordBoundRoute(params: {
     return null;
   }
   return parseDiscordRouteKey(String(row.route_key));
+}
+
+function resolveWhatsAppBoundRoute(params: {
+  tenantId: string;
+  channel: string;
+  sessionKey: string;
+}): WhatsAppBoundRoute | null {
+  const row = stmtResolveSessionRouteBinding.get(
+    params.tenantId,
+    params.channel,
+    params.sessionKey,
+  ) as SessionRouteBindingRow | undefined;
+  if (!row) {
+    return null;
+  }
+  return parseWhatsAppRouteKey(String(row.route_key));
 }
 
 async function resolveDiscordOutboundChannelId(params: {
@@ -1832,6 +2243,24 @@ function resolveTelegramBindingForIncoming(
     tenantId: String(chatRow.tenant_id),
     bindingId: String(chatRow.binding_id),
     routeKey: chatRouteKey,
+  };
+}
+
+function resolveWhatsAppBindingForIncoming(params: {
+  chatJid: string;
+  accountId: string;
+}): { tenantId: string; bindingId: string; routeKey: string } | null {
+  const routeKey = buildWhatsAppRouteKey(params.chatJid, params.accountId);
+  const row = stmtSelectActiveBindingByRouteKey.get("whatsapp", routeKey) as
+    | ActiveBindingLookupRow
+    | undefined;
+  if (!row?.tenant_id || !row?.binding_id) {
+    return null;
+  }
+  return {
+    tenantId: String(row.tenant_id),
+    bindingId: String(row.binding_id),
+    routeKey,
   };
 }
 
@@ -2010,6 +2439,64 @@ function claimDiscordPairingToken(params: {
   };
 }
 
+function claimWhatsAppPairingToken(params: {
+  token: string;
+  chatJid: string;
+  accountId: string;
+  chatType: "direct" | "group";
+}): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
+  const now = Date.now();
+  purgeExpiredPairingTokens(now);
+  const tokenHash = hashPairingToken(params.token);
+  const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
+  if (!row || String(row.channel) !== "whatsapp") {
+    return null;
+  }
+
+  const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+  if (consumeResult.changes === 0) {
+    return null;
+  }
+
+  const tenantId = String(row.tenant_id);
+  const routeKey = buildWhatsAppRouteKey(params.chatJid, params.accountId);
+  const existing = stmtSelectActiveBindingByTenantAndRoute.get(tenantId, "whatsapp", routeKey) as
+    | ExistingBindingRow
+    | undefined;
+  const bindingId = (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
+  if (!existing?.binding_id) {
+    stmtInsertBinding.run(
+      bindingId,
+      tenantId,
+      "whatsapp",
+      params.chatType === "group" ? "group" : "chat",
+      routeKey,
+      now,
+      now,
+    );
+  }
+
+  const preferredSessionKey = readNonEmptyString(row.session_key);
+  const sessionKey =
+    preferredSessionKey || deriveWhatsAppSessionKey(params.chatJid, params.chatType);
+  stmtUpsertSessionRoute.run(
+    tenantId,
+    "whatsapp",
+    sessionKey,
+    bindingId,
+    JSON.stringify({
+      routeKey,
+      accountId: params.accountId,
+      chatJid: params.chatJid,
+    }),
+    now,
+  );
+
+  stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+  writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey }, now);
+  return { tenantId, bindingId, routeKey, sessionKey };
+}
+
 async function sendDiscordPairingNotice(params: { channelId: string; text: string }) {
   const { response } = await sendDiscordMessage({
     channelId: params.channelId,
@@ -2031,6 +2518,57 @@ function listPairingsForTenant(tenant: TenantIdentity) {
         scope: String(row.scope),
         routeKey: String(row.route_key),
       })),
+    },
+  };
+}
+
+function getInboundTargetForTenant(tenant: TenantIdentity) {
+  const target = resolveTenantInboundTarget(tenant.id);
+  return {
+    statusCode: 200,
+    payload: {
+      ok: true,
+      configured: Boolean(target),
+      inboundUrl: target?.url ?? null,
+      inboundTimeoutMs: target?.timeoutMs ?? null,
+    },
+  };
+}
+
+function setInboundTargetForTenant(
+  tenant: TenantIdentity,
+  input: { inboundUrl?: unknown; inboundToken?: unknown; inboundTimeoutMs?: unknown },
+) {
+  const inboundUrl = readNonEmptyString(input.inboundUrl);
+  const inboundToken = readNonEmptyString(input.inboundToken);
+  if (!inboundUrl || !inboundToken) {
+    return {
+      statusCode: 400,
+      payload: { ok: false, error: "inboundUrl and inboundToken are required" },
+    };
+  }
+  const inboundTimeoutMs = readPositiveInt(input.inboundTimeoutMs) ?? 15_000;
+  const now = Date.now();
+  const update = stmtUpdateTenantInboundTargetById.run(
+    inboundUrl,
+    inboundToken,
+    inboundTimeoutMs,
+    now,
+    tenant.id,
+  );
+  if (update.changes === 0) {
+    return {
+      statusCode: 404,
+      payload: { ok: false, error: "tenant not found or inactive" },
+    };
+  }
+  writeAuditLog(tenant.id, "tenant_inbound_target_updated", { inboundUrl, inboundTimeoutMs }, now);
+  return {
+    statusCode: 200,
+    payload: {
+      ok: true,
+      inboundUrl,
+      inboundTimeoutMs,
     },
   };
 }
@@ -2069,6 +2607,76 @@ function resolveStoredDiscordOffset(bindingId: string): string | null {
 
 function storeDiscordOffset(bindingId: string, lastMessageId: string) {
   stmtUpsertDiscordOffsetByBinding.run(bindingId, lastMessageId, Date.now());
+}
+
+function computeWhatsAppQueueRetryDelayMs(attemptCount: number): number {
+  const base = Math.max(100, Math.trunc(whatsappQueueRetryInitialMs));
+  const maxDelay = Math.max(base, Math.trunc(whatsappQueueRetryMaxMs));
+  const exp = Math.max(0, Math.min(10, Math.trunc(attemptCount)));
+  const delay = base * 2 ** exp;
+  return Math.min(maxDelay, delay);
+}
+
+function snapshotWhatsAppInboundMessage(message: WebInboundMessage): WebInboundMessage {
+  return {
+    id: readNonEmptyString(message.id) ?? undefined,
+    from: typeof message.from === "string" ? message.from : "",
+    to: typeof message.to === "string" ? message.to : "",
+    accountId: readNonEmptyString(message.accountId) ?? whatsappAccountId,
+    body: typeof message.body === "string" ? message.body : "",
+    timestamp:
+      typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+        ? Math.trunc(message.timestamp)
+        : undefined,
+    chatType: message.chatType === "group" ? "group" : "direct",
+    chatId: readNonEmptyString(message.chatId) ?? readNonEmptyString(message.from) ?? "",
+    senderJid: readNonEmptyString(message.senderJid) ?? undefined,
+    senderE164: readNonEmptyString(message.senderE164) ?? undefined,
+    senderName: readNonEmptyString(message.senderName) ?? undefined,
+    replyToId: readNonEmptyString(message.replyToId) ?? undefined,
+    replyToBody: readNonEmptyString(message.replyToBody) ?? undefined,
+    replyToSender: readNonEmptyString(message.replyToSender) ?? undefined,
+    replyToSenderJid: readNonEmptyString(message.replyToSenderJid) ?? undefined,
+    replyToSenderE164: readNonEmptyString(message.replyToSenderE164) ?? undefined,
+    groupSubject: readNonEmptyString(message.groupSubject) ?? undefined,
+    groupParticipants: Array.isArray(message.groupParticipants)
+      ? message.groupParticipants.filter((entry): entry is string => typeof entry === "string")
+      : undefined,
+    mentionedJids: Array.isArray(message.mentionedJids)
+      ? message.mentionedJids.filter((entry): entry is string => typeof entry === "string")
+      : undefined,
+    mediaPath: readNonEmptyString(message.mediaPath) ?? undefined,
+    mediaType: readNonEmptyString(message.mediaType) ?? undefined,
+    mediaUrl: readNonEmptyString(message.mediaUrl) ?? undefined,
+  };
+}
+
+function enqueueWhatsAppInboundMessage(message: WebInboundMessage): void {
+  const snapshot = snapshotWhatsAppInboundMessage(message);
+  if (!snapshot.chatId) {
+    return;
+  }
+  const now = Date.now();
+  const messageId = readNonEmptyString(snapshot.id);
+  const dedupeKey = messageId
+    ? `${snapshot.accountId}:${snapshot.chatId}:${messageId}`
+    : `${snapshot.accountId}:${snapshot.chatId}:noid:${now}:${randomUUID()}`;
+  const insertResult = stmtInsertWhatsAppInboundQueue.run(
+    dedupeKey,
+    JSON.stringify(snapshot),
+    now,
+    now,
+    now,
+  );
+  if (insertResult.changes > 0) {
+    log({
+      type: "whatsapp_inbound_queue_enqueued",
+      dedupeKey,
+      messageId: snapshot.id ?? null,
+      chatJid: snapshot.chatId,
+      accountId: snapshot.accountId,
+    });
+  }
 }
 
 function deriveDiscordSessionKey(params: { route: DiscordBoundRoute; channelId: string }): string {
@@ -2183,7 +2791,9 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     return;
   }
   const topicId = readPositiveInt(message.message_thread_id);
-  const body = readNonEmptyString(message.text) ?? readNonEmptyString(message.caption);
+  const bodyText = typeof message.text === "string" ? message.text : null;
+  const bodyCaption = typeof message.caption === "string" ? message.caption : null;
+  const body = bodyText ?? bodyCaption ?? "";
   const pairingToken = extractPairingTokenFromTelegramMessage(message);
   const binding = resolveTelegramBindingForIncoming(chatId, topicId);
   if (!binding) {
@@ -2266,7 +2876,7 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     return;
   }
 
-  const target = tenantInboundTargets.get(binding.tenantId);
+  const target = resolveTenantInboundTarget(binding.tenantId);
   if (!target) {
     log({
       type: "telegram_inbound_drop_no_target",
@@ -2274,7 +2884,7 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
       updateId,
       routeKey: binding.routeKey,
     });
-    return;
+    throw new Error(`telegram inbound target missing for tenant ${binding.tenantId}`);
   }
 
   const inboundMedia = await extractTelegramInboundMedia({ message, updateId });
@@ -2314,33 +2924,22 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     Date.now(),
   );
 
-  const payload = {
-    eventId: `tg:${updateId}`,
-    channel: "telegram",
+  const payload = buildTelegramInboundEnvelope({
+    updateId,
     sessionKey,
-    body: forwardedBody,
-    from: `telegram:${fromId}`,
-    to: `telegram:${chatId}`,
-    accountId: "default",
+    rawBody: forwardedBody,
+    fromId,
+    chatId,
+    topicId,
     chatType,
     messageId,
     timestampMs,
-    threadId: topicId,
-    channelData: {
-      accountId: "default",
-      messageId,
-      chatId,
-      topicId: topicId ?? null,
-      routeKey: binding.routeKey,
-      updateId,
-      telegram: {
-        media: inboundMedia.media,
-        rawMessage: message,
-        rawUpdate: update,
-      },
-    },
-    ...(inboundMedia.attachments.length > 0 ? { attachments: inboundMedia.attachments } : {}),
-  };
+    routeKey: binding.routeKey,
+    rawMessage: message,
+    rawUpdate: update,
+    media: inboundMedia.media,
+    attachments: inboundMedia.attachments,
+  });
 
   const response = await fetch(target.url, {
     method: "POST",
@@ -2443,14 +3042,13 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
   }
 
   const sorted = sortDiscordMessagesAsc(updates);
-  let lastSeenMessageId = existingOffset ?? null;
+  let lastAckedMessageId = existingOffset ?? null;
 
   for (const message of sorted) {
     const messageId = readUnsignedNumericString(message.id);
     if (!messageId) {
       continue;
     }
-    lastSeenMessageId = messageId;
 
     const author =
       message.author && typeof message.author === "object"
@@ -2459,6 +3057,7 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
     const fromId = readUnsignedNumericString(author?.id);
     const isBot = author?.bot === true;
     if (!fromId || isBot) {
+      lastAckedMessageId = messageId;
       continue;
     }
 
@@ -2466,7 +3065,7 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
     const pairingToken = extractPairingTokenFromDiscordMessage(message);
     if (pending) {
       if (!pairingToken) {
-        if (body.trim() && isDiscordCommandText(body)) {
+        if (isDiscordCommandText(body)) {
           try {
             await sendDiscordPairingNotice({
               channelId,
@@ -2482,6 +3081,7 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
             });
           }
         }
+        lastAckedMessageId = messageId;
         continue;
       }
       const claimed = claimDiscordPairingToken({
@@ -2539,6 +3139,7 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
         messageId,
       });
       pending = false;
+      lastAckedMessageId = messageId;
       continue;
     }
 
@@ -2550,10 +3151,11 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
         routeKey: params.route_key,
         messageId,
       });
+      lastAckedMessageId = messageId;
       continue;
     }
 
-    const target = tenantInboundTargets.get(params.tenant_id);
+    const target = resolveTenantInboundTarget(params.tenant_id);
     if (!target) {
       log({
         type: "discord_inbound_drop_no_target",
@@ -2561,14 +3163,22 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
         bindingId: params.binding_id,
         routeKey: params.route_key,
       });
-      return;
+      log({
+        type: "discord_inbound_retry_deferred",
+        tenantId: params.tenant_id,
+        bindingId: params.binding_id,
+        messageId,
+        reason: "missing_inbound_target",
+      });
+      break;
     }
 
     const inboundMedia = await extractDiscordInboundMedia({
       message,
       messageId,
     });
-    if (!body.trim() && inboundMedia.attachments.length === 0) {
+    if (!body && inboundMedia.attachments.length === 0) {
+      lastAckedMessageId = messageId;
       continue;
     }
 
@@ -2596,44 +3206,53 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
       return Number.isFinite(timestampRaw) ? Math.trunc(timestampRaw) : Date.now();
     })();
 
-    const payload = {
-      eventId: `dc:${messageId}`,
-      channel: "discord",
-      sessionKey,
-      body,
-      from: `discord:${fromId}`,
-      to: `channel:${channelId}`,
-      accountId: "default",
-      chatType: route.kind === "dm" ? "direct" : "group",
+    const payload = buildDiscordInboundEnvelope({
       messageId,
+      sessionKey,
+      rawBody: body,
+      fromId,
+      channelId,
+      guildId: route.kind === "guild" ? route.guildId : null,
+      routeKey: params.route_key,
+      chatType: route.kind === "dm" ? "direct" : "group",
       timestampMs,
-      ...(route.kind === "guild" && route.threadId ? { threadId: route.threadId } : {}),
-      channelData: {
-        accountId: "default",
-        messageId,
-        channelId,
-        guildId: route.kind === "guild" ? route.guildId : null,
-        routeKey: params.route_key,
-        discord: {
-          media: inboundMedia.media,
-          rawMessage: message,
-        },
-      },
-      ...(inboundMedia.attachments.length > 0 ? { attachments: inboundMedia.attachments } : {}),
-    };
-
-    const response = await fetch(target.url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${target.token}`,
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(target.timeoutMs),
+      threadId: route.kind === "guild" ? route.threadId : undefined,
+      rawMessage: message,
+      media: inboundMedia.media,
+      attachments: inboundMedia.attachments,
     });
+
+    let response: Response;
+    try {
+      response = await fetch(target.url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${target.token}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(target.timeoutMs),
+      });
+    } catch (error) {
+      log({
+        type: "discord_inbound_retry_deferred",
+        tenantId: params.tenant_id,
+        bindingId: params.binding_id,
+        messageId,
+        error: String(error),
+      });
+      break;
+    }
     if (!response.ok) {
       const bodyText = await response.text();
-      throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
+      log({
+        type: "discord_inbound_retry_deferred",
+        tenantId: params.tenant_id,
+        bindingId: params.binding_id,
+        messageId,
+        error: `openclaw inbound failed (${response.status}): ${bodyText || "no body"}`,
+      });
+      break;
     }
 
     log({
@@ -2644,10 +3263,17 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
       sessionKey,
       messageId,
     });
+    lastAckedMessageId = messageId;
   }
 
-  if (lastSeenMessageId) {
-    storeDiscordOffset(params.binding_id, lastSeenMessageId);
+  if (lastAckedMessageId && lastAckedMessageId !== existingOffset) {
+    storeDiscordOffset(params.binding_id, lastAckedMessageId);
+    log({
+      type: "discord_inbound_ack_committed",
+      tenantId: params.tenant_id,
+      bindingId: params.binding_id,
+      messageId: lastAckedMessageId,
+    });
   }
 }
 
@@ -2701,6 +3327,363 @@ async function runDiscordInboundLoop() {
   }
 }
 
+function parseQueuedWhatsAppInboundMessage(row: WhatsAppInboundQueueRow): WebInboundMessage | null {
+  try {
+    const parsed = JSON.parse(row.payload_json) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    return snapshotWhatsAppInboundMessage(parsed as WebInboundMessage);
+  } catch {
+    return null;
+  }
+}
+
+async function processWhatsAppInboundQueuePass(): Promise<void> {
+  const now = Date.now();
+  const batchSize = Math.max(1, Math.min(100, Math.trunc(whatsappQueueBatchSize)));
+  const rows = stmtSelectDueWhatsAppInboundQueue.all(now, batchSize) as WhatsAppInboundQueueRow[];
+  for (const row of rows) {
+    const message = parseQueuedWhatsAppInboundMessage(row);
+    if (!message) {
+      stmtDeleteWhatsAppInboundQueueById.run(row.id);
+      log({
+        type: "whatsapp_inbound_queue_drop_invalid_payload",
+        queueId: row.id,
+        dedupeKey: row.dedupe_key,
+      });
+      continue;
+    }
+
+    try {
+      await forwardWhatsAppInboundMessage(message);
+      stmtDeleteWhatsAppInboundQueueById.run(row.id);
+      log({
+        type: "whatsapp_inbound_ack_committed",
+        queueId: row.id,
+        dedupeKey: row.dedupe_key,
+        messageId: message.id ?? null,
+      });
+    } catch (error) {
+      const attemptCount = Math.max(
+        1,
+        Number.isFinite(row.attempt_count) ? Math.trunc(row.attempt_count) + 1 : 1,
+      );
+      const retryDelayMs = computeWhatsAppQueueRetryDelayMs(attemptCount);
+      const nextAttemptAtMs = Date.now() + retryDelayMs;
+      stmtDeferWhatsAppInboundQueueById.run(
+        nextAttemptAtMs,
+        attemptCount,
+        String(error).slice(0, 2_000),
+        Date.now(),
+        row.id,
+      );
+      log({
+        type: "whatsapp_inbound_retry_deferred",
+        queueId: row.id,
+        dedupeKey: row.dedupe_key,
+        messageId: message.id ?? null,
+        attemptCount,
+        retryDelayMs,
+        nextAttemptAtMs,
+        error: String(error),
+      });
+    }
+  }
+}
+
+async function runWhatsAppInboundQueueLoop(shouldContinue: () => boolean): Promise<void> {
+  const pollMs = Math.max(100, Math.trunc(whatsappQueuePollMs));
+  while (shouldContinue()) {
+    try {
+      await processWhatsAppInboundQueuePass();
+    } catch (error) {
+      log({
+        type: "whatsapp_inbound_queue_poll_error",
+        error: String(error),
+      });
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
+  }
+}
+
+async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
+  const chatJid = readNonEmptyString(message.chatId) ?? readNonEmptyString(message.from);
+  if (!chatJid) {
+    return;
+  }
+  const accountId = readNonEmptyString(message.accountId) ?? whatsappAccountId;
+  const chatType = message.chatType === "group" ? "group" : "direct";
+  const body = typeof message.body === "string" ? message.body : "";
+  const pairingToken = extractPairingTokenFromWhatsAppMessage(message);
+  const binding = resolveWhatsAppBindingForIncoming({
+    chatJid,
+    accountId,
+  });
+
+  if (!binding) {
+    if (!pairingToken) {
+      if (isWhatsAppCommandText(body)) {
+        try {
+          await sendWhatsAppPairingNotice({
+            chatJid,
+            accountId,
+            text: unpairedHintText,
+          });
+        } catch (error) {
+          log({
+            type: "whatsapp_unpaired_command_notice_error",
+            chatJid,
+            error: String(error),
+          });
+        }
+      }
+      return;
+    }
+
+    const claimed = claimWhatsAppPairingToken({
+      token: pairingToken,
+      chatJid,
+      accountId,
+      chatType,
+    });
+    if (!claimed) {
+      try {
+        await sendWhatsAppPairingNotice({
+          chatJid,
+          accountId,
+          text: pairingInvalidText,
+        });
+      } catch (error) {
+        log({
+          type: "whatsapp_pairing_invalid_notice_error",
+          chatJid,
+          error: String(error),
+        });
+      }
+      log({
+        type: "whatsapp_pairing_token_invalid",
+        chatJid,
+        accountId,
+      });
+      return;
+    }
+
+    try {
+      await sendWhatsAppPairingNotice({
+        chatJid,
+        accountId,
+        text: pairingSuccessText,
+      });
+    } catch (error) {
+      log({
+        type: "whatsapp_pairing_notice_error",
+        tenantId: claimed.tenantId,
+        chatJid,
+        error: String(error),
+      });
+    }
+    log({
+      type: "whatsapp_pairing_token_claimed",
+      tenantId: claimed.tenantId,
+      routeKey: claimed.routeKey,
+      sessionKey: claimed.sessionKey,
+      accountId,
+      chatJid,
+    });
+    return;
+  }
+
+  if (pairingToken) {
+    log({
+      type: "whatsapp_pairing_token_ignored_bound_route",
+      tenantId: binding.tenantId,
+      routeKey: binding.routeKey,
+      accountId,
+      chatJid,
+    });
+    return;
+  }
+
+  const target = resolveTenantInboundTarget(binding.tenantId);
+  if (!target) {
+    log({
+      type: "whatsapp_inbound_drop_no_target",
+      tenantId: binding.tenantId,
+      routeKey: binding.routeKey,
+      accountId,
+      chatJid,
+    });
+    throw new Error(`whatsapp inbound target missing for tenant ${binding.tenantId}`);
+  }
+
+  const inboundMedia = await extractWhatsAppInboundMedia({ message });
+  if (!body && inboundMedia.attachments.length === 0) {
+    return;
+  }
+
+  const messageId = readNonEmptyString(message.id) ?? `wa:${Date.now()}:${randomUUID()}`;
+  const fromId =
+    readNonEmptyString(message.senderE164) ??
+    readNonEmptyString(message.senderJid) ??
+    readNonEmptyString(message.from) ??
+    "unknown";
+  const timestampMs =
+    typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+      ? Math.trunc(message.timestamp)
+      : Date.now();
+  const existingRoute = stmtSelectSessionKeyByBinding.get(
+    binding.tenantId,
+    "whatsapp",
+    binding.bindingId,
+  ) as { session_key?: unknown } | undefined;
+  const sessionKey =
+    (typeof existingRoute?.session_key === "string" && existingRoute.session_key.trim()) ||
+    deriveWhatsAppSessionKey(chatJid, chatType);
+  stmtUpsertSessionRoute.run(
+    binding.tenantId,
+    "whatsapp",
+    sessionKey,
+    binding.bindingId,
+    JSON.stringify({ routeKey: binding.routeKey, accountId, chatJid }),
+    Date.now(),
+  );
+
+  const payload = buildWhatsAppInboundEnvelope({
+    messageId,
+    sessionKey,
+    rawBody: body,
+    fromId,
+    chatJid,
+    routeKey: binding.routeKey,
+    accountId,
+    chatType,
+    timestampMs,
+    rawMessage: {
+      id: message.id,
+      from: message.from,
+      to: message.to,
+      body: message.body,
+      accountId: message.accountId,
+      timestamp: message.timestamp,
+      chatType: message.chatType,
+      chatId: message.chatId,
+      senderJid: message.senderJid,
+      senderE164: message.senderE164,
+      senderName: message.senderName,
+      replyToId: message.replyToId,
+      replyToBody: message.replyToBody,
+      replyToSender: message.replyToSender,
+      replyToSenderJid: message.replyToSenderJid,
+      replyToSenderE164: message.replyToSenderE164,
+      groupSubject: message.groupSubject,
+      groupParticipants: message.groupParticipants,
+      mentionedJids: message.mentionedJids,
+      mediaPath: message.mediaPath,
+      mediaType: message.mediaType,
+      mediaUrl: message.mediaUrl,
+    },
+    media: inboundMedia.media,
+    attachments: inboundMedia.attachments,
+  });
+
+  const response = await fetch(target.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${target.token}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(target.timeoutMs),
+  });
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
+  }
+
+  log({
+    type: "whatsapp_inbound_forwarded",
+    tenantId: binding.tenantId,
+    sessionKey,
+    messageId,
+    accountId,
+    chatJid,
+  });
+}
+
+async function runWhatsAppInboundLoop() {
+  if (!whatsappInboundEnabled) {
+    return;
+  }
+
+  const { monitorWebInbox, setActiveWebListener } = await loadWebRuntimeModules();
+  let running = true;
+  process.on("SIGINT", () => {
+    running = false;
+    void activeWhatsAppListener?.close?.();
+  });
+  process.on("SIGTERM", () => {
+    running = false;
+    void activeWhatsAppListener?.close?.();
+  });
+
+  const queueLoopPromise = runWhatsAppInboundQueueLoop(() => running);
+
+  while (running) {
+    let listener: WebMonitorListener | null = null;
+    try {
+      const monitored = await monitorWebInbox({
+        verbose: false,
+        accountId: whatsappAccountId,
+        authDir: whatsappAuthDir,
+        onMessage: async (message) => {
+          enqueueWhatsAppInboundMessage(message);
+        },
+      });
+      listener = monitored;
+      activeWhatsAppListener = monitored;
+      setActiveWebListener(whatsappAccountId, monitored);
+      const closeReason = await monitored.onClose;
+      log({
+        type: "whatsapp_inbound_listener_closed",
+        status: closeReason.status,
+        isLoggedOut: closeReason.isLoggedOut,
+        error: closeReason.error ? String(closeReason.error) : undefined,
+      });
+      if (closeReason.isLoggedOut) {
+        running = false;
+      }
+    } catch (error) {
+      log({
+        type: "whatsapp_inbound_listener_error",
+        error: String(error),
+      });
+    } finally {
+      if (listener) {
+        try {
+          await listener.close();
+        } catch (error) {
+          log({
+            type: "whatsapp_inbound_listener_close_error",
+            error: String(error),
+          });
+        }
+      }
+      activeWhatsAppListener = null;
+      setActiveWebListener(whatsappAccountId, null);
+    }
+
+    if (!running) {
+      break;
+    }
+    await new Promise((resolveSleep) =>
+      setTimeout(resolveSleep, Math.max(100, Math.trunc(whatsappInboundRetryMs))),
+    );
+  }
+
+  await queueLoopPromise;
+}
+
 async function runTelegramInboundLoop() {
   if (!telegramInboundEnabled) {
     return;
@@ -2734,10 +3717,15 @@ async function runTelegramInboundLoop() {
         }
         try {
           await forwardTelegramUpdateToTenant(update);
-        } catch (error) {
-          log({ type: "telegram_inbound_forward_error", updateId, error: String(error) });
-        } finally {
           storeTelegramOffset(updateId);
+          log({ type: "telegram_inbound_ack_committed", updateId });
+        } catch (error) {
+          log({
+            type: "telegram_inbound_retry_deferred",
+            updateId,
+            error: String(error),
+          });
+          break;
         }
       }
     } catch (error) {
@@ -2817,6 +3805,23 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && pathname === "/v1/tenant/inbound-target") {
+      const result = getInboundTargetForTenant(tenant);
+      sendJson(res, result.statusCode, result.payload);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/v1/tenant/inbound-target") {
+      const body = await readBody<Record<string, unknown>>(req);
+      const result = setInboundTargetForTenant(tenant, {
+        inboundUrl: body.inboundUrl,
+        inboundToken: body.inboundToken,
+        inboundTimeoutMs: body.inboundTimeoutMs,
+      });
+      sendJson(res, result.statusCode, result.payload);
+      return;
+    }
+
     if (req.method !== "POST" || pathname !== "/v1/mux/outbound/send") {
       sendJson(res, 404, { ok: false, error: "not found" });
       return;
@@ -2891,26 +3896,8 @@ const server = http.createServer(async (req, res) => {
 
       const channel = normalizeChannel(payload.channel);
       const sessionKey = readNonEmptyString(payload.sessionKey);
-      const text = typeof payload.text === "string" ? payload.text : "";
-      const hasText = text.trim().length > 0;
-      const mediaUrls = (() => {
-        const collected: string[] = [];
-        const single = typeof payload.mediaUrl === "string" ? payload.mediaUrl.trim() : "";
-        if (single) {
-          collected.push(single);
-        }
-        const list = Array.isArray(payload.mediaUrls) ? payload.mediaUrls : [];
-        for (const item of list) {
-          if (typeof item !== "string") {
-            continue;
-          }
-          const trimmed = item.trim();
-          if (trimmed) {
-            collected.push(trimmed);
-          }
-        }
-        return Array.from(new Set(collected));
-      })();
+      const { text, hasText } = readOutboundText(payload);
+      const mediaUrls = collectOutboundMediaUrls(payload);
       const replyToMessageId = readPositiveInt(payload.replyToId);
       const replyToDiscordMessageId = readUnsignedNumericString(payload.replyToId);
       const requestedThreadId = readPositiveInt(payload.threadId);
@@ -3112,6 +4099,76 @@ const server = http.createServer(async (req, res) => {
         };
       }
 
+      if (channel === "whatsapp") {
+        const boundRoute = resolveWhatsAppBoundRoute({
+          tenantId: tenant.id,
+          channel,
+          sessionKey,
+        });
+        if (!boundRoute) {
+          return {
+            statusCode: 403,
+            bodyText: JSON.stringify({
+              ok: false,
+              error: "route not bound",
+              code: "ROUTE_NOT_BOUND",
+            }),
+          };
+        }
+
+        const { sendMessageWhatsApp } = await loadWebRuntimeModules();
+        const providerMessageIds: string[] = [];
+        let firstMessageId = "unknown";
+        let firstToJid = boundRoute.chatJid;
+        try {
+          if (mediaUrls.length === 0) {
+            const sent = await sendMessageWhatsApp(boundRoute.chatJid, text, {
+              verbose: false,
+              accountId: boundRoute.accountId,
+            });
+            firstMessageId = sent.messageId || "unknown";
+            firstToJid = sent.toJid || boundRoute.chatJid;
+            providerMessageIds.push(firstMessageId);
+          } else {
+            const first = await sendMessageWhatsApp(boundRoute.chatJid, hasText ? text : "", {
+              verbose: false,
+              mediaUrl: mediaUrls[0],
+              accountId: boundRoute.accountId,
+            });
+            firstMessageId = first.messageId || "unknown";
+            firstToJid = first.toJid || boundRoute.chatJid;
+            providerMessageIds.push(firstMessageId);
+            for (const extraMediaUrl of mediaUrls.slice(1)) {
+              const extra = await sendMessageWhatsApp(boundRoute.chatJid, "", {
+                verbose: false,
+                mediaUrl: extraMediaUrl,
+                accountId: boundRoute.accountId,
+              });
+              providerMessageIds.push(extra.messageId || "unknown");
+            }
+          }
+        } catch (error) {
+          return {
+            statusCode: 502,
+            bodyText: JSON.stringify({
+              ok: false,
+              error: "whatsapp send failed",
+              details: String(error),
+            }),
+          };
+        }
+
+        return {
+          statusCode: 200,
+          bodyText: JSON.stringify({
+            ok: true,
+            messageId: firstMessageId,
+            toJid: firstToJid,
+            providerMessageIds,
+          }),
+        };
+      }
+
       return {
         statusCode: 400,
         bodyText: JSON.stringify({ ok: false, error: "unsupported channel" }),
@@ -3145,6 +4202,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, host, () => {
+  const tenantTargetCount = countActiveTenantInboundTargets();
   log({
     type: "relay_started",
     host,
@@ -3154,10 +4212,22 @@ server.listen(port, host, () => {
     pairingCodeSeedCount: pairingCodeSeeds.length,
   });
   console.log(`mux server listening on http://${host}:${port}`);
+  if (whatsappInboundEnabled) {
+    log({
+      type: "whatsapp_inbound_started",
+      tenantTargetCount,
+      accountId: whatsappAccountId,
+      authDir: whatsappAuthDir,
+      retryMs: Math.max(100, Math.trunc(whatsappInboundRetryMs)),
+    });
+    void runWhatsAppInboundLoop().catch((error) => {
+      log({ type: "whatsapp_inbound_loop_fatal", error: String(error) });
+    });
+  }
   if (telegramInboundEnabled) {
     log({
       type: "telegram_inbound_started",
-      tenantTargetCount: tenantInboundTargets.size,
+      tenantTargetCount,
       pollTimeoutSec: Math.max(1, Math.trunc(telegramPollTimeoutSec)),
       pollRetryMs: Math.max(100, Math.trunc(telegramPollRetryMs)),
       bootstrapLatest: telegramBootstrapLatest,
@@ -3169,7 +4239,7 @@ server.listen(port, host, () => {
   if (discordInboundEnabled) {
     log({
       type: "discord_inbound_started",
-      tenantTargetCount: tenantInboundTargets.size,
+      tenantTargetCount,
       pollIntervalMs: Math.max(200, Math.trunc(discordPollIntervalMs)),
       bootstrapLatest: discordBootstrapLatest,
     });

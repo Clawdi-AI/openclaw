@@ -278,6 +278,35 @@ async function createPairingToken(params: {
   });
 }
 
+async function getInboundTarget(params: { port: number; apiKey: string }) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/tenant/inbound-target`, {
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+    },
+  });
+}
+
+async function setInboundTarget(params: {
+  port: number;
+  apiKey: string;
+  inboundUrl: string;
+  inboundToken: string;
+  inboundTimeoutMs?: number;
+}) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/tenant/inbound-target`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      inboundUrl: params.inboundUrl,
+      inboundToken: params.inboundToken,
+      ...(params.inboundTimeoutMs ? { inboundTimeoutMs: params.inboundTimeoutMs } : {}),
+    }),
+  });
+}
+
 describe("mux server", () => {
   test("health endpoint responds", async () => {
     const server = await startServer();
@@ -335,6 +364,165 @@ describe("mux server", () => {
     expect(legacy.status).toBe(401);
     expect(await legacy.json()).toEqual({ ok: false, error: "unauthorized" });
   });
+
+  test("updates tenant inbound target at runtime and forwards new inbound traffic to updated target", async () => {
+    const inboundARequests: Array<Record<string, unknown>> = [];
+    const inboundBRequests: Array<Record<string, unknown>> = [];
+    const inboundA = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      if (req.headers.authorization !== "Bearer inbound-token-a") {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
+      inboundARequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    const inboundB = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      if (req.headers.authorization !== "Bearer inbound-token-b") {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
+      inboundBRequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    let releaseFirst = false;
+    let releaseSecond = false;
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/botdummy-token/getUpdates") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const body = await readJsonBody(req);
+      const offset = typeof body.offset === "number" ? Number(body.offset) : 0;
+      let result: unknown[] = [];
+      if (releaseFirst && offset <= 461) {
+        result = [
+          {
+            update_id: 461,
+            message: {
+              message_id: 470,
+              date: 1_700_000_000,
+              text: "first target",
+              from: { id: 1234 },
+              chat: { id: -100557, type: "supergroup" },
+            },
+          },
+        ];
+      } else if (releaseSecond && offset <= 462) {
+        result = [
+          {
+            update_id: 462,
+            message: {
+              message_id: 471,
+              date: 1_700_000_001,
+              text: "second target",
+              from: { id: 1234 },
+              chat: { id: -100557, type: "supergroup" },
+            },
+          },
+        ];
+      }
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, result }));
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inboundA.url}/v1/mux/inbound`,
+          inboundToken: "inbound-token-a",
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-ROTATE-TARGET-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100557",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_INBOUND_ENABLED: "true",
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-ROTATE-TARGET-1",
+      sessionKey: "tg:group:-100557",
+    });
+    expect(claim.status).toBe(200);
+
+    const getBefore = await getInboundTarget({ port: server.port, apiKey: "tenant-a-key" });
+    expect(getBefore.status).toBe(200);
+    await expect(getBefore.json()).resolves.toMatchObject({
+      ok: true,
+      configured: true,
+      inboundUrl: `${inboundA.url}/v1/mux/inbound`,
+    });
+
+    releaseFirst = true;
+    await waitForCondition(
+      () => inboundARequests.length >= 1,
+      8_000,
+      "timed out waiting for first inbound target",
+    );
+    expect(inboundARequests[0]?.body).toBe("first target");
+
+    const updateTarget = await setInboundTarget({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      inboundUrl: `${inboundB.url}/v1/mux/inbound`,
+      inboundToken: "inbound-token-b",
+      inboundTimeoutMs: 2_000,
+    });
+    expect(updateTarget.status).toBe(200);
+    await expect(updateTarget.json()).resolves.toMatchObject({
+      ok: true,
+      inboundUrl: `${inboundB.url}/v1/mux/inbound`,
+    });
+
+    const getAfter = await getInboundTarget({ port: server.port, apiKey: "tenant-a-key" });
+    expect(getAfter.status).toBe(200);
+    await expect(getAfter.json()).resolves.toMatchObject({
+      ok: true,
+      configured: true,
+      inboundUrl: `${inboundB.url}/v1/mux/inbound`,
+    });
+
+    releaseSecond = true;
+    await waitForCondition(
+      () => inboundBRequests.length >= 1,
+      8_000,
+      "timed out waiting for rotated inbound target",
+    );
+    expect(inboundBRequests[0]?.body).toBe("second target");
+    expect(inboundARequests.length).toBe(1);
+  }, 20_000);
 
   test("supports pairing claim/list/unbind", async () => {
     const server = await startServer({
@@ -642,7 +830,11 @@ describe("mux server", () => {
         sessionKey: "dc:dm:4242",
         to: "user:9999",
         text: "hello dm",
-        mediaUrl: "https://example.com/cat.jpg",
+        mediaUrls: [
+          " https://example.com/cat-a.jpg ",
+          "https://example.com/cat-b.jpg",
+          " https://example.com/cat-a.jpg ",
+        ],
       }),
     });
     expect(response.status).toBe(200);
@@ -662,7 +854,11 @@ describe("mux server", () => {
     );
     expect(sent?.body).toMatchObject({
       content: "hello dm",
-      embeds: [{ image: { url: "https://example.com/cat.jpg" } }],
+      embeds: [
+        { image: { url: " https://example.com/cat-a.jpg " } },
+        { image: { url: "https://example.com/cat-b.jpg" } },
+        { image: { url: " https://example.com/cat-a.jpg " } },
+      ],
     });
   });
 
@@ -708,7 +904,7 @@ describe("mux server", () => {
               message: {
                 message_id: 462,
                 date: 1_700_000_000,
-                text: "hello from mux inbound",
+                text: "  hello from mux inbound  ",
                 from: { id: 1234 },
                 chat: { id: -100555, type: "supergroup" },
               },
@@ -768,7 +964,7 @@ describe("mux server", () => {
       eventId: "tg:461",
       channel: "telegram",
       sessionKey: "tg:group:-100555",
-      body: "hello from mux inbound",
+      body: "  hello from mux inbound  ",
       from: "telegram:1234",
       to: "telegram:-100555",
       accountId: "default",
@@ -789,6 +985,109 @@ describe("mux server", () => {
       ),
     ).toBe(true);
   });
+
+  test("retries Telegram inbound without advancing offset when forward fails", async () => {
+    const inboundAttempts: Array<Record<string, unknown>> = [];
+    let failFirstForward = true;
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundAttempts.push(await readJsonBody(req));
+      if (failFirstForward) {
+        failFirstForward = false;
+        res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "retry me" }));
+        return;
+      }
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    let releaseUpdates = false;
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/botdummy-token/getUpdates") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const body = await readJsonBody(req);
+      telegramRequests.push(body);
+      const offset = typeof body.offset === "number" ? Number(body.offset) : 0;
+      const result =
+        releaseUpdates && offset <= 461
+          ? [
+              {
+                update_id: 461,
+                message: {
+                  message_id: 462,
+                  date: 1_700_000_000,
+                  text: "retry telegram message",
+                  from: { id: 1234 },
+                  chat: { id: -100556, type: "supergroup" },
+                },
+              },
+            ]
+          : [];
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, result }));
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundToken: "tenant-a-inbound-token",
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-IN-RETRY-TG-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100556",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_INBOUND_ENABLED: "true",
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-IN-RETRY-TG-1",
+      sessionKey: "tg:group:-100556",
+    });
+    expect(claim.status).toBe(200);
+    releaseUpdates = true;
+
+    await waitForCondition(
+      () => inboundAttempts.length >= 2,
+      6_000,
+      "timed out waiting for telegram retry forward",
+    );
+
+    expect(inboundAttempts[0]?.body).toBe("retry telegram message");
+    expect(inboundAttempts[1]?.body).toBe("retry telegram message");
+
+    const seenOffsets = telegramRequests
+      .map((request) => (typeof request.offset === "number" ? Number(request.offset) : null))
+      .filter((offset): offset is number => offset !== null);
+    expect(seenOffsets.filter((offset) => offset === 1).length).toBeGreaterThanOrEqual(2);
+    expect(seenOffsets.some((offset) => offset === 462)).toBe(true);
+  }, 15_000);
 
   test("forwards media-only Telegram photo updates with attachment payload", async () => {
     const inboundRequests: Array<Record<string, unknown>> = [];
@@ -992,7 +1291,7 @@ describe("mux server", () => {
               {
                 id: "9001",
                 channel_id: "3001",
-                content: "hello from discord inbound",
+                content: "  hello from discord inbound  ",
                 timestamp: "2026-02-07T03:00:00.000Z",
                 author: { id: "4242", bot: false },
                 attachments: [
@@ -1071,7 +1370,7 @@ describe("mux server", () => {
     expect(payload).toMatchObject({
       channel: "discord",
       sessionKey: "dc:dm:4242",
-      body: "hello from discord inbound",
+      body: "  hello from discord inbound  ",
       from: "discord:4242",
       to: "channel:3001",
       accountId: "default",
@@ -1101,8 +1400,130 @@ describe("mux server", () => {
         ? (discordData.rawMessage as Record<string, unknown>)
         : {};
     expect(rawMessage.id).toBe("9001");
-    expect(rawMessage.content).toBe("hello from discord inbound");
+    expect(rawMessage.content).toBe("  hello from discord inbound  ");
   });
+
+  test("retries Discord failed message without replaying already-acked earlier message", async () => {
+    const inboundAttempts: Array<Record<string, unknown>> = [];
+    let msgTwoFailures = 0;
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const payload = await readJsonBody(req);
+      inboundAttempts.push(payload);
+      if (payload.body === "msg-two" && msgTwoFailures === 0) {
+        msgTwoFailures += 1;
+        res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "retry me" }));
+        return;
+      }
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const discordApi = await startHttpServer(async (req, res) => {
+      const method = req.method ?? "GET";
+      const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (method === "POST" && requestUrl.pathname === "/users/@me/channels") {
+        const body = await readJsonBody(req);
+        expect(body).toEqual({ recipient_id: "4242" });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: "3001" }));
+        return;
+      }
+      if (method === "GET" && requestUrl.pathname === "/channels/3001/messages") {
+        const after = requestUrl.searchParams.get("after");
+        const result =
+          after === null
+            ? [
+                {
+                  id: "1001",
+                  channel_id: "3001",
+                  content: "msg-one",
+                  timestamp: "2026-02-07T03:00:00.000Z",
+                  author: { id: "4242", bot: false },
+                  attachments: [],
+                },
+                {
+                  id: "1002",
+                  channel_id: "3001",
+                  content: "msg-two",
+                  timestamp: "2026-02-07T03:00:01.000Z",
+                  author: { id: "4242", bot: false },
+                  attachments: [],
+                },
+              ]
+            : after === "1001"
+              ? [
+                  {
+                    id: "1002",
+                    channel_id: "3001",
+                    content: "msg-two",
+                    timestamp: "2026-02-07T03:00:01.000Z",
+                    author: { id: "4242", bot: false },
+                    attachments: [],
+                  },
+                ]
+              : [];
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(result));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundToken: "tenant-a-inbound-token",
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-IN-DC-RETRY-1",
+          channel: "discord",
+          routeKey: "discord:default:dm:user:4242",
+          scope: "dm",
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_INBOUND_ENABLED: "true",
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+        MUX_DISCORD_POLL_INTERVAL_MS: "50",
+        MUX_DISCORD_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-IN-DC-RETRY-1",
+      sessionKey: "dc:dm:4242",
+    });
+    expect(claim.status).toBe(200);
+
+    await waitForCondition(
+      () =>
+        inboundAttempts.filter((payload) => payload.body === "msg-one").length >= 1 &&
+        inboundAttempts.filter((payload) => payload.body === "msg-two").length >= 2,
+      6_000,
+      "timed out waiting for discord retry behavior",
+    );
+
+    const msgOneCount = inboundAttempts.filter((payload) => payload.body === "msg-one").length;
+    const msgTwoCount = inboundAttempts.filter((payload) => payload.body === "msg-two").length;
+    expect(msgOneCount).toBe(1);
+    expect(msgTwoCount).toBe(2);
+  }, 15_000);
 
   test("pairs from dashboard token sent via /start and forwards later message", async () => {
     const inboundRequests: Array<Record<string, unknown>> = [];
@@ -1518,6 +1939,68 @@ describe("mux server", () => {
           routeKey: "discord:default:dm:user:4242",
         },
       ],
+    });
+  });
+
+  test("issues whatsapp pairing token without deep link or start command", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+    });
+
+    const tokenResponse = await createPairingToken({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      channel: "whatsapp",
+      sessionKey: "wa:chat:15550001111@s.whatsapp.net",
+      ttlSec: 120,
+    });
+    expect(tokenResponse.status).toBe(200);
+    expect(await tokenResponse.json()).toMatchObject({
+      ok: true,
+      channel: "whatsapp",
+      token: expect.stringMatching(/^mpt_/),
+      deepLink: null,
+      startCommand: null,
+    });
+  });
+
+  test("whatsapp outbound returns 502 when no active listener is available", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-1",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550001111@s.whatsapp.net",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-WA-1",
+      sessionKey: "wa:chat:15550001111@s.whatsapp.net",
+    });
+    expect(claim.status).toBe(200);
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "whatsapp",
+        sessionKey: "wa:chat:15550001111@s.whatsapp.net",
+        text: "hello wa",
+      }),
+    });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: "whatsapp send failed",
     });
   });
 
