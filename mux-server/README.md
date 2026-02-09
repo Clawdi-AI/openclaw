@@ -56,6 +56,8 @@ This repo now has 3 mux-related pieces:
 
 In short: OpenClaw inbound/outbound adapters are in `src/`; the standalone mux service is here.
 
+For production wiring with control plane + per-tenant OpenClaw instances, see `mux-server/INTEGRATION_PLAN.md`.
+
 ## Run
 
 From repo root:
