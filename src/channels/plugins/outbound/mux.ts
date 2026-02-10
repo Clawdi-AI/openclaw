@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "../../../config/config.js";
 import type { PollInput } from "../../../polls.js";
+import { DEFAULT_ACCOUNT_ID } from "../../../routing/session-key.js";
 
 type SupportedMuxChannel = "whatsapp" | "telegram" | "discord";
 
@@ -35,6 +36,16 @@ type MuxSendResponse = {
   pollId?: string;
 };
 
+type MuxSendResponseBody = {
+  messageId?: unknown;
+  chatId?: unknown;
+  channelId?: unknown;
+  toJid?: unknown;
+  conversationId?: unknown;
+  pollId?: unknown;
+  error?: unknown;
+};
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 function normalizeBaseUrl(value?: string): string | undefined {
@@ -47,10 +58,6 @@ function normalizeBaseUrl(value?: string): string | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function normalizeChannelMuxConfig(
@@ -73,18 +80,19 @@ function resolveChannelMuxConfig(params: {
   accountId?: string;
 }): ResolvedChannelMuxConfig {
   const { cfg, channel, accountId } = params;
+  const resolvedAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
   if (channel === "telegram") {
     const channelCfg = cfg.channels?.telegram;
-    const accountCfg = accountId ? channelCfg?.accounts?.[accountId] : undefined;
+    const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
     return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
   }
   if (channel === "discord") {
     const channelCfg = cfg.channels?.discord;
-    const accountCfg = accountId ? channelCfg?.accounts?.[accountId] : undefined;
+    const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
     return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
   }
   const channelCfg = cfg.channels?.whatsapp;
-  const accountCfg = accountId ? channelCfg?.accounts?.[accountId] : undefined;
+  const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
   return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
 }
 
@@ -131,7 +139,7 @@ function requireMuxConfig(params: {
 
 function mapMuxSendResponse(
   channel: SupportedMuxChannel,
-  payload: Record<string, unknown>,
+  payload: MuxSendResponseBody,
 ): MuxSendResponse {
   const messageId = readString(payload.messageId);
   if (!messageId) {
@@ -183,18 +191,7 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
     signal: AbortSignal.timeout(resolved.timeoutMs),
   });
 
-  const bodyText = await response.text();
-  let parsedBody: unknown = {};
-  if (bodyText.trim()) {
-    try {
-      parsedBody = JSON.parse(bodyText);
-    } catch {
-      throw new Error(`mux outbound returned invalid JSON (${response.status})`);
-    }
-  }
-  if (!isRecord(parsedBody)) {
-    throw new Error(`mux outbound returned non-object JSON (${response.status})`);
-  }
+  const parsedBody = (await response.json()) as MuxSendResponseBody;
   if (!response.ok) {
     const summary = readString(parsedBody.error) ?? JSON.stringify(parsedBody);
     throw new Error(`mux outbound failed (${response.status}): ${summary}`);

@@ -383,6 +383,7 @@ export {
   resolveFeishuGroupRequireMention,
 } from "../feishu/config.js";
 export { feishuOutbound } from "../channels/plugins/outbound/feishu.js";
+export { isMuxEnabled, sendViaMux } from "../channels/plugins/outbound/mux.js";
 export { normalizeFeishuTarget } from "../channels/plugins/normalize/feishu.js";
 export { probeFeishu, type FeishuProbe } from "../feishu/probe.js";
 export { monitorFeishuProvider } from "../feishu/monitor.js";

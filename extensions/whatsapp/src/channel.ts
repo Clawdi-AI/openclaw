@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
   applyAccountNameToChannelSection,
   buildChannelConfigSchema,
@@ -16,6 +15,7 @@ import {
   missingTargetError,
   normalizeAccountId,
   normalizeE164,
+  isMuxEnabled,
   normalizeWhatsAppMessagingTarget,
   normalizeWhatsAppTarget,
   readStringParam,
@@ -24,6 +24,7 @@ import {
   resolveWhatsAppGroupRequireMention,
   resolveWhatsAppGroupToolPolicy,
   resolveWhatsAppHeartbeatRecipients,
+  sendViaMux,
   whatsappOnboardingAdapter,
   WhatsAppConfigSchema,
   type ChannelMessageActionName,
@@ -36,138 +37,6 @@ import { getWhatsAppRuntime } from "./runtime.js";
 const meta = getChatChannelMeta("whatsapp");
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const DEFAULT_MUX_TIMEOUT_MS = 30_000;
-
-type ChannelMuxConfig = {
-  enabled?: boolean;
-  baseUrl?: string;
-  apiKey?: string;
-  timeoutMs?: number;
-};
-
-function readNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function normalizeBaseUrl(value?: string): string | undefined {
-  const trimmed = readNonEmptyString(value);
-  if (!trimmed) {
-    return undefined;
-  }
-  return trimmed.replace(/\/+$/, "");
-}
-
-function resolveWhatsAppMuxConfig(params: { cfg: OpenClawConfig; accountId?: string }): {
-  enabled: boolean;
-  baseUrl?: string;
-  apiKey?: string;
-  timeoutMs: number;
-} {
-  const channelCfg = params.cfg.channels?.whatsapp;
-  const resolvedAccountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
-  const accountCfg = channelCfg?.accounts?.[resolvedAccountId] as
-    | { mux?: ChannelMuxConfig }
-    | undefined;
-  const raw = (accountCfg?.mux ?? channelCfg?.mux) as ChannelMuxConfig | undefined;
-  const timeoutMs =
-    typeof raw?.timeoutMs === "number" && Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0
-      ? Math.trunc(raw.timeoutMs)
-      : DEFAULT_MUX_TIMEOUT_MS;
-
-  return {
-    enabled: raw?.enabled === true,
-    baseUrl: normalizeBaseUrl(raw?.baseUrl),
-    apiKey: readNonEmptyString(raw?.apiKey),
-    timeoutMs,
-  };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function mapMuxMessageResult(payload: Record<string, unknown>): {
-  messageId: string;
-  toJid?: string;
-} {
-  const messageId = readNonEmptyString(payload.messageId);
-  if (!messageId) {
-    throw new Error("whatsapp mux outbound success missing messageId");
-  }
-  return {
-    messageId,
-    toJid: readNonEmptyString(payload.toJid),
-  };
-}
-
-async function sendWhatsAppViaMux(params: {
-  cfg: OpenClawConfig;
-  to: string;
-  text: string;
-  accountId?: string;
-  sessionKey?: string | null;
-  mediaUrl?: string;
-  poll?: unknown;
-}): Promise<{ messageId: string; toJid?: string }> {
-  const mux = resolveWhatsAppMuxConfig({
-    cfg: params.cfg,
-    accountId: params.accountId,
-  });
-  if (!mux.enabled) {
-    throw new Error("whatsapp mux is not enabled");
-  }
-  if (!mux.baseUrl) {
-    throw new Error("channels.whatsapp.mux.baseUrl is required when mux is enabled");
-  }
-  if (!mux.apiKey) {
-    throw new Error("channels.whatsapp.mux.apiKey is required when mux is enabled");
-  }
-  const sessionKey = readNonEmptyString(params.sessionKey);
-  if (!sessionKey) {
-    throw new Error("whatsapp mux delivery requires sessionKey; use routed replies instead");
-  }
-
-  const requestBody = {
-    requestId: randomUUID(),
-    channel: "whatsapp",
-    sessionKey,
-    accountId: params.accountId,
-    to: params.to,
-    text: params.text,
-    mediaUrl: params.mediaUrl,
-    poll: params.poll,
-  };
-
-  const response = await fetch(`${mux.baseUrl}/v1/mux/outbound/send`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${mux.apiKey}`,
-      "Content-Type": "application/json; charset=utf-8",
-      "Idempotency-Key": requestBody.requestId,
-    },
-    body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(mux.timeoutMs),
-  });
-
-  const responseText = await response.text();
-  let parsed: unknown = {};
-  if (responseText.trim()) {
-    try {
-      parsed = JSON.parse(responseText);
-    } catch {
-      throw new Error(`whatsapp mux outbound returned invalid JSON (${response.status})`);
-    }
-  }
-  if (!isRecord(parsed)) {
-    throw new Error(`whatsapp mux outbound returned non-object JSON (${response.status})`);
-  }
-  if (!response.ok) {
-    const summary = readNonEmptyString(parsed.error) ?? JSON.stringify(parsed);
-    throw new Error(`whatsapp mux outbound failed (${response.status}): ${summary}`);
-  }
-  return mapMuxMessageResult(parsed);
-}
 
 export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
   id: "whatsapp",
@@ -474,14 +343,14 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
       };
     },
     sendText: async ({ cfg, to, text, accountId, deps, gifPlayback, sessionKey }) => {
-      const mux = resolveWhatsAppMuxConfig({ cfg, accountId: accountId ?? undefined });
-      if (mux.enabled) {
-        const result = await sendWhatsAppViaMux({
+      if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
           cfg,
-          to,
-          text,
+          channel: "whatsapp",
           accountId: accountId ?? undefined,
           sessionKey,
+          to,
+          text,
         });
         return { channel: "whatsapp", ...result };
       }
@@ -494,15 +363,15 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
       return { channel: "whatsapp", ...result };
     },
     sendMedia: async ({ cfg, to, text, mediaUrl, accountId, deps, gifPlayback, sessionKey }) => {
-      const mux = resolveWhatsAppMuxConfig({ cfg, accountId: accountId ?? undefined });
-      if (mux.enabled) {
-        const result = await sendWhatsAppViaMux({
+      if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
           cfg,
+          channel: "whatsapp",
+          accountId: accountId ?? undefined,
+          sessionKey,
           to,
           text,
           mediaUrl,
-          accountId: accountId ?? undefined,
-          sessionKey,
         });
         return { channel: "whatsapp", ...result };
       }
@@ -516,15 +385,15 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
       return { channel: "whatsapp", ...result };
     },
     sendPoll: async ({ cfg, to, poll, accountId, sessionKey }) => {
-      const mux = resolveWhatsAppMuxConfig({ cfg, accountId: accountId ?? undefined });
-      if (mux.enabled) {
-        const result = await sendWhatsAppViaMux({
+      if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
           cfg,
+          channel: "whatsapp",
+          accountId: accountId ?? undefined,
+          sessionKey,
           to,
           text: "",
           poll,
-          accountId: accountId ?? undefined,
-          sessionKey,
         });
         return { channel: "whatsapp", ...result };
       }

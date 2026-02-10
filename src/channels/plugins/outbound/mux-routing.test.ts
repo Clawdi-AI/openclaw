@@ -129,6 +129,96 @@ describe("mux outbound routing", () => {
     expect(result).toMatchObject({ channel: "whatsapp", messageId: "mx-wa-1", toJid: "jid-1" });
   });
 
+  it("routes telegram outbound through mux from default account config", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-tg-acct-1" }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      channels: {
+        telegram: {
+          accounts: {
+            default: {
+              mux: {
+                enabled: true,
+                baseUrl: "http://mux.local",
+                apiKey: "mux-key",
+              },
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await telegramOutbound.sendText!({
+      cfg,
+      to: "telegram:123",
+      text: "hello",
+      sessionKey: "sess-tg",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes discord outbound through mux from default account config", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-discord-acct-1" }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      channels: {
+        discord: {
+          accounts: {
+            default: {
+              mux: {
+                enabled: true,
+                baseUrl: "http://mux.local",
+                apiKey: "mux-key",
+              },
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await discordOutbound.sendText!({
+      cfg,
+      to: "discord:chan",
+      text: "hello",
+      sessionKey: "sess-discord",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes whatsapp outbound through mux from default account config", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-wa-acct-1" }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      channels: {
+        whatsapp: {
+          accounts: {
+            default: {
+              mux: {
+                enabled: true,
+                baseUrl: "http://mux.local",
+                apiKey: "mux-key",
+              },
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await whatsappOutbound.sendText!({
+      cfg,
+      to: "+15555550100",
+      text: "hello",
+      sessionKey: "sess-wa",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects telegram mux success payload missing messageId", async () => {
     const fetchSpy = vi.fn(async () => jsonResponse({ chatId: "tg-chat-1" }));
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
