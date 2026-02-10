@@ -128,4 +128,82 @@ describe("mux outbound routing", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ channel: "whatsapp", messageId: "mx-wa-1", toJid: "jid-1" });
   });
+
+  it("rejects telegram mux success payload missing messageId", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({ chatId: "tg-chat-1" }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+            baseUrl: "http://mux.local",
+            apiKey: "mux-key",
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await expect(
+      telegramOutbound.sendText!({
+        cfg,
+        to: "telegram:123",
+        text: "hello",
+        sessionKey: "sess-tg",
+      }),
+    ).rejects.toThrow(/missing messageId/i);
+  });
+
+  it("rejects discord mux success payload missing messageId", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({ channelId: "dc-channel-1" }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      channels: {
+        discord: {
+          mux: {
+            enabled: true,
+            baseUrl: "http://mux.local",
+            apiKey: "mux-key",
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await expect(
+      discordOutbound.sendText!({
+        cfg,
+        to: "discord:chan",
+        text: "hello",
+        sessionKey: "sess-discord",
+      }),
+    ).rejects.toThrow(/missing messageId/i);
+  });
+
+  it("rejects whatsapp mux success payload missing messageId", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({ toJid: "jid-1" }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      channels: {
+        whatsapp: {
+          mux: {
+            enabled: true,
+            baseUrl: "http://mux.local",
+            apiKey: "mux-key",
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await expect(
+      whatsappOutbound.sendText!({
+        cfg,
+        to: "+15555550100",
+        text: "hello",
+        sessionKey: "sess-wa",
+      }),
+    ).rejects.toThrow(/missing messageId/i);
+  });
 });

@@ -83,22 +83,18 @@ function resolveWhatsAppMuxConfig(params: { cfg: OpenClawConfig; accountId?: str
   };
 }
 
-function readFirstString(value: unknown): string | undefined {
-  if (!Array.isArray(value) || value.length === 0) {
-    return undefined;
-  }
-  return readNonEmptyString(value[0]);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function mapMuxMessageResult(payload: Record<string, unknown>): {
   messageId: string;
   toJid?: string;
 } {
-  const messageId =
-    readNonEmptyString(payload.messageId) ??
-    readNonEmptyString(payload.deliveryId) ??
-    readFirstString(payload.providerMessageIds) ??
-    "unknown";
+  const messageId = readNonEmptyString(payload.messageId);
+  if (!messageId) {
+    throw new Error("whatsapp mux outbound success missing messageId");
+  }
   return {
     messageId,
     toJid: readNonEmptyString(payload.toJid),
@@ -160,20 +156,17 @@ async function sendWhatsAppViaMux(params: {
     try {
       parsed = JSON.parse(responseText);
     } catch {
-      parsed = { raw: responseText };
+      throw new Error(`whatsapp mux outbound returned invalid JSON (${response.status})`);
     }
   }
+  if (!isRecord(parsed)) {
+    throw new Error(`whatsapp mux outbound returned non-object JSON (${response.status})`);
+  }
   if (!response.ok) {
-    const summary =
-      typeof parsed === "object" && parsed !== null
-        ? JSON.stringify(parsed)
-        : responseText || `${response.status}`;
+    const summary = readNonEmptyString(parsed.error) ?? JSON.stringify(parsed);
     throw new Error(`whatsapp mux outbound failed (${response.status}): ${summary}`);
   }
-  if (typeof parsed !== "object" || parsed === null) {
-    return { messageId: "unknown" };
-  }
-  return mapMuxMessageResult(parsed as Record<string, unknown>);
+  return mapMuxMessageResult(parsed);
 }
 
 export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {

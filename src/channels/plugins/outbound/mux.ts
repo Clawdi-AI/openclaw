@@ -49,6 +49,10 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function normalizeChannelMuxConfig(
   raw: { enabled?: boolean; baseUrl?: string; apiKey?: string; timeoutMs?: number } | undefined,
 ): ResolvedChannelMuxConfig {
@@ -129,18 +133,10 @@ function mapMuxSendResponse(
   channel: SupportedMuxChannel,
   payload: Record<string, unknown>,
 ): MuxSendResponse {
-  const providerMessageIds = Array.isArray(payload.providerMessageIds)
-    ? payload.providerMessageIds
-    : undefined;
-  const firstProviderMessageId =
-    providerMessageIds && providerMessageIds.length > 0
-      ? readString(providerMessageIds[0])
-      : undefined;
-  const messageId =
-    readString(payload.messageId) ??
-    readString(payload.deliveryId) ??
-    firstProviderMessageId ??
-    "unknown";
+  const messageId = readString(payload.messageId);
+  if (!messageId) {
+    throw new Error(`mux outbound success missing messageId for channel ${channel}`);
+  }
 
   return {
     messageId,
@@ -193,18 +189,15 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
     try {
       parsedBody = JSON.parse(bodyText);
     } catch {
-      parsedBody = { raw: bodyText };
+      throw new Error(`mux outbound returned invalid JSON (${response.status})`);
     }
   }
+  if (!isRecord(parsedBody)) {
+    throw new Error(`mux outbound returned non-object JSON (${response.status})`);
+  }
   if (!response.ok) {
-    const summary =
-      typeof parsedBody === "object" && parsedBody !== null
-        ? JSON.stringify(parsedBody)
-        : bodyText || `${response.status}`;
+    const summary = readString(parsedBody.error) ?? JSON.stringify(parsedBody);
     throw new Error(`mux outbound failed (${response.status}): ${summary}`);
   }
-  if (typeof parsedBody !== "object" || parsedBody === null) {
-    return { messageId: "unknown" };
-  }
-  return mapMuxSendResponse(params.channel, parsedBody as Record<string, unknown>);
+  return mapMuxSendResponse(params.channel, parsedBody);
 }
