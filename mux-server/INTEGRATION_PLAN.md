@@ -39,6 +39,8 @@ Target scale for MVP: `1000-2000` users on a single mux instance.
 
 - Tenant API key authorizes calls from control plane/OpenClaw to mux.
 - Tenant inbound token authorizes mux calls to tenant OpenClaw inbound endpoint.
+- Shared-key mode is supported and recommended for MVP:
+  - `tenantInboundToken == tenantApiKey`
 - Route binding checks in mux prevent cross-tenant outbound routing.
 - OpenClaw does not receive platform-level bot credentials.
 
@@ -54,6 +56,7 @@ Target scale for MVP: `1000-2000` users on a single mux instance.
 
 Control plane to mux:
 
+- `POST /v1/admin/tenants/bootstrap`
 - `POST /v1/pairings/token`
 - `GET /v1/pairings`
 - `POST /v1/pairings/unbind`
@@ -74,6 +77,8 @@ mux to OpenClaw:
 
 - `tenantApiKey` (for OpenClaw/control-plane to mux)
 - `tenantInboundToken` (for mux to OpenClaw inbound endpoint)
+- In shared-key mode:
+  - set `tenantInboundToken = tenantApiKey`
 
 2. Configure OpenClaw instance
 
@@ -90,10 +95,15 @@ mux to OpenClaw:
 
 3. Register inbound target in mux
 
-- `POST /v1/tenant/inbound-target` with tenant API key:
-- `inboundUrl=http://<tenant-openclaw>/v1/mux/inbound`
-- `inboundToken=<tenantInboundToken>`
-- `inboundTimeoutMs=15000` (or tenant-specific override)
+- Preferred:
+  - `POST /v1/admin/tenants/bootstrap` from control plane backend:
+    - `tenantId`
+    - `apiKey`
+    - `inboundUrl`
+    - optional `inboundToken` (defaults to `apiKey`)
+    - optional `inboundTimeoutMs`
+- Alternative:
+  - tenant-scoped `POST /v1/tenant/inbound-target` with tenant API key.
 
 4. Verify
 
@@ -127,9 +137,11 @@ Outbound:
 - Update OpenClaw config
 - Call `POST /v1/tenant/inbound-target` with new values
 - New inbound forwards use updated target immediately
+- For bootstrap-style control plane workflows:
+  - call `POST /v1/admin/tenants/bootstrap` with updated `inboundUrl`/token
 
 - Rotate tenant API key:
-- Create new tenant key in mux tenant config lifecycle
+- Call `POST /v1/admin/tenants/bootstrap` with new `apiKey`
 - Roll OpenClaw/control-plane to new key
 - Revoke old key
 

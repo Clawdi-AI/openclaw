@@ -36,6 +36,7 @@ type TenantSeed = {
 type TenantIdentity = {
   id: string;
   name: string;
+  authToken: string;
 };
 
 type PairingCodeSeed = {
@@ -336,6 +337,7 @@ async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
 
 const host = process.env.MUX_HOST || "127.0.0.1";
 const port = Number(process.env.MUX_PORT || 18891);
+const muxAdminToken = readNonEmptyString(process.env.MUX_ADMIN_TOKEN);
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 const discordBotToken = process.env.DISCORD_BOT_TOKEN;
 const logPath =
@@ -440,6 +442,29 @@ const stmtUpdateTenantInboundTargetById = db.prepare(`
   UPDATE tenants
   SET inbound_url = ?, inbound_token = ?, inbound_timeout_ms = ?, updated_at_ms = ?
   WHERE id = ? AND status = 'active'
+`);
+
+const stmtUpsertTenantByAdmin = db.prepare(`
+  INSERT INTO tenants (
+    id,
+    name,
+    api_key_hash,
+    status,
+    inbound_url,
+    inbound_token,
+    inbound_timeout_ms,
+    created_at_ms,
+    updated_at_ms
+  )
+  VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    name = excluded.name,
+    api_key_hash = excluded.api_key_hash,
+    status = 'active',
+    inbound_url = excluded.inbound_url,
+    inbound_token = excluded.inbound_token,
+    inbound_timeout_ms = excluded.inbound_timeout_ms,
+    updated_at_ms = excluded.updated_at_ms
 `);
 
 const stmtCountActiveTenantInboundTargets = db.prepare(`
@@ -751,7 +776,15 @@ function resolveTenantIdentity(req: IncomingMessage): TenantIdentity | null {
     return null;
   }
   const name = typeof row.name === "string" && row.name.trim() ? row.name : id;
-  return { id, name };
+  return { id, name, authToken: token };
+}
+
+function isAdminAuthorized(req: IncomingMessage): boolean {
+  if (!muxAdminToken) {
+    return false;
+  }
+  const token = resolveBearerToken(req.headers.authorization);
+  return Boolean(token && token === muxAdminToken);
 }
 
 function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | null {
@@ -785,7 +818,7 @@ function resolveTenantSeeds(): TenantSeed[] {
   if (!raw) {
     const apiKey = process.env.MUX_API_KEY || "outbound-secret";
     const inboundUrl = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_URL) ?? undefined;
-    const inboundToken = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_TOKEN) ?? undefined;
+    const inboundToken = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_TOKEN) ?? apiKey;
     const inboundTimeoutMs = readPositiveInt(process.env.MUX_OPENCLAW_INBOUND_TIMEOUT_MS) ?? 15_000;
     return [
       {
@@ -824,7 +857,7 @@ function resolveTenantSeeds(): TenantSeed[] {
     const inboundToken =
       typeof candidate.inboundToken === "string" && candidate.inboundToken.trim()
         ? candidate.inboundToken.trim()
-        : undefined;
+        : apiKey;
     const inboundTimeoutMs =
       typeof candidate.inboundTimeoutMs === "number" &&
       Number.isFinite(candidate.inboundTimeoutMs) &&
@@ -2540,11 +2573,11 @@ function setInboundTargetForTenant(
   input: { inboundUrl?: unknown; inboundToken?: unknown; inboundTimeoutMs?: unknown },
 ) {
   const inboundUrl = readNonEmptyString(input.inboundUrl);
-  const inboundToken = readNonEmptyString(input.inboundToken);
+  const inboundToken = readNonEmptyString(input.inboundToken) ?? tenant.authToken;
   if (!inboundUrl || !inboundToken) {
     return {
       statusCode: 400,
-      payload: { ok: false, error: "inboundUrl and inboundToken are required" },
+      payload: { ok: false, error: "inboundUrl is required" },
     };
   }
   const inboundTimeoutMs = readPositiveInt(input.inboundTimeoutMs) ?? 15_000;
@@ -2569,6 +2602,73 @@ function setInboundTargetForTenant(
       ok: true,
       inboundUrl,
       inboundTimeoutMs,
+    },
+  };
+}
+
+function bootstrapTenantByAdmin(input: {
+  tenantId?: unknown;
+  name?: unknown;
+  apiKey?: unknown;
+  inboundUrl?: unknown;
+  inboundToken?: unknown;
+  inboundTimeoutMs?: unknown;
+}) {
+  const tenantId = readNonEmptyString(input.tenantId);
+  const apiKey = readNonEmptyString(input.apiKey);
+  const inboundUrl = readNonEmptyString(input.inboundUrl);
+  if (!tenantId || !apiKey || !inboundUrl) {
+    return {
+      statusCode: 400,
+      payload: { ok: false, error: "tenantId, apiKey, and inboundUrl are required" },
+    };
+  }
+  const name = readNonEmptyString(input.name) ?? tenantId;
+  const inboundToken = readNonEmptyString(input.inboundToken) ?? apiKey;
+  const inboundTimeoutMs = readPositiveInt(input.inboundTimeoutMs) ?? 15_000;
+  const now = Date.now();
+  try {
+    stmtUpsertTenantByAdmin.run(
+      tenantId,
+      name,
+      hashApiKey(apiKey),
+      inboundUrl,
+      inboundToken,
+      inboundTimeoutMs,
+      now,
+      now,
+    );
+  } catch (error) {
+    const errText = String(error);
+    if (errText.includes("UNIQUE constraint failed: tenants.api_key_hash")) {
+      return {
+        statusCode: 409,
+        payload: { ok: false, error: "api key already used by another tenant" },
+      };
+    }
+    throw error;
+  }
+
+  writeAuditLog(
+    tenantId,
+    "tenant_bootstrap_upserted",
+    {
+      name,
+      inboundUrl,
+      inboundTimeoutMs,
+      sharedTenantKey: inboundToken === apiKey,
+    },
+    now,
+  );
+  return {
+    statusCode: 200,
+    payload: {
+      ok: true,
+      tenantId,
+      name,
+      inboundUrl,
+      inboundTimeoutMs,
+      sharedTenantKey: inboundToken === apiKey,
     },
   };
 }
@@ -3744,6 +3844,28 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === "/health") {
       sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/v1/admin/tenants/bootstrap") {
+      if (!muxAdminToken) {
+        sendJson(res, 404, { ok: false, error: "not found" });
+        return;
+      }
+      if (!isAdminAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      const body = await readBody<Record<string, unknown>>(req);
+      const result = bootstrapTenantByAdmin({
+        tenantId: body.tenantId,
+        name: body.name,
+        apiKey: body.apiKey,
+        inboundUrl: body.inboundUrl,
+        inboundToken: body.inboundToken,
+        inboundTimeoutMs: body.inboundTimeoutMs,
+      });
+      sendJson(res, result.statusCode, result.payload);
       return;
     }
 

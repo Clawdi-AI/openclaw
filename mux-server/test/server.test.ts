@@ -290,7 +290,7 @@ async function setInboundTarget(params: {
   port: number;
   apiKey: string;
   inboundUrl: string;
-  inboundToken: string;
+  inboundToken?: string;
   inboundTimeoutMs?: number;
 }) {
   return await fetch(`http://127.0.0.1:${params.port}/v1/tenant/inbound-target`, {
@@ -301,7 +301,34 @@ async function setInboundTarget(params: {
     },
     body: JSON.stringify({
       inboundUrl: params.inboundUrl,
-      inboundToken: params.inboundToken,
+      ...(params.inboundToken ? { inboundToken: params.inboundToken } : {}),
+      ...(params.inboundTimeoutMs ? { inboundTimeoutMs: params.inboundTimeoutMs } : {}),
+    }),
+  });
+}
+
+async function bootstrapTenant(params: {
+  port: number;
+  adminToken: string;
+  tenantId: string;
+  name?: string;
+  apiKey: string;
+  inboundUrl: string;
+  inboundToken?: string;
+  inboundTimeoutMs?: number;
+}) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/admin/tenants/bootstrap`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.adminToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tenantId: params.tenantId,
+      ...(params.name ? { name: params.name } : {}),
+      apiKey: params.apiKey,
+      inboundUrl: params.inboundUrl,
+      ...(params.inboundToken ? { inboundToken: params.inboundToken } : {}),
       ...(params.inboundTimeoutMs ? { inboundTimeoutMs: params.inboundTimeoutMs } : {}),
     }),
   });
@@ -331,7 +358,7 @@ describe("mux server", () => {
 
   test("supports per-tenant auth from MUX_TENANTS_JSON", async () => {
     const server = await startServer({
-      apiKey: "legacy-key",
+      apiKey: "fallback-key",
       tenantsJson: JSON.stringify([
         { id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" },
         { id: "tenant-b", name: "Tenant B", apiKey: "tenant-b-key" },
@@ -353,17 +380,171 @@ describe("mux server", () => {
       code: "ROUTE_NOT_BOUND",
     });
 
-    const legacy = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+    const fallback = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
       method: "POST",
       headers: {
-        Authorization: "Bearer legacy-key",
+        Authorization: "Bearer fallback-key",
         "Content-Type": "application/json",
       },
       body: JSON.stringify(requestPayload("missing to should return 400")),
     });
-    expect(legacy.status).toBe(401);
-    expect(await legacy.json()).toEqual({ ok: false, error: "unauthorized" });
+    expect(fallback.status).toBe(401);
+    expect(await fallback.json()).toEqual({ ok: false, error: "unauthorized" });
   });
+
+  test("admin bootstrap registers tenant with shared key default for inbound token", async () => {
+    const server = await startServer({
+      extraEnv: {
+        MUX_ADMIN_TOKEN: "admin-secret",
+      },
+      tenantsJson: JSON.stringify([{ id: "seed", name: "Seed", apiKey: "seed-key" }]),
+    });
+
+    const bootstrap = await bootstrapTenant({
+      port: server.port,
+      adminToken: "admin-secret",
+      tenantId: "tenant-cp-1",
+      name: "Tenant CP 1",
+      apiKey: "tenant-cp-key",
+      inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
+      inboundTimeoutMs: 12_000,
+    });
+    expect(bootstrap.status).toBe(200);
+    await expect(bootstrap.json()).resolves.toMatchObject({
+      ok: true,
+      tenantId: "tenant-cp-1",
+      inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
+      inboundTimeoutMs: 12_000,
+      sharedTenantKey: true,
+    });
+
+    const tenantProbe = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-cp-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestPayload("probe")),
+    });
+    expect(tenantProbe.status).toBe(403);
+    await expect(tenantProbe.json()).resolves.toMatchObject({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
+
+    const inboundTarget = await getInboundTarget({
+      port: server.port,
+      apiKey: "tenant-cp-key",
+    });
+    expect(inboundTarget.status).toBe(200);
+    await expect(inboundTarget.json()).resolves.toMatchObject({
+      ok: true,
+      configured: true,
+      inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
+      inboundTimeoutMs: 12_000,
+    });
+  });
+
+  test("tenant inbound target update defaults inbound token to tenant api key when omitted", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push({
+        auth: req.headers.authorization,
+        payload: await readJsonBody(req),
+      });
+      if (req.headers.authorization !== "Bearer tenant-a-key") {
+        res.writeHead(401, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "bad auth" }));
+        return;
+      }
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    let releaseUpdate = false;
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/botdummy-token/getUpdates") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const body = await readJsonBody(req);
+      const offset = typeof body.offset === "number" ? Number(body.offset) : 0;
+      const result =
+        releaseUpdate && offset <= 700
+          ? [
+              {
+                update_id: 700,
+                message: {
+                  message_id: 701,
+                  date: 1_700_000_111,
+                  text: "default shared key target",
+                  from: { id: 1234 },
+                  chat: { id: -100558, type: "supergroup" },
+                },
+              },
+            ]
+          : [];
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, result }));
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-SHARED-TARGET-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100558",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_INBOUND_ENABLED: "true",
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-SHARED-TARGET-1",
+      sessionKey: "tg:group:-100558",
+    });
+    expect(claim.status).toBe(200);
+
+    const updateTarget = await setInboundTarget({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      inboundUrl: `${inbound.url}/v1/mux/inbound`,
+      inboundTimeoutMs: 2_000,
+    });
+    expect(updateTarget.status).toBe(200);
+    await expect(updateTarget.json()).resolves.toMatchObject({
+      ok: true,
+      inboundUrl: `${inbound.url}/v1/mux/inbound`,
+    });
+
+    releaseUpdate = true;
+    await waitForCondition(
+      () => inboundRequests.length >= 1,
+      8_000,
+      "timed out waiting for shared-key inbound target forward",
+    );
+    expect(inboundRequests[0]?.auth).toBe("Bearer tenant-a-key");
+    expect((inboundRequests[0]?.payload as Record<string, unknown>)?.body).toBe(
+      "default shared key target",
+    );
+  }, 15_000);
 
   test("updates tenant inbound target at runtime and forwards new inbound traffic to updated target", async () => {
     const inboundARequests: Array<Record<string, unknown>> = [];

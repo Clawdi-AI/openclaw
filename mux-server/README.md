@@ -10,6 +10,7 @@ This directory contains a standalone TypeScript mux server for staged rollout an
 - Implements `POST /v1/pairings/unbind`
 - Implements `GET /v1/tenant/inbound-target`
 - Implements `POST /v1/tenant/inbound-target`
+- Implements `POST /v1/admin/tenants/bootstrap` (optional admin plane)
 - Implements `POST /v1/mux/outbound/send`
 - Implements Telegram inbound polling + forwarding to OpenClaw `POST /v1/mux/inbound`
 - Implements Discord inbound polling + forwarding to OpenClaw `POST /v1/mux/inbound`
@@ -78,8 +79,9 @@ node --import tsx mux-server/src/server.ts
 
 - `TELEGRAM_BOT_TOKEN` (required): Telegram bot token.
 - `DISCORD_BOT_TOKEN` (required for Discord transport): Discord bot token.
-- `MUX_API_KEY` (default `outbound-secret`): legacy single-tenant key; seeds default tenant when `MUX_TENANTS_JSON` is unset.
+- `MUX_API_KEY` (default `outbound-secret`): single-tenant fallback key used when `MUX_TENANTS_JSON` is unset.
 - `MUX_TENANTS_JSON` (optional): JSON array for multi-tenant auth seed.
+- `MUX_ADMIN_TOKEN` (optional): enables admin bootstrap endpoint (`POST /v1/admin/tenants/bootstrap`).
 - `MUX_HOST` (default `127.0.0.1`)
 - `MUX_PORT` (default `18891`)
 - `MUX_LOG_PATH` (default `./mux-server/logs/mux-server.log`)
@@ -87,7 +89,7 @@ node --import tsx mux-server/src/server.ts
 - `MUX_IDEMPOTENCY_TTL_MS` (default `600000`)
 - `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
 - `MUX_OPENCLAW_INBOUND_URL` (optional, default tenant only): OpenClaw mux inbound URL.
-- `MUX_OPENCLAW_INBOUND_TOKEN` (optional, default tenant only): bearer token for OpenClaw mux inbound.
+- `MUX_OPENCLAW_INBOUND_TOKEN` (optional, default tenant only): bearer token for OpenClaw mux inbound. If omitted, defaults to `MUX_API_KEY` (shared-key mode).
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
 - `MUX_DISCORD_API_BASE_URL` (default `https://discord.com/api/v10`): Discord API base URL.
@@ -127,6 +129,10 @@ node --import tsx mux-server/src/server.ts
   { "id": "tenant-b", "name": "Tenant B", "apiKey": "tenant-b-key" }
 ]
 ```
+
+Notes:
+
+- `inboundToken` is optional in `MUX_TENANTS_JSON`; when omitted, mux defaults it to `apiKey` (shared-key mode).
 
 `MUX_PAIRING_CODES_JSON` format:
 
@@ -356,7 +362,33 @@ Body:
 Behavior:
 
 - Updates the tenant's forwarding target in SQLite immediately.
+- `inboundToken` is optional; when omitted, mux uses the caller's tenant API key (shared-key mode).
 - No mux restart required.
+
+### `POST /v1/admin/tenants/bootstrap`
+
+Headers:
+
+- `Authorization: Bearer <mux_admin_token>`
+
+Body:
+
+```json
+{
+  "tenantId": "tenant-a",
+  "name": "Tenant A",
+  "apiKey": "tenant-a-key",
+  "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
+  "inboundToken": "tenant-a-key",
+  "inboundTimeoutMs": 15000
+}
+```
+
+Behavior:
+
+- Upserts tenant auth + inbound forwarding target in one call.
+- `inboundToken` is optional; when omitted, it defaults to `apiKey` (shared-key mode).
+- Requires `MUX_ADMIN_TOKEN` to be configured.
 
 ## Reliability Notes
 
@@ -549,6 +581,8 @@ Current test coverage (`mux-server/test/server.test.ts`):
 - health endpoint responds
 - outbound endpoint rejects unauthorized requests
 - multi-tenant auth via `MUX_TENANTS_JSON`
+- admin bootstrap tenant registration with shared-key defaults
+- tenant inbound target update defaults token to tenant key when omitted
 - pairing claim/list/unbind flow
 - duplicate pairing claim conflict handling
 - dynamic tenant inbound target update without restart
