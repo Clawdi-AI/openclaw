@@ -818,7 +818,11 @@ function resolveTenantSeeds(): TenantSeed[] {
   if (!raw) {
     const apiKey = process.env.MUX_API_KEY || "outbound-secret";
     const inboundUrl = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_URL) ?? undefined;
-    const inboundToken = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_TOKEN) ?? apiKey;
+    const inboundTokenOverride = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_TOKEN);
+    if (inboundTokenOverride && inboundTokenOverride !== apiKey) {
+      throw new Error("MUX_OPENCLAW_INBOUND_TOKEN must match MUX_API_KEY (shared-key mode)");
+    }
+    const inboundToken = apiKey;
     const inboundTimeoutMs = readPositiveInt(process.env.MUX_OPENCLAW_INBOUND_TIMEOUT_MS) ?? 15_000;
     return [
       {
@@ -854,10 +858,10 @@ function resolveTenantSeeds(): TenantSeed[] {
       typeof candidate.inboundUrl === "string" && candidate.inboundUrl.trim()
         ? candidate.inboundUrl.trim()
         : undefined;
-    const inboundToken =
+    const inboundTokenOverride =
       typeof candidate.inboundToken === "string" && candidate.inboundToken.trim()
         ? candidate.inboundToken.trim()
-        : apiKey;
+        : undefined;
     const inboundTimeoutMs =
       typeof candidate.inboundTimeoutMs === "number" &&
       Number.isFinite(candidate.inboundTimeoutMs) &&
@@ -871,6 +875,9 @@ function resolveTenantSeeds(): TenantSeed[] {
     if (!apiKey) {
       throw new Error(`tenant.apiKey is required for tenant ${id}`);
     }
+    if (inboundTokenOverride && inboundTokenOverride !== apiKey) {
+      throw new Error(`tenant.inboundToken must match tenant.apiKey for tenant ${id}`);
+    }
     if (seenIds.has(id)) {
       throw new Error(`duplicate tenant.id: ${id}`);
     }
@@ -881,7 +888,7 @@ function resolveTenantSeeds(): TenantSeed[] {
 
     seenIds.add(id);
     seenHashes.add(keyHash);
-    seeds.push({ id, name, apiKey, inboundUrl, inboundToken, inboundTimeoutMs });
+    seeds.push({ id, name, apiKey, inboundUrl, inboundToken: apiKey, inboundTimeoutMs });
   }
 
   return seeds;
@@ -2573,8 +2580,14 @@ function setInboundTargetForTenant(
   input: { inboundUrl?: unknown; inboundToken?: unknown; inboundTimeoutMs?: unknown },
 ) {
   const inboundUrl = readNonEmptyString(input.inboundUrl);
-  const inboundToken = readNonEmptyString(input.inboundToken) ?? tenant.authToken;
-  if (!inboundUrl || !inboundToken) {
+  const inboundToken = readNonEmptyString(input.inboundToken);
+  if (inboundToken && inboundToken !== tenant.authToken) {
+    return {
+      statusCode: 400,
+      payload: { ok: false, error: "inboundToken must match tenant api key when provided" },
+    };
+  }
+  if (!inboundUrl) {
     return {
       statusCode: 400,
       payload: { ok: false, error: "inboundUrl is required" },
@@ -2584,7 +2597,7 @@ function setInboundTargetForTenant(
   const now = Date.now();
   const update = stmtUpdateTenantInboundTargetById.run(
     inboundUrl,
-    inboundToken,
+    tenant.authToken,
     inboundTimeoutMs,
     now,
     tenant.id,
@@ -2617,14 +2630,20 @@ function bootstrapTenantByAdmin(input: {
   const tenantId = readNonEmptyString(input.tenantId);
   const apiKey = readNonEmptyString(input.apiKey);
   const inboundUrl = readNonEmptyString(input.inboundUrl);
+  const inboundToken = readNonEmptyString(input.inboundToken);
   if (!tenantId || !apiKey || !inboundUrl) {
     return {
       statusCode: 400,
       payload: { ok: false, error: "tenantId, apiKey, and inboundUrl are required" },
     };
   }
+  if (inboundToken && inboundToken !== apiKey) {
+    return {
+      statusCode: 400,
+      payload: { ok: false, error: "inboundToken must match apiKey when provided" },
+    };
+  }
   const name = readNonEmptyString(input.name) ?? tenantId;
-  const inboundToken = readNonEmptyString(input.inboundToken) ?? apiKey;
   const inboundTimeoutMs = readPositiveInt(input.inboundTimeoutMs) ?? 15_000;
   const now = Date.now();
   try {
@@ -2633,7 +2652,7 @@ function bootstrapTenantByAdmin(input: {
       name,
       hashApiKey(apiKey),
       inboundUrl,
-      inboundToken,
+      apiKey,
       inboundTimeoutMs,
       now,
       now,
@@ -2656,7 +2675,6 @@ function bootstrapTenantByAdmin(input: {
       name,
       inboundUrl,
       inboundTimeoutMs,
-      sharedTenantKey: inboundToken === apiKey,
     },
     now,
   );
@@ -2668,7 +2686,7 @@ function bootstrapTenantByAdmin(input: {
       name,
       inboundUrl,
       inboundTimeoutMs,
-      sharedTenantKey: inboundToken === apiKey,
+      sharedTenantKey: true,
     },
   };
 }

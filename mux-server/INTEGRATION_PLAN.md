@@ -39,7 +39,7 @@ Target scale for MVP: `1000-2000` users on a single mux instance.
 
 - Tenant API key authorizes calls from control plane/OpenClaw to mux.
 - Tenant inbound token authorizes mux calls to tenant OpenClaw inbound endpoint.
-- Shared-key mode is supported and recommended for MVP:
+- Shared-key mode is the only supported model:
   - `tenantInboundToken == tenantApiKey`
 - Route binding checks in mux prevent cross-tenant outbound routing.
 - OpenClaw does not receive platform-level bot credentials.
@@ -77,8 +77,7 @@ mux to OpenClaw:
 
 - `tenantApiKey` (for OpenClaw/control-plane to mux)
 - `tenantInboundToken` (for mux to OpenClaw inbound endpoint)
-- In shared-key mode:
-  - set `tenantInboundToken = tenantApiKey`
+- Always set `tenantInboundToken = tenantApiKey`.
 
 2. Configure OpenClaw instance
 
@@ -100,7 +99,7 @@ mux to OpenClaw:
     - `tenantId`
     - `apiKey`
     - `inboundUrl`
-    - optional `inboundToken` (defaults to `apiKey`)
+    - optional `inboundToken` (if provided, must match `apiKey`)
     - optional `inboundTimeoutMs`
 - Alternative:
   - tenant-scoped `POST /v1/tenant/inbound-target` with tenant API key.
