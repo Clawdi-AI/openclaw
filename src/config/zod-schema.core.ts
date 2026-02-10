@@ -307,8 +307,6 @@ export const RetryConfigSchema = z
 export const ChannelMuxSchema = z
   .object({
     enabled: z.boolean().optional(),
-    baseUrl: z.string().optional(),
-    apiKey: z.string().optional(),
     timeoutMs: z.number().int().positive().optional(),
   })
   .strict()

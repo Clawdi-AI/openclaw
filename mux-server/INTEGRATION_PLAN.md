@@ -1,166 +1,131 @@
-# Mux Integration Plan
+# Mux Integration Plan (Control Plane Focus)
 
-This document defines how to run the mux server in production with:
+## Audience
 
-- multiple OpenClaw instances (one per tenant/user)
-- one shared control plane (dashboard backend)
-- one shared mux-server process
+This doc is for engineers who:
 
-Target scale for MVP: `1000-2000` users on a single mux instance.
+- build the control plane backend + dashboard
+- provision OpenClaw instances programmatically
+- operate one shared mux server for many tenants
 
-## Goals
+Target scale (MVP): `1000-2000` users on one mux instance.
 
-- Keep OpenClaw instances untrusted with respect to other tenants.
-- Keep channel credentials centralized in mux-server.
-- Keep pairing simple for end users.
-- Keep patch surface on OpenClaw minimal.
+## What You Need To Build
 
-## Components
+1. Tenant bootstrap flow
+   - Generate one `tenantApiKey` per tenant.
+   - Deploy tenant OpenClaw with mux enabled and that key injected.
+   - Register tenant in mux with inbound target.
 
-1. Control plane backend
+2. Pairing UX in dashboard
+   - "Pair" action calls mux to create a one-time pairing token.
+   - Show deep link/token to user.
+   - Show active bindings list.
+   - Support unbind.
 
-- Owns tenant records and user sessions.
-- Calls mux API using tenant API keys.
-- Writes tenant OpenClaw config.
+3. Tenant-safe messaging path
+   - OpenClaw sends outbound via mux.
+   - mux forwards inbound to tenant OpenClaw.
+   - All auth is tenant-scoped with `tenantApiKey`.
 
-2. Shared mux-server
+## What You Do Not Need To Care About
 
-- Holds platform sessions and channel credentials.
-- Enforces tenant auth with tenant API keys.
-- Stores route bindings and session mappings in SQLite.
-- Forwards inbound messages to tenant OpenClaw endpoints.
+- platform bot/session credentials (owned by mux)
+- channel polling internals in mux (Telegram/Discord/WhatsApp listeners)
+- mux DB internals beyond backup/restore
+- transport-level payload conversion details in OpenClaw
 
-3. OpenClaw instance per tenant
+If these are needed later, use `mux-server/README.md`.
 
-- Exposes `POST /v1/mux/inbound` with tenant-specific bearer token.
-- Sends outbound through mux (`/v1/mux/outbound/send`).
+## Required Contracts
 
-## Trust Model
+### 1) OpenClaw config per tenant
 
-- Tenant API key authorizes calls from control plane/OpenClaw to mux.
-- The same tenant API key authorizes mux calls to tenant OpenClaw inbound endpoint.
-- Shared-key mode is the only supported model.
-- Route binding checks in mux prevent cross-tenant outbound routing.
-- OpenClaw does not receive platform-level bot credentials.
+Set at deploy time:
 
-## Data Ownership
+- mux transport + inbound endpoint auth:
+  - `gateway.http.endpoints.mux.enabled=true`
+  - `gateway.http.endpoints.mux.baseUrl=<muxUrl>`
+  - `gateway.http.endpoints.mux.token=<tenantApiKey>`
+  - `channels.telegram.mux.enabled=true`
+  - `channels.discord.mux.enabled=true`
+  - `channels.whatsapp.mux.enabled=true`
 
-- mux SQLite (`MUX_DB_PATH`) stores:
-- `tenants` (api key hash + inbound target config)
-- `bindings` (channel route binding per tenant)
-- `session_routes` (session key to binding)
-- `pairing_tokens`, `pairing_codes`, offsets, idempotency, audit logs
-
-## Required API Paths
-
-Control plane to mux:
+### 2) Control plane -> mux APIs
 
 - `POST /v1/admin/tenants/bootstrap`
+  - Upsert tenant key + inbound target.
+  - Use this as the default provisioning and update path.
 - `POST /v1/pairings/token`
+  - Create one-time token/deep link.
 - `GET /v1/pairings`
+  - List active bindings for tenant.
 - `POST /v1/pairings/unbind`
-- `GET /v1/tenant/inbound-target`
-- `POST /v1/tenant/inbound-target`
+  - Remove a binding.
 
-OpenClaw to mux:
+### 3) Runtime APIs (already handled by OpenClaw + mux)
 
-- `POST /v1/mux/outbound/send`
+- OpenClaw -> mux: `POST /v1/mux/outbound/send`
+- mux -> OpenClaw: `POST /v1/mux/inbound`
 
-mux to OpenClaw:
+## Integration Sequence (Single Tenant)
 
-- `POST /v1/mux/inbound`
+1. Create tenant key.
+2. Deploy OpenClaw instance with mux config and key.
+3. Call `POST /v1/admin/tenants/bootstrap` with:
+   - `tenantId`
+   - `apiKey`
+   - `inboundUrl` (`http://<tenant-openclaw>/v1/mux/inbound`)
+   - optional `inboundTimeoutMs`
+4. Expose "Pair" in dashboard:
+   - backend calls `POST /v1/pairings/token`
+   - frontend shows token/deep link
+5. User pairs in chat.
+6. Backend can show active bindings via `GET /v1/pairings`.
 
-## Provisioning Flow (Per Tenant)
+## Runtime Behavior You Can Rely On
 
-1. Generate secrets
+- Shared-key mode only:
+  - same `tenantApiKey` is used for:
+    - control plane -> mux auth
+    - OpenClaw -> mux auth
+    - mux -> OpenClaw inbound auth
+- Inbound target is dynamic:
+  - updating tenant inbound target via bootstrap takes effect immediately
+  - no mux restart required
+- OpenClaw outbound mux path is centralized in:
+  - `src/channels/plugins/outbound/mux.ts`
 
-- `tenantApiKey` (for OpenClaw/control-plane to mux)
-- Shared-key mode only: mux uses `tenantApiKey` as inbound auth token to OpenClaw.
+## Minimum Acceptance Checks
 
-2. Configure OpenClaw instance
+For each newly provisioned tenant:
 
-- Enable `gateway.http.endpoints.mux.enabled=true`
-- Set `gateway.http.endpoints.mux.token=<tenantApiKey>`
-- Enable channel mux transport:
-- `channels.telegram.mux`
-- `channels.discord.mux`
-- `channels.whatsapp.mux`
-- Set each channel mux config to:
-- `enabled=true`
-- `baseUrl=<mux-url>`
-- `apiKey=<tenantApiKey>`
+1. Outbound check:
+   - Send `/help` (or simple text) from tenant OpenClaw.
+   - Verify mux receives `POST /v1/mux/outbound/send`.
+2. Pairing check:
+   - Create token from dashboard/backend.
+   - User redeems token in target channel.
+   - Verify binding appears in `GET /v1/pairings`.
+3. Inbound check:
+   - Send message from paired chat.
+   - Verify tenant OpenClaw receives `POST /v1/mux/inbound`.
+4. Unbind check:
+   - Unbind via API.
+   - Verify subsequent messages from that route are no longer forwarded.
 
-3. Register inbound target in mux
+## Operations (Only What Matters Here)
 
-- Preferred:
-  - `POST /v1/admin/tenants/bootstrap` from control plane backend:
-    - `tenantId`
-    - `apiKey`
-    - `inboundUrl`
-    - optional `inboundTimeoutMs`
-- Alternative:
-  - tenant-scoped `POST /v1/tenant/inbound-target` with tenant API key.
-
-4. Verify
-
-- `GET /v1/tenant/inbound-target` returns `configured=true`.
-
-## Pairing UX Flow
-
-1. User asks dashboard chat to connect channel.
-2. Control plane calls `POST /v1/pairings/token` with tenant API key.
-3. Control plane shows deeplink/token to user.
-4. User sends token in Telegram/Discord DM/WhatsApp chat.
-5. mux validates token, creates binding + session route.
-6. Subsequent messages forward to tenant OpenClaw.
-
-## Runtime Message Flow
-
-Inbound:
-
-- Platform -> mux ingress (poll/listener) -> binding lookup
-- mux -> OpenClaw `POST /v1/mux/inbound` (tenant api key auth token)
-
-Outbound:
-
-- OpenClaw route-reply -> channel outbound adapter
-- adapter uses `sendViaMux` -> mux `/v1/mux/outbound/send`
-- mux resolves `(tenant, channel, sessionKey)` -> platform route
-
-## Rotation and Updates
-
-- Rotate OpenClaw inbound target/token without mux restart:
-- Update OpenClaw config
-- Call `POST /v1/tenant/inbound-target` with new values
-- New inbound forwards use updated target immediately
-- For bootstrap-style control plane workflows:
-  - call `POST /v1/admin/tenants/bootstrap` with updated `inboundUrl`
-
-- Rotate tenant API key:
-- Call `POST /v1/admin/tenants/bootstrap` with new `apiKey`
-- Roll OpenClaw/control-plane to new key
-- Revoke old key
-
-## Operational Baseline
-
-- Keep mux behind an internal network or gateway.
-- Use HTTPS + restricted ingress at edge.
-- Back up SQLite (`MUX_DB_PATH`) regularly.
+- Keep mux behind HTTPS and restricted ingress.
+- Backup `MUX_DB_PATH`.
 - Monitor:
-- inbound retry logs (`*_retry_deferred`)
-- queue depth (`whatsapp_inbound_queue`)
-- auth failures (`401`)
+  - auth failures (`401`/`403`)
+  - inbound forward failures/retries
+  - queue health (especially WhatsApp inbound queue)
 
-## MVP Rollout Plan
+## MVP Boundaries
 
-1. Deploy shared mux-server with Telegram + Discord + WhatsApp enabled.
-2. Integrate control plane backend with pairing + inbound-target APIs.
-3. Migrate one tenant slice and verify end-to-end.
-4. Roll out tenant-by-tenant.
-5. Keep direct channel fallback disabled for mux-enabled tenants.
-
-## Non-Goals (MVP)
-
-- Multi-region mux clustering.
-- Cross-node distributed queue.
-- Exactly-once delivery guarantees across all hops.
+- One shared mux instance.
+- One OpenClaw per tenant.
+- Telegram + Discord + WhatsApp.
+- No multi-region clustering in MVP.

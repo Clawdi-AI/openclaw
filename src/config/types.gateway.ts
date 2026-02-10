@@ -201,6 +201,8 @@ export type GatewayHttpConfig = {
 export type GatewayHttpMuxConfig = {
   /** Enable mux inbound HTTP endpoint (`POST /v1/mux/inbound`). */
   enabled?: boolean;
+  /** Base URL for outbound mux sends (for example, http://mux.local:8080). */
+  baseUrl?: string;
   /** Shared bearer token required for mux inbound requests. */
   token?: string;
   /** Max inbound payload bytes. Default: 10MB. */

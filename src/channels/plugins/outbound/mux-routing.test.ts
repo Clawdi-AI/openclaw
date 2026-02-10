@@ -5,6 +5,7 @@ import { telegramOutbound } from "./telegram.js";
 import { whatsappOutbound } from "./whatsapp.js";
 
 const originalFetch = globalThis.fetch;
+const TENANT_TOKEN = "tenant-key";
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -18,6 +19,21 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function gatewayMuxConfig(): Pick<OpenClawConfig, "gateway"> {
+  return {
+    gateway: {
+      http: {
+        endpoints: {
+          mux: {
+            baseUrl: "http://mux.local",
+            token: TENANT_TOKEN,
+          },
+        },
+      },
+    },
+  };
+}
+
 describe("mux outbound routing", () => {
   it("routes telegram outbound through mux when enabled", async () => {
     const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-tg-1", chatId: "tg-chat-1" }));
@@ -25,12 +41,11 @@ describe("mux outbound routing", () => {
 
     const sendTelegram = vi.fn();
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         telegram: {
           mux: {
             enabled: true,
-            baseUrl: "http://mux.local",
-            apiKey: "mux-key",
           },
         },
       },
@@ -54,7 +69,9 @@ describe("mux outbound routing", () => {
 
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://mux.local/v1/mux/outbound/send");
-    expect(init.headers).toEqual(expect.objectContaining({ Authorization: "Bearer mux-key" }));
+    expect(init.headers).toEqual(
+      expect.objectContaining({ Authorization: `Bearer ${TENANT_TOKEN}` }),
+    );
     expect(JSON.parse(String(init.body))).toMatchObject({
       channel: "telegram",
       sessionKey: "sess-tg",
@@ -71,12 +88,11 @@ describe("mux outbound routing", () => {
 
     const sendDiscord = vi.fn();
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         discord: {
           mux: {
             enabled: true,
-            baseUrl: "http://mux.local",
-            apiKey: "mux-key",
           },
         },
       },
@@ -105,12 +121,11 @@ describe("mux outbound routing", () => {
 
     const sendWhatsApp = vi.fn();
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         whatsapp: {
           mux: {
             enabled: true,
-            baseUrl: "http://mux.local",
-            apiKey: "mux-key",
           },
         },
       },
@@ -134,14 +149,13 @@ describe("mux outbound routing", () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         telegram: {
           accounts: {
             default: {
               mux: {
                 enabled: true,
-                baseUrl: "http://mux.local",
-                apiKey: "mux-key",
               },
             },
           },
@@ -164,14 +178,13 @@ describe("mux outbound routing", () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         discord: {
           accounts: {
             default: {
               mux: {
                 enabled: true,
-                baseUrl: "http://mux.local",
-                apiKey: "mux-key",
               },
             },
           },
@@ -194,14 +207,13 @@ describe("mux outbound routing", () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         whatsapp: {
           accounts: {
             default: {
               mux: {
                 enabled: true,
-                baseUrl: "http://mux.local",
-                apiKey: "mux-key",
               },
             },
           },
@@ -219,17 +231,76 @@ describe("mux outbound routing", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("requires gateway mux token when channel mux is enabled", async () => {
+    const cfg = {
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              baseUrl: "http://mux.local",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await expect(
+      telegramOutbound.sendText!({
+        cfg,
+        to: "telegram:123",
+        text: "hello",
+        sessionKey: "sess-tg",
+      }),
+    ).rejects.toThrow(/gateway\.http\.endpoints\.mux\.token is required/i);
+  });
+
+  it("requires gateway mux baseUrl when channel mux is enabled", async () => {
+    const cfg = {
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              token: TENANT_TOKEN,
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await expect(
+      telegramOutbound.sendText!({
+        cfg,
+        to: "telegram:123",
+        text: "hello",
+        sessionKey: "sess-tg",
+      }),
+    ).rejects.toThrow(/gateway\.http\.endpoints\.mux\.baseUrl is required/i);
+  });
+
   it("rejects telegram mux success payload missing messageId", async () => {
     const fetchSpy = vi.fn(async () => jsonResponse({ chatId: "tg-chat-1" }));
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         telegram: {
           mux: {
             enabled: true,
-            baseUrl: "http://mux.local",
-            apiKey: "mux-key",
           },
         },
       },
@@ -250,12 +321,11 @@ describe("mux outbound routing", () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         discord: {
           mux: {
             enabled: true,
-            baseUrl: "http://mux.local",
-            apiKey: "mux-key",
           },
         },
       },
@@ -276,12 +346,11 @@ describe("mux outbound routing", () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
+      ...gatewayMuxConfig(),
       channels: {
         whatsapp: {
           mux: {
             enabled: true,
-            baseUrl: "http://mux.local",
-            apiKey: "mux-key",
           },
         },
       },

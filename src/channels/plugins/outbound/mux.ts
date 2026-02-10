@@ -7,8 +7,6 @@ type SupportedMuxChannel = "whatsapp" | "telegram" | "discord";
 
 type ResolvedChannelMuxConfig = {
   enabled: boolean;
-  baseUrl?: string;
-  apiKey?: string;
   timeoutMs: number;
 };
 
@@ -61,12 +59,10 @@ function readString(value: unknown): string | undefined {
 }
 
 function normalizeChannelMuxConfig(
-  raw: { enabled?: boolean; baseUrl?: string; apiKey?: string; timeoutMs?: number } | undefined,
+  raw: { enabled?: boolean; timeoutMs?: number } | undefined,
 ): ResolvedChannelMuxConfig {
   return {
     enabled: raw?.enabled === true,
-    baseUrl: normalizeBaseUrl(raw?.baseUrl),
-    apiKey: readString(raw?.apiKey),
     timeoutMs:
       typeof raw?.timeoutMs === "number" && Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0
         ? Math.trunc(raw.timeoutMs)
@@ -111,27 +107,33 @@ function requireMuxConfig(params: {
   sessionKey?: string | null;
 }): {
   baseUrl: string;
-  apiKey: string;
+  token: string;
   timeoutMs: number;
   sessionKey: string;
 } {
   const resolved = resolveChannelMuxConfig(params);
+  const gatewayMuxBaseUrl = normalizeBaseUrl(params.cfg.gateway?.http?.endpoints?.mux?.baseUrl);
+  const gatewayMuxToken = readString(params.cfg.gateway?.http?.endpoints?.mux?.token);
   if (!resolved.enabled) {
     throw new Error(`mux is not enabled for channel ${params.channel}`);
   }
-  if (!resolved.baseUrl) {
-    throw new Error(`channels.${params.channel}.mux.baseUrl is required when mux is enabled`);
+  if (!gatewayMuxBaseUrl) {
+    throw new Error(
+      `gateway.http.endpoints.mux.baseUrl is required when channels.${params.channel}.mux.enabled=true`,
+    );
   }
-  if (!resolved.apiKey) {
-    throw new Error(`channels.${params.channel}.mux.apiKey is required when mux is enabled`);
+  if (!gatewayMuxToken) {
+    throw new Error(
+      `gateway.http.endpoints.mux.token is required when channels.${params.channel}.mux.enabled=true`,
+    );
   }
   const sessionKey = readString(params.sessionKey);
   if (!sessionKey) {
     throw new Error(`mux outbound for ${params.channel} requires a sessionKey`);
   }
   return {
-    baseUrl: resolved.baseUrl,
-    apiKey: resolved.apiKey,
+    baseUrl: gatewayMuxBaseUrl,
+    token: gatewayMuxToken,
     timeoutMs: resolved.timeoutMs,
     sessionKey,
   };
@@ -183,7 +185,7 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
   const response = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${resolved.apiKey}`,
+      Authorization: `Bearer ${resolved.token}`,
       "Content-Type": "application/json; charset=utf-8",
       "Idempotency-Key": payload.requestId,
     },

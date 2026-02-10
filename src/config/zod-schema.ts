@@ -485,6 +485,7 @@ export const OpenClawSchema = z
                 mux: z
                   .object({
                     enabled: z.boolean().optional(),
+                    baseUrl: z.string().optional(),
                     token: z.string().optional(),
                     maxBodyBytes: z.number().int().positive().optional(),
                   })
