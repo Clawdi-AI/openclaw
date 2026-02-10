@@ -89,7 +89,6 @@ node --import tsx mux-server/src/server.ts
 - `MUX_IDEMPOTENCY_TTL_MS` (default `600000`)
 - `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
 - `MUX_OPENCLAW_INBOUND_URL` (optional, default tenant only): OpenClaw mux inbound URL.
-- `MUX_OPENCLAW_INBOUND_TOKEN` (optional, default tenant only): must match `MUX_API_KEY` when set; shared-key mode is the only supported model.
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
 - `MUX_DISCORD_API_BASE_URL` (default `https://discord.com/api/v10`): Discord API base URL.
@@ -123,7 +122,6 @@ node --import tsx mux-server/src/server.ts
     "name": "Tenant A",
     "apiKey": "tenant-a-key",
     "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
-    "inboundToken": "tenant-a-key",
     "inboundTimeoutMs": 15000
   },
   { "id": "tenant-b", "name": "Tenant B", "apiKey": "tenant-b-key" }
@@ -133,7 +131,7 @@ node --import tsx mux-server/src/server.ts
 Notes:
 
 - Shared-key mode is the only supported model.
-- In `MUX_TENANTS_JSON`, `inboundToken` must equal `apiKey` if provided; when omitted, mux stores `apiKey`.
+- mux always uses tenant `apiKey` as inbound auth token when forwarding to OpenClaw.
 
 `MUX_PAIRING_CODES_JSON` format:
 
@@ -355,7 +353,6 @@ Body:
 ```json
 {
   "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
-  "inboundToken": "tenant-a-key",
   "inboundTimeoutMs": 15000
 }
 ```
@@ -364,7 +361,6 @@ Behavior:
 
 - Updates the tenant's forwarding target in SQLite immediately.
 - Shared-key mode is mandatory for this endpoint.
-- `inboundToken` must match the caller's tenant API key when provided; when omitted, mux uses the caller's tenant API key.
 - No mux restart required.
 
 ### `POST /v1/admin/tenants/bootstrap`
@@ -381,7 +377,6 @@ Body:
   "name": "Tenant A",
   "apiKey": "tenant-a-key",
   "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
-  "inboundToken": "tenant-a-key",
   "inboundTimeoutMs": 15000
 }
 ```
@@ -390,7 +385,6 @@ Behavior:
 
 - Upserts tenant auth + inbound forwarding target in one call.
 - Shared-key mode is mandatory for this endpoint.
-- `inboundToken` must match `apiKey` when provided; when omitted, mux stores `apiKey`.
 - Requires `MUX_ADMIN_TOKEN` to be configured.
 
 ## Reliability Notes

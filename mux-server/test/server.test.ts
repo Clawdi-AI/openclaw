@@ -290,7 +290,6 @@ async function setInboundTarget(params: {
   port: number;
   apiKey: string;
   inboundUrl: string;
-  inboundToken?: string;
   inboundTimeoutMs?: number;
 }) {
   return await fetch(`http://127.0.0.1:${params.port}/v1/tenant/inbound-target`, {
@@ -301,7 +300,6 @@ async function setInboundTarget(params: {
     },
     body: JSON.stringify({
       inboundUrl: params.inboundUrl,
-      ...(params.inboundToken ? { inboundToken: params.inboundToken } : {}),
       ...(params.inboundTimeoutMs ? { inboundTimeoutMs: params.inboundTimeoutMs } : {}),
     }),
   });
@@ -314,7 +312,6 @@ async function bootstrapTenant(params: {
   name?: string;
   apiKey: string;
   inboundUrl: string;
-  inboundToken?: string;
   inboundTimeoutMs?: number;
 }) {
   return await fetch(`http://127.0.0.1:${params.port}/v1/admin/tenants/bootstrap`, {
@@ -328,7 +325,6 @@ async function bootstrapTenant(params: {
       ...(params.name ? { name: params.name } : {}),
       apiKey: params.apiKey,
       inboundUrl: params.inboundUrl,
-      ...(params.inboundToken ? { inboundToken: params.inboundToken } : {}),
       ...(params.inboundTimeoutMs ? { inboundTimeoutMs: params.inboundTimeoutMs } : {}),
     }),
   });
@@ -392,7 +388,7 @@ describe("mux server", () => {
     expect(await fallback.json()).toEqual({ ok: false, error: "unauthorized" });
   });
 
-  test("admin bootstrap registers tenant with shared key default for inbound token", async () => {
+  test("admin bootstrap registers tenant with shared-key inbound auth", async () => {
     const server = await startServer({
       extraEnv: {
         MUX_ADMIN_TOKEN: "admin-secret",
@@ -446,30 +442,7 @@ describe("mux server", () => {
     });
   });
 
-  test("admin bootstrap rejects inboundToken mismatch", async () => {
-    const server = await startServer({
-      extraEnv: {
-        MUX_ADMIN_TOKEN: "admin-secret",
-      },
-      tenantsJson: JSON.stringify([{ id: "seed", name: "Seed", apiKey: "seed-key" }]),
-    });
-
-    const bootstrap = await bootstrapTenant({
-      port: server.port,
-      adminToken: "admin-secret",
-      tenantId: "tenant-mismatch-1",
-      apiKey: "tenant-mismatch-key",
-      inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
-      inboundToken: "different-token",
-    });
-    expect(bootstrap.status).toBe(400);
-    await expect(bootstrap.json()).resolves.toMatchObject({
-      ok: false,
-      error: "inboundToken must match apiKey when provided",
-    });
-  });
-
-  test("tenant inbound target update defaults inbound token to tenant api key when omitted", async () => {
+  test("tenant inbound target update uses tenant api key for inbound auth", async () => {
     const inboundRequests: Array<Record<string, unknown>> = [];
     const inbound = await startHttpServer(async (req, res) => {
       if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
@@ -569,25 +542,6 @@ describe("mux server", () => {
     );
   }, 15_000);
 
-  test("tenant inbound target update rejects inboundToken mismatch", async () => {
-    const server = await startServer({
-      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
-    });
-
-    const updateTarget = await setInboundTarget({
-      port: server.port,
-      apiKey: "tenant-a-key",
-      inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
-      inboundToken: "different-token",
-      inboundTimeoutMs: 2_000,
-    });
-    expect(updateTarget.status).toBe(400);
-    await expect(updateTarget.json()).resolves.toMatchObject({
-      ok: false,
-      error: "inboundToken must match tenant api key when provided",
-    });
-  });
-
   test("updates tenant inbound target at runtime and forwards new inbound traffic to updated target", async () => {
     const inboundARequests: Array<Record<string, unknown>> = [];
     const inboundBRequests: Array<Record<string, unknown>> = [];
@@ -671,7 +625,6 @@ describe("mux server", () => {
           name: "Tenant A",
           apiKey: "tenant-a-key",
           inboundUrl: `${inboundA.url}/v1/mux/inbound`,
-          inboundToken: "tenant-a-key",
           inboundTimeoutMs: 2_000,
         },
       ]),
@@ -720,7 +673,6 @@ describe("mux server", () => {
       port: server.port,
       apiKey: "tenant-a-key",
       inboundUrl: `${inboundB.url}/v1/mux/inbound`,
-      inboundToken: "tenant-a-key",
       inboundTimeoutMs: 2_000,
     });
     expect(updateTarget.status).toBe(200);
@@ -1145,7 +1097,6 @@ describe("mux server", () => {
           name: "Tenant A",
           apiKey: "tenant-a-key",
           inboundUrl: `${inbound.url}/v1/mux/inbound`,
-          inboundToken: "tenant-a-key",
           inboundTimeoutMs: 2_000,
         },
       ]),
@@ -1266,7 +1217,6 @@ describe("mux server", () => {
           name: "Tenant A",
           apiKey: "tenant-a-key",
           inboundUrl: `${inbound.url}/v1/mux/inbound`,
-          inboundToken: "tenant-a-key",
           inboundTimeoutMs: 2_000,
         },
       ]),
@@ -1392,7 +1342,6 @@ describe("mux server", () => {
           name: "Tenant A",
           apiKey: "tenant-a-key",
           inboundUrl: `${inbound.url}/v1/mux/inbound`,
-          inboundToken: "tenant-a-key",
           inboundTimeoutMs: 2_000,
         },
       ]),
@@ -1554,7 +1503,6 @@ describe("mux server", () => {
           name: "Tenant A",
           apiKey: "tenant-a-key",
           inboundUrl: `${inbound.url}/v1/mux/inbound`,
-          inboundToken: "tenant-a-key",
           inboundTimeoutMs: 2_000,
         },
       ]),
@@ -1706,7 +1654,6 @@ describe("mux server", () => {
           name: "Tenant A",
           apiKey: "tenant-a-key",
           inboundUrl: `${inbound.url}/v1/mux/inbound`,
-          inboundToken: "tenant-a-key",
           inboundTimeoutMs: 2_000,
         },
       ]),
@@ -1818,7 +1765,6 @@ describe("mux server", () => {
           name: "Tenant A",
           apiKey: "tenant-a-key",
           inboundUrl: `${inbound.url}/v1/mux/inbound`,
-          inboundToken: "tenant-a-key",
           inboundTimeoutMs: 2_000,
         },
       ]),
@@ -2036,7 +1982,6 @@ describe("mux server", () => {
           name: "Tenant A",
           apiKey: "tenant-a-key",
           inboundUrl: `${inbound.url}/v1/mux/inbound`,
-          inboundToken: "tenant-a-key",
           inboundTimeoutMs: 2_000,
         },
       ]),

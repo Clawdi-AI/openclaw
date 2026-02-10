@@ -29,7 +29,6 @@ type TenantSeed = {
   name: string;
   apiKey: string;
   inboundUrl?: string;
-  inboundToken?: string;
   inboundTimeoutMs: number;
 };
 
@@ -818,11 +817,6 @@ function resolveTenantSeeds(): TenantSeed[] {
   if (!raw) {
     const apiKey = process.env.MUX_API_KEY || "outbound-secret";
     const inboundUrl = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_URL) ?? undefined;
-    const inboundTokenOverride = readNonEmptyString(process.env.MUX_OPENCLAW_INBOUND_TOKEN);
-    if (inboundTokenOverride && inboundTokenOverride !== apiKey) {
-      throw new Error("MUX_OPENCLAW_INBOUND_TOKEN must match MUX_API_KEY (shared-key mode)");
-    }
-    const inboundToken = apiKey;
     const inboundTimeoutMs = readPositiveInt(process.env.MUX_OPENCLAW_INBOUND_TIMEOUT_MS) ?? 15_000;
     return [
       {
@@ -830,7 +824,6 @@ function resolveTenantSeeds(): TenantSeed[] {
         name: "default",
         apiKey,
         inboundUrl,
-        inboundToken,
         inboundTimeoutMs,
       },
     ];
@@ -858,10 +851,6 @@ function resolveTenantSeeds(): TenantSeed[] {
       typeof candidate.inboundUrl === "string" && candidate.inboundUrl.trim()
         ? candidate.inboundUrl.trim()
         : undefined;
-    const inboundTokenOverride =
-      typeof candidate.inboundToken === "string" && candidate.inboundToken.trim()
-        ? candidate.inboundToken.trim()
-        : undefined;
     const inboundTimeoutMs =
       typeof candidate.inboundTimeoutMs === "number" &&
       Number.isFinite(candidate.inboundTimeoutMs) &&
@@ -875,9 +864,6 @@ function resolveTenantSeeds(): TenantSeed[] {
     if (!apiKey) {
       throw new Error(`tenant.apiKey is required for tenant ${id}`);
     }
-    if (inboundTokenOverride && inboundTokenOverride !== apiKey) {
-      throw new Error(`tenant.inboundToken must match tenant.apiKey for tenant ${id}`);
-    }
     if (seenIds.has(id)) {
       throw new Error(`duplicate tenant.id: ${id}`);
     }
@@ -888,7 +874,7 @@ function resolveTenantSeeds(): TenantSeed[] {
 
     seenIds.add(id);
     seenHashes.add(keyHash);
-    seeds.push({ id, name, apiKey, inboundUrl, inboundToken: apiKey, inboundTimeoutMs });
+    seeds.push({ id, name, apiKey, inboundUrl, inboundTimeoutMs });
   }
 
   return seeds;
@@ -1106,7 +1092,7 @@ function seedTenants(database: DatabaseSync, tenants: TenantSeed[]) {
       tenant.name,
       hashApiKey(tenant.apiKey),
       tenant.inboundUrl ?? null,
-      tenant.inboundToken ?? null,
+      tenant.apiKey,
       tenant.inboundTimeoutMs,
       now,
       now,
@@ -2577,16 +2563,9 @@ function getInboundTargetForTenant(tenant: TenantIdentity) {
 
 function setInboundTargetForTenant(
   tenant: TenantIdentity,
-  input: { inboundUrl?: unknown; inboundToken?: unknown; inboundTimeoutMs?: unknown },
+  input: { inboundUrl?: unknown; inboundTimeoutMs?: unknown },
 ) {
   const inboundUrl = readNonEmptyString(input.inboundUrl);
-  const inboundToken = readNonEmptyString(input.inboundToken);
-  if (inboundToken && inboundToken !== tenant.authToken) {
-    return {
-      statusCode: 400,
-      payload: { ok: false, error: "inboundToken must match tenant api key when provided" },
-    };
-  }
   if (!inboundUrl) {
     return {
       statusCode: 400,
@@ -2624,23 +2603,15 @@ function bootstrapTenantByAdmin(input: {
   name?: unknown;
   apiKey?: unknown;
   inboundUrl?: unknown;
-  inboundToken?: unknown;
   inboundTimeoutMs?: unknown;
 }) {
   const tenantId = readNonEmptyString(input.tenantId);
   const apiKey = readNonEmptyString(input.apiKey);
   const inboundUrl = readNonEmptyString(input.inboundUrl);
-  const inboundToken = readNonEmptyString(input.inboundToken);
   if (!tenantId || !apiKey || !inboundUrl) {
     return {
       statusCode: 400,
       payload: { ok: false, error: "tenantId, apiKey, and inboundUrl are required" },
-    };
-  }
-  if (inboundToken && inboundToken !== apiKey) {
-    return {
-      statusCode: 400,
-      payload: { ok: false, error: "inboundToken must match apiKey when provided" },
     };
   }
   const name = readNonEmptyString(input.name) ?? tenantId;
@@ -3880,7 +3851,6 @@ const server = http.createServer(async (req, res) => {
         name: body.name,
         apiKey: body.apiKey,
         inboundUrl: body.inboundUrl,
-        inboundToken: body.inboundToken,
         inboundTimeoutMs: body.inboundTimeoutMs,
       });
       sendJson(res, result.statusCode, result.payload);
@@ -3955,7 +3925,6 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody<Record<string, unknown>>(req);
       const result = setInboundTargetForTenant(tenant, {
         inboundUrl: body.inboundUrl,
-        inboundToken: body.inboundToken,
         inboundTimeoutMs: body.inboundTimeoutMs,
       });
       sendJson(res, result.statusCode, result.payload);

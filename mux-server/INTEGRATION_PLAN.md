@@ -38,9 +38,8 @@ Target scale for MVP: `1000-2000` users on a single mux instance.
 ## Trust Model
 
 - Tenant API key authorizes calls from control plane/OpenClaw to mux.
-- Tenant inbound token authorizes mux calls to tenant OpenClaw inbound endpoint.
-- Shared-key mode is the only supported model:
-  - `tenantInboundToken == tenantApiKey`
+- The same tenant API key authorizes mux calls to tenant OpenClaw inbound endpoint.
+- Shared-key mode is the only supported model.
 - Route binding checks in mux prevent cross-tenant outbound routing.
 - OpenClaw does not receive platform-level bot credentials.
 
@@ -76,13 +75,12 @@ mux to OpenClaw:
 1. Generate secrets
 
 - `tenantApiKey` (for OpenClaw/control-plane to mux)
-- `tenantInboundToken` (for mux to OpenClaw inbound endpoint)
-- Always set `tenantInboundToken = tenantApiKey`.
+- Shared-key mode only: mux uses `tenantApiKey` as inbound auth token to OpenClaw.
 
 2. Configure OpenClaw instance
 
 - Enable `gateway.http.endpoints.mux.enabled=true`
-- Set `gateway.http.endpoints.mux.token=<tenantInboundToken>`
+- Set `gateway.http.endpoints.mux.token=<tenantApiKey>`
 - Enable channel mux transport:
 - `channels.telegram.mux`
 - `channels.discord.mux`
@@ -99,7 +97,6 @@ mux to OpenClaw:
     - `tenantId`
     - `apiKey`
     - `inboundUrl`
-    - optional `inboundToken` (if provided, must match `apiKey`)
     - optional `inboundTimeoutMs`
 - Alternative:
   - tenant-scoped `POST /v1/tenant/inbound-target` with tenant API key.
@@ -122,7 +119,7 @@ mux to OpenClaw:
 Inbound:
 
 - Platform -> mux ingress (poll/listener) -> binding lookup
-- mux -> OpenClaw `POST /v1/mux/inbound` (tenant inbound token)
+- mux -> OpenClaw `POST /v1/mux/inbound` (tenant api key auth token)
 
 Outbound:
 
@@ -137,7 +134,7 @@ Outbound:
 - Call `POST /v1/tenant/inbound-target` with new values
 - New inbound forwards use updated target immediately
 - For bootstrap-style control plane workflows:
-  - call `POST /v1/admin/tenants/bootstrap` with updated `inboundUrl`/token
+  - call `POST /v1/admin/tenants/bootstrap` with updated `inboundUrl`
 
 - Rotate tenant API key:
 - Call `POST /v1/admin/tenants/bootstrap` with new `apiKey`
