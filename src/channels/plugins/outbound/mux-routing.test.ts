@@ -114,6 +114,21 @@ describe("mux outbound routing", () => {
       messageId: "mx-discord-1",
       channelId: "dc-channel-1",
     });
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      channel: "discord",
+      sessionKey: "sess-discord",
+      to: "discord:chan",
+      raw: {
+        discord: {
+          send: {
+            text: "hello",
+          },
+        },
+      },
+    });
   });
 
   it("routes whatsapp outbound through mux when enabled", async () => {
@@ -143,6 +158,21 @@ describe("mux outbound routing", () => {
     expect(sendWhatsApp).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ channel: "whatsapp", messageId: "mx-wa-1", toJid: "jid-1" });
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      channel: "whatsapp",
+      sessionKey: "sess-wa",
+      to: "+15555550100",
+      raw: {
+        whatsapp: {
+          send: {
+            text: "hello",
+          },
+        },
+      },
+    });
   });
 
   it("routes telegram outbound through mux from default account config", async () => {

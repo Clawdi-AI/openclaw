@@ -53,7 +53,7 @@ This repo now has 3 mux-related pieces:
 
 - External mux service implementation (this directory)
 - Telegram + Discord + WhatsApp outbound + inbound forwarding
-- Shared payload contract helpers live in `mux-server/src/mux-envelope.ts` to keep no-transform rules centralized.
+- Shared payload contract helpers live in `src/channels/plugins/mux-envelope.ts` and are re-exported by `mux-server/src/mux-envelope.ts` so OpenClaw and mux-server stay in lockstep.
 
 In short: OpenClaw inbound/outbound adapters are in `src/`; the standalone mux service is here.
 

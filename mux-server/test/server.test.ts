@@ -833,24 +833,7 @@ describe("mux server", () => {
     });
   });
 
-  test("telegram outbound forwards inline keyboard from channelData", async () => {
-    const telegramRequests: Array<Record<string, unknown>> = [];
-    const telegramApi = await startHttpServer(async (req, res) => {
-      if (req.method === "POST" && req.url === "/botdummy-token/sendMessage") {
-        telegramRequests.push(await readJsonBody(req));
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-        res.end(
-          JSON.stringify({
-            ok: true,
-            result: { message_id: 901, chat: { id: -100123 } },
-          }),
-        );
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
-
+  test("telegram outbound requires raw envelope", async () => {
     const server = await startServer({
       tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
       pairingCodesJson: JSON.stringify([
@@ -861,9 +844,6 @@ describe("mux server", () => {
           scope: "chat",
         },
       ]),
-      extraEnv: {
-        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
-      },
     });
 
     const claim = await claimPairing({
@@ -884,28 +864,13 @@ describe("mux server", () => {
         channel: "telegram",
         sessionKey: "tg:group:-100123:thread:2",
         text: "paged commands",
-        channelData: {
-          telegram: {
-            buttons: [[{ text: "Next ▶", callback_data: "commands_page_2:main" }]],
-          },
-        },
       }),
     });
 
-    expect(outbound.status).toBe(200);
-    expect(await outbound.json()).toMatchObject({
-      ok: true,
-      messageId: "901",
-      chatId: "-100123",
-    });
-    expect(telegramRequests).toHaveLength(1);
-    expect(telegramRequests[0]).toMatchObject({
-      chat_id: "-100123",
-      text: "paged commands",
-      message_thread_id: 2,
-      reply_markup: {
-        inline_keyboard: [[{ text: "Next ▶", callback_data: "commands_page_2:main" }]],
-      },
+    expect(outbound.status).toBe(400);
+    expect(await outbound.json()).toEqual({
+      ok: false,
+      error: "telegram outbound requires raw.telegram.method and raw.telegram.body",
     });
   });
 
@@ -1296,6 +1261,47 @@ describe("mux server", () => {
     );
   });
 
+  test("discord outbound requires raw envelope", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-DISCORD-RAW-REQUIRED",
+          channel: "discord",
+          routeKey: "discord:default:dm:user:42",
+          scope: "dm",
+        },
+      ]),
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-DISCORD-RAW-REQUIRED",
+      sessionKey: "dc:dm:42",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "discord",
+        sessionKey: "dc:dm:42",
+        text: "hello without raw",
+      }),
+    });
+
+    expect(outbound.status).toBe(400);
+    expect(await outbound.json()).toEqual({
+      ok: false,
+      error: "discord outbound requires raw.discord.body or raw.discord.send",
+    });
+  });
+
   test("sends discord outbound through guild-bound route and enforces guild lock", async () => {
     const discordRequests: Array<{
       method: string;
@@ -1367,7 +1373,13 @@ describe("mux server", () => {
         channel: "discord",
         sessionKey: "dc:guild:9001",
         to: "channel:2001",
-        text: "hello discord",
+        raw: {
+          discord: {
+            send: {
+              text: "hello discord",
+            },
+          },
+        },
       }),
     });
     expect(allowed.status).toBe(200);
@@ -1376,6 +1388,7 @@ describe("mux server", () => {
       messageId: "7001",
       channelId: "2001",
       providerMessageIds: ["7001"],
+      rawPassthrough: true,
     });
 
     const denied = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
@@ -1388,7 +1401,13 @@ describe("mux server", () => {
         channel: "discord",
         sessionKey: "dc:guild:9001",
         to: "channel:2999",
-        text: "should fail",
+        raw: {
+          discord: {
+            send: {
+              text: "should fail",
+            },
+          },
+        },
       }),
     });
     expect(denied.status).toBe(403);
@@ -1467,7 +1486,13 @@ describe("mux server", () => {
         channel: "discord",
         sessionKey: "dc:dm:4242",
         to: "user:9999",
-        text: "hello dm",
+        raw: {
+          discord: {
+            send: {
+              text: "hello dm",
+            },
+          },
+        },
       }),
     });
     expect(response.status).toBe(200);
@@ -1476,6 +1501,7 @@ describe("mux server", () => {
       messageId: "8001",
       channelId: "3001",
       providerMessageIds: ["8001"],
+      rawPassthrough: true,
     });
 
     const dmCreate = discordRequests.find(
@@ -2715,6 +2741,46 @@ describe("mux server", () => {
     });
   });
 
+  test("whatsapp outbound accepts legacy text envelope", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-RAW-REQUIRED",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550001111@s.whatsapp.net",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-WA-RAW-REQUIRED",
+      sessionKey: "wa:chat:15550001111@s.whatsapp.net",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "whatsapp",
+        sessionKey: "wa:chat:15550001111@s.whatsapp.net",
+        text: "hello without raw",
+      }),
+    });
+    expect(outbound.status).toBe(502);
+    expect(await outbound.json()).toMatchObject({
+      ok: false,
+      error: "whatsapp send failed",
+    });
+  });
+
   test("whatsapp outbound returns 502 when no active listener is available", async () => {
     const server = await startServer({
       tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
@@ -2745,7 +2811,13 @@ describe("mux server", () => {
       body: JSON.stringify({
         channel: "whatsapp",
         sessionKey: "wa:chat:15550001111@s.whatsapp.net",
-        text: "hello wa",
+        raw: {
+          whatsapp: {
+            send: {
+              text: "hello wa",
+            },
+          },
+        },
       }),
     });
     expect(response.status).toBe(502);

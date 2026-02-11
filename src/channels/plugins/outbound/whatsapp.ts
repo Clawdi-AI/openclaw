@@ -4,6 +4,7 @@ import { shouldLogVerbose } from "../../../globals.js";
 import { missingTargetError } from "../../../infra/outbound/target-errors.js";
 import { sendPollWhatsApp } from "../../../web/outbound.js";
 import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "../../../whatsapp/normalize.js";
+import { buildWhatsAppRawSend } from "../mux-envelope.js";
 import { isMuxEnabled, sendViaMux } from "./mux.js";
 
 export const whatsappOutbound: ChannelOutboundAdapter = {
@@ -67,6 +68,12 @@ export const whatsappOutbound: ChannelOutboundAdapter = {
         sessionKey,
         to,
         text,
+        raw: {
+          whatsapp: buildWhatsAppRawSend({
+            text,
+            gifPlayback,
+          }),
+        },
       });
       return { channel: "whatsapp", ...result };
     }
@@ -89,6 +96,13 @@ export const whatsappOutbound: ChannelOutboundAdapter = {
         to,
         text,
         mediaUrl,
+        raw: {
+          whatsapp: buildWhatsAppRawSend({
+            text,
+            mediaUrl,
+            gifPlayback,
+          }),
+        },
       });
       return { channel: "whatsapp", ...result };
     }

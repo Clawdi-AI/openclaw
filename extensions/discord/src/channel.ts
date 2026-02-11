@@ -33,6 +33,24 @@ import { getDiscordRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("discord");
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function buildDiscordRawSend(params: {
+  text: string;
+  mediaUrl?: string;
+  replyToId?: string | null;
+}) {
+  return {
+    send: {
+      text: params.text,
+      ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
+      ...(params.replyToId ? { replyTo: params.replyToId } : {}),
+    },
+  };
+}
+
 const discordMessageActions: ChannelMessageActionAdapter = {
   listActions: (ctx) => getDiscordRuntime().channel.discord.messageActions.listActions(ctx),
   extractToolSend: (ctx) => getDiscordRuntime().channel.discord.messageActions.extractToolSend(ctx),
@@ -292,6 +310,12 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
           text,
           replyToId,
           threadId,
+          raw: {
+            discord: buildDiscordRawSend({
+              text,
+              replyToId,
+            }),
+          },
         });
         return { channel: "discord", ...result };
       }
@@ -325,6 +349,13 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
           mediaUrl,
           replyToId,
           threadId,
+          raw: {
+            discord: buildDiscordRawSend({
+              text,
+              mediaUrl,
+              replyToId,
+            }),
+          },
         });
         return { channel: "discord", ...result };
       }
@@ -339,6 +370,17 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
     },
     sendPayload: async ({ cfg, to, payload, accountId, deps, replyToId, threadId, sessionKey }) => {
       if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
+        const channelData =
+          typeof payload.channelData === "object" && payload.channelData !== null
+            ? payload.channelData
+            : undefined;
+        const rawFromChannelData = asRecord(asRecord(channelData)?.raw);
+        const rawDiscord = asRecord(rawFromChannelData?.discord);
+        const fallbackMediaUrl =
+          payload.mediaUrl ??
+          (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0
+            ? payload.mediaUrls[0]
+            : undefined);
         const result = await sendViaMux({
           cfg,
           channel: "discord",
@@ -350,10 +392,16 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
           mediaUrls: payload.mediaUrls,
           replyToId,
           threadId,
-          channelData:
-            typeof payload.channelData === "object" && payload.channelData !== null
-              ? payload.channelData
-              : undefined,
+          channelData,
+          raw: {
+            discord:
+              rawDiscord ??
+              buildDiscordRawSend({
+                text: payload.text ?? "",
+                mediaUrl: fallbackMediaUrl,
+                replyToId,
+              }),
+          },
         });
         return { channel: "discord", ...result };
       }

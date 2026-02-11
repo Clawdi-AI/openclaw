@@ -36,6 +36,20 @@ import { getWhatsAppRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("whatsapp");
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function buildWhatsAppRawSend(params: { text: string; mediaUrl?: string; gifPlayback?: boolean }) {
+  return {
+    send: {
+      text: params.text,
+      ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
+      ...(params.gifPlayback ? { gifPlayback: true } : {}),
+    },
+  };
+}
+
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
@@ -351,6 +365,12 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
           sessionKey,
           to,
           text,
+          raw: {
+            whatsapp: buildWhatsAppRawSend({
+              text,
+              gifPlayback,
+            }),
+          },
         });
         return { channel: "whatsapp", ...result };
       }
@@ -372,6 +392,13 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
           to,
           text,
           mediaUrl,
+          raw: {
+            whatsapp: buildWhatsAppRawSend({
+              text,
+              mediaUrl,
+              gifPlayback,
+            }),
+          },
         });
         return { channel: "whatsapp", ...result };
       }
@@ -396,6 +423,17 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
       sessionKey,
     }) => {
       if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+        const channelData =
+          typeof payload.channelData === "object" && payload.channelData !== null
+            ? payload.channelData
+            : undefined;
+        const rawFromChannelData = asRecord(asRecord(channelData)?.raw);
+        const rawWhatsApp = asRecord(rawFromChannelData?.whatsapp);
+        const fallbackMediaUrl =
+          payload.mediaUrl ??
+          (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0
+            ? payload.mediaUrls[0]
+            : undefined);
         const result = await sendViaMux({
           cfg,
           channel: "whatsapp",
@@ -407,10 +445,16 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
           mediaUrls: payload.mediaUrls,
           replyToId,
           threadId,
-          channelData:
-            typeof payload.channelData === "object" && payload.channelData !== null
-              ? payload.channelData
-              : undefined,
+          channelData,
+          raw: {
+            whatsapp:
+              rawWhatsApp ??
+              buildWhatsAppRawSend({
+                text: payload.text ?? "",
+                mediaUrl: fallbackMediaUrl,
+                gifPlayback,
+              }),
+          },
         });
         return { channel: "whatsapp", ...result };
       }

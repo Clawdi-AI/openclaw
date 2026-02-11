@@ -192,6 +192,7 @@ type WebRuntimeModules = {
     onMessage: (msg: WebInboundMessage) => Promise<void>;
     mediaMaxMb?: number;
     sendReadReceipts?: boolean;
+    bypassAccessControl?: boolean;
     debounceMs?: number;
     shouldDebounce?: (msg: WebInboundMessage) => boolean;
   }) => Promise<WebMonitorListener>;
@@ -1731,40 +1732,6 @@ function isWhatsAppCommandText(input: string): boolean {
     return false;
   }
   return /^[/!][A-Za-z0-9_]+/.test(normalized);
-}
-
-function extractTelegramInlineKeyboard(
-  payload: MuxPayload,
-): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } | undefined {
-  const root = asRecord(payload.channelData);
-  const telegram = asRecord(root?.telegram);
-  const rawButtons = telegram?.buttons;
-  if (!Array.isArray(rawButtons)) {
-    return undefined;
-  }
-  const inlineKeyboard: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (const row of rawButtons) {
-    if (!Array.isArray(row)) {
-      continue;
-    }
-    const buttonRow: Array<{ text: string; callback_data: string }> = [];
-    for (const item of row) {
-      const button = asRecord(item);
-      const text = readNonEmptyString(button?.text);
-      const callbackData = readNonEmptyString(button?.callback_data);
-      if (!text || !callbackData) {
-        continue;
-      }
-      buttonRow.push({ text, callback_data: callbackData });
-    }
-    if (buttonRow.length > 0) {
-      inlineKeyboard.push(buttonRow);
-    }
-  }
-  if (inlineKeyboard.length === 0) {
-    return undefined;
-  }
-  return { inline_keyboard: inlineKeyboard };
 }
 
 function isImageMimeType(value: string | undefined): boolean {
@@ -4097,6 +4064,8 @@ async function runWhatsAppInboundLoop() {
         verbose: false,
         accountId: whatsappAccountId,
         authDir: whatsappAuthDir,
+        // Mux owns pairing and tenant routing. Keep inbox transport raw here.
+        bypassAccessControl: true,
         onMessage: async (message) => {
           enqueueWhatsAppInboundMessage(message);
         },
@@ -4404,8 +4373,6 @@ const server = http.createServer(async (req, res) => {
       const rawOutbound = readOutboundRaw(payload);
       const { text, hasText } = readOutboundText(payload);
       const mediaUrls = collectOutboundMediaUrls(payload);
-      const replyToMessageId = readPositiveInt(payload.replyToId);
-      const replyToDiscordMessageId = readUnsignedNumericString(payload.replyToId);
       const requestedThreadId = readPositiveInt(payload.threadId);
       const requestedDiscordThreadId = readUnsignedNumericString(payload.threadId);
 
@@ -4519,102 +4486,11 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
-        const replyMarkup = extractTelegramInlineKeyboard(payload);
-
-        const firstMediaUrl = mediaUrls[0];
-        let method: "sendMessage" | "sendPhoto" = "sendMessage";
-        let telegramBody: Record<string, unknown> = { chat_id: to, text };
-        if (firstMediaUrl) {
-          method = "sendPhoto";
-          telegramBody = {
-            chat_id: to,
-            photo: firstMediaUrl,
-            caption: hasText ? text : undefined,
-          };
-        }
-        if (replyToMessageId) {
-          telegramBody.reply_to_message_id = replyToMessageId;
-        }
-        if (messageThreadId) {
-          telegramBody.message_thread_id = messageThreadId;
-        }
-        if (replyMarkup) {
-          telegramBody.reply_markup = replyMarkup;
-        }
-
-        const { response, result } = await sendTelegram(method, telegramBody);
-        log({
-          type: "telegram_send_result",
-          tenantId: tenant.id,
-          method,
-          status: response.status,
-          result,
-        });
-
-        const ok = result.ok === true;
-        if (!response.ok || !ok) {
-          return {
-            statusCode: 502,
-            bodyText: JSON.stringify({ ok: false, error: "telegram send failed", details: result }),
-          };
-        }
-
-        const resultData =
-          typeof result.result === "object" && result.result
-            ? (result.result as Record<string, unknown>)
-            : {};
-        const chat =
-          typeof resultData.chat === "object" && resultData.chat
-            ? (resultData.chat as Record<string, unknown>)
-            : {};
-        const providerMessageIds: string[] = [];
-        const messageId = String(resultData.message_id ?? "unknown");
-        providerMessageIds.push(messageId);
-        const chatId = String(chat.id ?? to);
-        if (mediaUrls.length > 1) {
-          for (const extraMediaUrl of mediaUrls.slice(1)) {
-            const extraBody: Record<string, unknown> = {
-              chat_id: to,
-              photo: extraMediaUrl,
-            };
-            if (messageThreadId) {
-              extraBody.message_thread_id = messageThreadId;
-            }
-            const extra = await sendTelegram("sendPhoto", extraBody);
-            log({
-              type: "telegram_send_result",
-              tenantId: tenant.id,
-              method: "sendPhoto",
-              status: extra.response.status,
-              result: extra.result,
-              extra: true,
-            });
-            const extraOk = extra.result.ok === true;
-            if (!extra.response.ok || !extraOk) {
-              return {
-                statusCode: 502,
-                bodyText: JSON.stringify({
-                  ok: false,
-                  error: "telegram send failed",
-                  details: extra.result,
-                }),
-              };
-            }
-            const extraData =
-              typeof extra.result.result === "object" && extra.result.result
-                ? (extra.result.result as Record<string, unknown>)
-                : {};
-            providerMessageIds.push(String(extraData.message_id ?? "unknown"));
-          }
-        }
-
         return {
-          statusCode: 200,
+          statusCode: 400,
           bodyText: JSON.stringify({
-            ok: true,
-            messageId,
-            chatId,
-            providerMessageIds,
+            ok: false,
+            error: "telegram outbound requires raw.telegram.method and raw.telegram.body",
           }),
         };
       }
@@ -4636,6 +4512,19 @@ const server = http.createServer(async (req, res) => {
           };
         }
 
+        const discordRaw = asRecord(rawOutbound?.discord);
+        const discordRawBody = asRecord(discordRaw?.body);
+        const discordRawSend = asRecord(discordRaw?.send);
+        if (!discordRawBody && !discordRawSend) {
+          return {
+            statusCode: 400,
+            bodyText: JSON.stringify({
+              ok: false,
+              error: "discord outbound requires raw.discord.body or raw.discord.send",
+            }),
+          };
+        }
+
         const resolvedTarget = await resolveDiscordOutboundChannelId({
           boundRoute,
           requestedTo: payload.to,
@@ -4647,9 +4536,6 @@ const server = http.createServer(async (req, res) => {
             bodyText: JSON.stringify({ ok: false, error: resolvedTarget.error }),
           };
         }
-
-        const discordRaw = asRecord(rawOutbound?.discord);
-        const discordRawBody = asRecord(discordRaw?.body);
         if (discordRawBody) {
           const { response, result } = await discordRequest({
             method: "POST",
@@ -4683,44 +4569,41 @@ const server = http.createServer(async (req, res) => {
 
         const { sendMessageDiscord } = await loadDiscordRuntimeModules();
         const outboundTarget = `channel:${resolvedTarget.channelId}`;
-        const normalizedMediaUrls = mediaUrls
-          .map((entry) => entry.trim())
-          .filter((entry) => entry.length > 0);
+        const sendText =
+          typeof discordRawSend?.text === "string"
+            ? discordRawSend.text
+            : typeof text === "string"
+              ? text
+              : "";
+        const sendMediaUrl =
+          readNonEmptyString(discordRawSend?.mediaUrl) ??
+          (mediaUrls.length > 0 ? mediaUrls[0] : undefined);
+        const sendReplyTo = readUnsignedNumericString(discordRawSend?.replyTo);
         const discordToken = requireDiscordBotToken();
         const discordRest = new RequestClient(discordToken, {
           baseUrl: discordApiBaseUrl,
           apiVersion: 10,
         });
-        const providerMessageIds: string[] = [];
-        let messageId = "unknown";
-        let channelId = resolvedTarget.channelId;
         try {
-          if (normalizedMediaUrls.length === 0) {
-            const sent = await sendMessageDiscord(outboundTarget, text, {
-              token: discordToken,
-              rest: discordRest,
-              verbose: false,
-              ...(replyToDiscordMessageId ? { replyTo: replyToDiscordMessageId } : {}),
-            });
-            messageId = sent.messageId || "unknown";
-            channelId = sent.channelId || resolvedTarget.channelId;
-            providerMessageIds.push(messageId);
-          } else {
-            for (let i = 0; i < normalizedMediaUrls.length; i += 1) {
-              const sent = await sendMessageDiscord(outboundTarget, i === 0 ? text : "", {
-                token: discordToken,
-                rest: discordRest,
-                verbose: false,
-                mediaUrl: normalizedMediaUrls[i],
-                ...(i === 0 && replyToDiscordMessageId ? { replyTo: replyToDiscordMessageId } : {}),
-              });
-              if (i === 0) {
-                messageId = sent.messageId || "unknown";
-                channelId = sent.channelId || resolvedTarget.channelId;
-              }
-              providerMessageIds.push(sent.messageId || "unknown");
-            }
-          }
+          const sent = await sendMessageDiscord(outboundTarget, sendText, {
+            token: discordToken,
+            rest: discordRest,
+            verbose: false,
+            ...(sendMediaUrl ? { mediaUrl: sendMediaUrl } : {}),
+            ...(sendReplyTo ? { replyTo: sendReplyTo } : {}),
+          });
+          const messageId = sent.messageId || "unknown";
+          const channelId = sent.channelId || resolvedTarget.channelId;
+          return {
+            statusCode: 200,
+            bodyText: JSON.stringify({
+              ok: true,
+              messageId,
+              channelId,
+              providerMessageIds: [messageId],
+              rawPassthrough: true,
+            }),
+          };
         } catch (error) {
           return {
             statusCode: 502,
@@ -4731,21 +4614,6 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
-        log({
-          type: "discord_send_result",
-          tenantId: tenant.id,
-          channelId: resolvedTarget.channelId,
-          providerMessageIds,
-        });
-        return {
-          statusCode: 200,
-          bodyText: JSON.stringify({
-            ok: true,
-            messageId,
-            channelId,
-            providerMessageIds,
-          }),
-        };
       }
 
       if (channel === "whatsapp") {
@@ -4767,20 +4635,47 @@ const server = http.createServer(async (req, res) => {
 
         const { sendMessageWhatsApp } = await loadWebRuntimeModules();
         const whatsappRaw = asRecord(rawOutbound?.whatsapp);
+        const whatsappRawSend = asRecord(whatsappRaw?.send);
         const whatsappText =
-          typeof whatsappRaw?.text === "string" ? whatsappRaw.text : hasText ? text : "";
-        const whatsappRawSingleMedia = readNonEmptyString(whatsappRaw?.mediaUrl);
-        const whatsappRawMediaList = Array.isArray(whatsappRaw?.mediaUrls)
-          ? (whatsappRaw.mediaUrls as unknown[])
-              .filter((item) => typeof item === "string")
-              .map((item) => (item as string).trim())
-              .filter((item) => item.length > 0)
-          : [];
-        const whatsappMediaUrls =
-          whatsappRawSingleMedia || whatsappRawMediaList.length > 0
-            ? [...(whatsappRawSingleMedia ? [whatsappRawSingleMedia] : []), ...whatsappRawMediaList]
+          typeof whatsappRawSend?.text === "string"
+            ? whatsappRawSend.text
+            : typeof text === "string"
+              ? text
+              : "";
+        const whatsappRawSingleMedia = readNonEmptyString(whatsappRawSend?.mediaUrl);
+        const whatsappRawMediaList =
+          Array.isArray(whatsappRawSend?.mediaUrls) && whatsappRawSend
+            ? (whatsappRawSend.mediaUrls as unknown[])
+                .filter((item) => typeof item === "string")
+                .map((item) => (item as string).trim())
+                .filter((item) => item.length > 0)
             : mediaUrls;
-        const whatsappGifPlayback = whatsappRaw?.gifPlayback === true;
+        const whatsappMediaUrls = (() => {
+          const ordered = [
+            ...(whatsappRawSingleMedia ? [whatsappRawSingleMedia] : []),
+            ...whatsappRawMediaList,
+          ];
+          const seen = new Set<string>();
+          const deduped: string[] = [];
+          for (const media of ordered) {
+            if (seen.has(media)) {
+              continue;
+            }
+            seen.add(media);
+            deduped.push(media);
+          }
+          return deduped;
+        })();
+        if (!whatsappText.trim() && whatsappMediaUrls.length === 0) {
+          return {
+            statusCode: 400,
+            bodyText: JSON.stringify({
+              ok: false,
+              error: "whatsapp outbound requires text/media or raw.whatsapp.send",
+            }),
+          };
+        }
+        const whatsappGifPlayback = whatsappRawSend?.gifPlayback === true;
 
         const providerMessageIds: string[] = [];
         let firstMessageId = "unknown";
@@ -4832,6 +4727,7 @@ const server = http.createServer(async (req, res) => {
             messageId: firstMessageId,
             toJid: firstToJid,
             providerMessageIds,
+            rawPassthrough: Boolean(whatsappRawSend),
           }),
         };
       }

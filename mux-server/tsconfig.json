@@ -4,10 +4,10 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "rootDir": ".",
+    "rootDir": "..",
     "strict": true,
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "../src/channels/plugins/mux-envelope.ts"]
 }

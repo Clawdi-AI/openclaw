@@ -27,6 +27,8 @@ export async function monitorWebInbox(options: {
   accountId: string;
   authDir: string;
   onMessage: (msg: WebInboundMessage) => Promise<void>;
+  /** Bypass OpenClaw sender policy checks (pairing/allowlist). Still drops outbound fromMe echoes. */
+  bypassAccessControl?: boolean;
   mediaMaxMb?: number;
   /** Send read receipts for incoming messages (default true). */
   sendReadReceipts?: boolean;
@@ -187,6 +189,7 @@ export async function monitorWebInbox(options: {
           ? await resolveInboundJid(participantJid)
           : null
         : from;
+      const isSamePhone = from === selfE164;
 
       let groupSubject: string | undefined;
       let groupParticipants: string[] | undefined;
@@ -199,19 +202,27 @@ export async function monitorWebInbox(options: {
         ? Number(msg.messageTimestamp) * 1000
         : undefined;
 
-      const access = await checkInboundAccessControl({
-        accountId: options.accountId,
-        from,
-        selfE164,
-        senderE164,
-        group,
-        pushName: msg.pushName ?? undefined,
-        isFromMe: Boolean(msg.key?.fromMe),
-        messageTimestampMs,
-        connectedAtMs,
-        sock: { sendMessage: (jid, content) => sock.sendMessage(jid, content) },
-        remoteJid,
-      });
+      const access = options.bypassAccessControl
+        ? {
+            // Keep outbound echoes out of inbound routing to avoid feedback loops.
+            allowed: !(Boolean(msg.key?.fromMe) && !isSamePhone),
+            shouldMarkRead: true,
+            isSelfChat: false,
+            resolvedAccountId: options.accountId,
+          }
+        : await checkInboundAccessControl({
+            accountId: options.accountId,
+            from,
+            selfE164,
+            senderE164,
+            group,
+            pushName: msg.pushName ?? undefined,
+            isFromMe: Boolean(msg.key?.fromMe),
+            messageTimestampMs,
+            connectedAtMs,
+            sock: { sendMessage: (jid, content) => sock.sendMessage(jid, content) },
+            remoteJid,
+          });
       if (!access.allowed) {
         continue;
       }

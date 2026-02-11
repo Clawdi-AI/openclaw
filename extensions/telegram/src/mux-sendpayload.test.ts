@@ -133,6 +133,7 @@ describe("extension mux outbound sendPayload", () => {
       channel?: string;
       sessionKey?: string;
       channelData?: Record<string, unknown>;
+      raw?: Record<string, unknown>;
     };
     expect(body.channel).toBe("discord");
     expect(body.sessionKey).toBe("sess-discord");
@@ -141,6 +142,11 @@ describe("extension mux outbound sendPayload", () => {
         discord: {
           body: { content: "hello" },
         },
+      },
+    });
+    expect(body.raw).toEqual({
+      discord: {
+        body: { content: "hello" },
       },
     });
   });
@@ -191,6 +197,7 @@ describe("extension mux outbound sendPayload", () => {
       sessionKey?: string;
       mediaUrls?: string[];
       channelData?: Record<string, unknown>;
+      raw?: Record<string, unknown>;
     };
     expect(body.channel).toBe("whatsapp");
     expect(body.sessionKey).toBe("sess-wa");
@@ -200,6 +207,11 @@ describe("extension mux outbound sendPayload", () => {
         whatsapp: {
           body: { text: "hello" },
         },
+      },
+    });
+    expect(body.raw).toEqual({
+      whatsapp: {
+        body: { text: "hello" },
       },
     });
   });

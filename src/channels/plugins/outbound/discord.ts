@@ -1,5 +1,6 @@
 import type { ChannelOutboundAdapter } from "../types.js";
 import { sendMessageDiscord, sendPollDiscord } from "../../../discord/send.js";
+import { buildDiscordRawSend } from "../mux-envelope.js";
 import { isMuxEnabled, sendViaMux } from "./mux.js";
 
 export const discordOutbound: ChannelOutboundAdapter = {
@@ -17,6 +18,12 @@ export const discordOutbound: ChannelOutboundAdapter = {
         to,
         text,
         replyToId,
+        raw: {
+          discord: buildDiscordRawSend({
+            text,
+            replyToId,
+          }),
+        },
       });
       return { channel: "discord", ...result };
     }
@@ -39,6 +46,13 @@ export const discordOutbound: ChannelOutboundAdapter = {
         text,
         mediaUrl,
         replyToId,
+        raw: {
+          discord: buildDiscordRawSend({
+            text,
+            mediaUrl,
+            replyToId,
+          }),
+        },
       });
       return { channel: "discord", ...result };
     }

@@ -74,7 +74,7 @@ for (const channel of ["telegram", "discord", "whatsapp"]) {
   channelCfg.accounts.default = channelCfg.accounts.default || {};
   channelCfg.accounts.default.enabled = false;
   channelCfg.accounts.mux = channelCfg.accounts.mux || {};
-  channelCfg.accounts.mux.enabled = false;
+  channelCfg.accounts.mux.enabled = true;
   channelCfg.accounts.mux.mux = {
     ...(channelCfg.accounts.mux.mux && typeof channelCfg.accounts.mux.mux === "object"
       ? channelCfg.accounts.mux.mux
