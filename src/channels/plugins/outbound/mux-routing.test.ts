@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
 import { discordOutbound } from "./discord.js";
+import { sendTypingViaMux } from "./mux.js";
 import { telegramOutbound } from "./telegram.js";
 import { whatsappOutbound } from "./whatsapp.js";
 
@@ -229,6 +230,39 @@ describe("mux outbound routing", () => {
     });
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes typing through mux when enabled", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({ ok: true }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      ...gatewayMuxConfig(),
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await sendTypingViaMux({
+      cfg,
+      channel: "telegram",
+      sessionKey: "sess-tg",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://mux.local/v1/mux/outbound/typing");
+    expect(init.headers).toEqual(
+      expect.objectContaining({ Authorization: `Bearer ${TENANT_TOKEN}` }),
+    );
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      channel: "telegram",
+      sessionKey: "sess-tg",
+    });
   });
 
   it("requires gateway mux token when channel mux is enabled", async () => {

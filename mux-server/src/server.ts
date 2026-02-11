@@ -289,6 +289,14 @@ type TelegramUpdate = {
   update_id?: number;
   message?: TelegramIncomingMessage;
   edited_message?: TelegramIncomingMessage;
+  callback_query?: TelegramCallbackQuery;
+};
+
+type TelegramCallbackQuery = {
+  id?: string;
+  from?: { id?: number };
+  data?: string;
+  message?: TelegramIncomingMessage;
 };
 
 function resolveDefaultWhatsAppAuthDir(): string {
@@ -364,6 +372,9 @@ const discordInboundMediaMaxBytes = Number(
   process.env.MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
 const whatsappInboundEnabled = process.env.MUX_WHATSAPP_INBOUND_ENABLED === "true";
+// OpenClaw account id for mux-routed inbound events. Keep this separate from
+// platform account ids so direct channel bots can remain unchanged.
+const openclawMuxAccountId = readNonEmptyString(process.env.MUX_OPENCLAW_ACCOUNT_ID) || "default";
 const whatsappAccountId = readNonEmptyString(process.env.MUX_WHATSAPP_ACCOUNT_ID) || "default";
 const whatsappAuthDir =
   readNonEmptyString(process.env.MUX_WHATSAPP_AUTH_DIR) || resolveDefaultWhatsAppAuthDir();
@@ -1160,6 +1171,10 @@ function readUnsignedNumericString(value: unknown): string | undefined {
   return trimmed;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
 async function readBody<T extends object>(req: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -1188,7 +1203,10 @@ function requireDiscordBotToken(): string {
   return token;
 }
 
-async function sendTelegram(method: "sendMessage" | "sendPhoto", body: Record<string, unknown>) {
+async function sendTelegram(
+  method: "sendMessage" | "sendPhoto" | "sendChatAction" | "answerCallbackQuery",
+  body: Record<string, unknown>,
+) {
   const token = requireTelegramBotToken();
   const response = await fetch(`${telegramApiBaseUrl}/bot${token}/${method}`, {
     method: "POST",
@@ -1661,6 +1679,22 @@ function isTelegramCommandText(input: string | null): boolean {
   return /^\/[A-Za-z0-9_]+/.test(normalized);
 }
 
+function parseTelegramCommandsPageCallback(data: string): { page: number } | "noop" | null {
+  const match = data.match(/^commands_page_(\d+|noop)(?::.+)?$/);
+  if (!match) {
+    return null;
+  }
+  const pageValue = match[1];
+  if (pageValue === "noop") {
+    return "noop";
+  }
+  const page = Number.parseInt(pageValue, 10);
+  if (!Number.isFinite(page) || page < 1) {
+    return null;
+  }
+  return { page };
+}
+
 function extractPairingTokenFromText(input: string | null): string | null {
   const normalized = normalizeControlText(input);
   if (!normalized) {
@@ -1694,6 +1728,40 @@ function isWhatsAppCommandText(input: string): boolean {
     return false;
   }
   return /^[/!][A-Za-z0-9_]+/.test(normalized);
+}
+
+function extractTelegramInlineKeyboard(
+  payload: MuxPayload,
+): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } | undefined {
+  const root = asRecord(payload.channelData);
+  const telegram = asRecord(root?.telegram);
+  const rawButtons = telegram?.buttons;
+  if (!Array.isArray(rawButtons)) {
+    return undefined;
+  }
+  const inlineKeyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (const row of rawButtons) {
+    if (!Array.isArray(row)) {
+      continue;
+    }
+    const buttonRow: Array<{ text: string; callback_data: string }> = [];
+    for (const item of row) {
+      const button = asRecord(item);
+      const text = readNonEmptyString(button?.text);
+      const callbackData = readNonEmptyString(button?.callback_data);
+      if (!text || !callbackData) {
+        continue;
+      }
+      buttonRow.push({ text, callback_data: callbackData });
+    }
+    if (buttonRow.length > 0) {
+      inlineKeyboard.push(buttonRow);
+    }
+  }
+  if (inlineKeyboard.length === 0) {
+    return undefined;
+  }
+  return { inline_keyboard: inlineKeyboard };
 }
 
 function isImageMimeType(value: string | undefined): boolean {
@@ -1950,6 +2018,23 @@ async function sendTelegramPairingNotice(params: {
   const { response, result } = await sendTelegram("sendMessage", body);
   if (!response.ok || result.ok !== true) {
     throw new Error(`telegram pairing notice failed (${response.status})`);
+  }
+}
+
+async function answerTelegramCallbackQuery(params: {
+  callbackQueryId: string;
+  text?: string;
+}): Promise<void> {
+  const body: Record<string, unknown> = {
+    callback_query_id: params.callbackQueryId,
+  };
+  const text = readNonEmptyString(params.text);
+  if (text) {
+    body.text = text;
+  }
+  const { response, result } = await sendTelegram("answerCallbackQuery", body);
+  if (!response.ok || result.ok !== true) {
+    throw new Error(`telegram answerCallbackQuery failed (${response.status})`);
   }
 }
 
@@ -2802,6 +2887,14 @@ function extractTelegramMessage(update: TelegramUpdate): TelegramIncomingMessage
   return candidate;
 }
 
+function extractTelegramCallbackQuery(update: TelegramUpdate): TelegramCallbackQuery | null {
+  const candidate = update.callback_query;
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  return candidate;
+}
+
 async function fetchTelegramUpdates(offset: number): Promise<TelegramUpdate[]> {
   const token = requireTelegramBotToken();
   const response = await fetch(`${telegramApiBaseUrl}/bot${token}/getUpdates`, {
@@ -2810,7 +2903,7 @@ async function fetchTelegramUpdates(offset: number): Promise<TelegramUpdate[]> {
     body: JSON.stringify({
       offset,
       timeout: Math.max(1, Math.trunc(telegramPollTimeoutSec)),
-      allowed_updates: ["message", "edited_message"],
+      allowed_updates: ["message", "edited_message", "callback_query"],
     }),
   });
   if (!response.ok) {
@@ -2838,7 +2931,7 @@ async function bootstrapTelegramOffsetIfNeeded() {
     body: JSON.stringify({
       timeout: 0,
       limit: 1,
-      allowed_updates: ["message", "edited_message"],
+      allowed_updates: ["message", "edited_message", "callback_query"],
     }),
   });
   if (!response.ok) {
@@ -2858,12 +2951,226 @@ async function bootstrapTelegramOffsetIfNeeded() {
   }
 }
 
+async function forwardTelegramCallbackQueryToTenant(params: {
+  updateId: number;
+  update: TelegramUpdate;
+  callbackQuery: TelegramCallbackQuery;
+}) {
+  const callbackData = readNonEmptyString(params.callbackQuery.data);
+  const callbackMessage =
+    params.callbackQuery.message && typeof params.callbackQuery.message === "object"
+      ? params.callbackQuery.message
+      : null;
+  const callbackQueryId = readNonEmptyString(params.callbackQuery.id);
+  if (!callbackData || !callbackMessage) {
+    if (callbackQueryId) {
+      try {
+        await answerTelegramCallbackQuery({ callbackQueryId });
+      } catch (error) {
+        log({
+          type: "telegram_callback_answer_error",
+          updateId: params.updateId,
+          error: String(error),
+        });
+      }
+    }
+    return;
+  }
+
+  const parsedCommandsPage = parseTelegramCommandsPageCallback(callbackData);
+  if (!parsedCommandsPage) {
+    if (callbackQueryId) {
+      try {
+        await answerTelegramCallbackQuery({
+          callbackQueryId,
+          text: "Button is not supported in mux mode yet.",
+        });
+      } catch (error) {
+        log({
+          type: "telegram_callback_answer_error",
+          updateId: params.updateId,
+          error: String(error),
+        });
+      }
+    }
+    log({
+      type: "telegram_callback_ignored",
+      updateId: params.updateId,
+      reason: "unsupported_callback_data",
+      callbackData,
+    });
+    return;
+  }
+
+  if (parsedCommandsPage === "noop") {
+    if (callbackQueryId) {
+      try {
+        await answerTelegramCallbackQuery({ callbackQueryId });
+      } catch (error) {
+        log({
+          type: "telegram_callback_answer_error",
+          updateId: params.updateId,
+          error: String(error),
+        });
+      }
+    }
+    return;
+  }
+
+  const chatId =
+    typeof callbackMessage.chat?.id === "number" && Number.isFinite(callbackMessage.chat.id)
+      ? String(Math.trunc(callbackMessage.chat.id))
+      : "";
+  if (!chatId) {
+    return;
+  }
+  const topicId = readPositiveInt(callbackMessage.message_thread_id);
+  const binding = resolveTelegramBindingForIncoming(chatId, topicId);
+  if (!binding) {
+    if (callbackQueryId) {
+      try {
+        await answerTelegramCallbackQuery({
+          callbackQueryId,
+          text: "Pairing link is invalid or expired. Request a new link from your dashboard.",
+        });
+      } catch (error) {
+        log({
+          type: "telegram_callback_answer_error",
+          updateId: params.updateId,
+          error: String(error),
+        });
+      }
+    }
+    return;
+  }
+
+  const target = resolveTenantInboundTarget(binding.tenantId);
+  if (!target) {
+    log({
+      type: "telegram_inbound_drop_no_target",
+      tenantId: binding.tenantId,
+      updateId: params.updateId,
+      routeKey: binding.routeKey,
+    });
+    throw new Error(`telegram inbound target missing for tenant ${binding.tenantId}`);
+  }
+
+  const callbackMessageId =
+    typeof callbackMessage.message_id === "number" && Number.isFinite(callbackMessage.message_id)
+      ? String(Math.trunc(callbackMessage.message_id))
+      : `tg-callback-msg:${params.updateId}`;
+  const fromId =
+    typeof params.callbackQuery.from?.id === "number" &&
+    Number.isFinite(params.callbackQuery.from.id)
+      ? String(Math.trunc(params.callbackQuery.from.id))
+      : "unknown";
+  const timestampMs =
+    typeof callbackMessage.date === "number" && Number.isFinite(callbackMessage.date)
+      ? Math.trunc(callbackMessage.date) * 1_000
+      : Date.now();
+  const chatType = callbackMessage.chat?.type === "private" ? "direct" : "group";
+
+  const existingRoute = stmtSelectSessionKeyByBinding.get(
+    binding.tenantId,
+    "telegram",
+    binding.bindingId,
+  ) as { session_key?: unknown } | undefined;
+  const sessionKey =
+    (typeof existingRoute?.session_key === "string" && existingRoute.session_key.trim()) ||
+    deriveTelegramSessionKey(chatId, topicId);
+
+  stmtUpsertSessionRoute.run(
+    binding.tenantId,
+    "telegram",
+    sessionKey,
+    binding.bindingId,
+    JSON.stringify({ routeKey: binding.routeKey }),
+    Date.now(),
+  );
+
+  const payload = {
+    eventId: `tgcb:${params.updateId}`,
+    channel: "telegram",
+    sessionKey,
+    body: "/commands",
+    from: `telegram:${fromId}`,
+    to: `telegram:${chatId}`,
+    accountId: openclawMuxAccountId,
+    chatType,
+    messageId: callbackMessageId,
+    timestampMs,
+    ...(topicId ? { threadId: topicId } : {}),
+    channelData: {
+      accountId: openclawMuxAccountId,
+      messageId: callbackMessageId,
+      chatId,
+      topicId: topicId ?? null,
+      routeKey: binding.routeKey,
+      updateId: params.updateId,
+      telegram: {
+        callbackData,
+        commandsPage: parsedCommandsPage.page,
+        callbackMessageId,
+        rawCallbackQuery: params.callbackQuery,
+        rawMessage: callbackMessage,
+        rawUpdate: params.update,
+      },
+    },
+  };
+
+  const response = await fetch(target.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${target.token}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(target.timeoutMs),
+  });
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
+  }
+
+  if (callbackQueryId) {
+    try {
+      await answerTelegramCallbackQuery({ callbackQueryId });
+    } catch (error) {
+      log({
+        type: "telegram_callback_answer_error",
+        updateId: params.updateId,
+        error: String(error),
+      });
+    }
+  }
+
+  log({
+    type: "telegram_callback_forwarded",
+    tenantId: binding.tenantId,
+    sessionKey,
+    updateId: params.updateId,
+    messageId: callbackMessageId,
+    callbackData,
+    commandsPage: parsedCommandsPage.page,
+  });
+}
+
 async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   const updateId =
     typeof update.update_id === "number" && Number.isFinite(update.update_id)
       ? Math.trunc(update.update_id)
       : 0;
   if (updateId <= 0) {
+    return;
+  }
+
+  const callbackQuery = extractTelegramCallbackQuery(update);
+  if (callbackQuery) {
+    await forwardTelegramCallbackQueryToTenant({
+      updateId,
+      update,
+      callbackQuery,
+    });
     return;
   }
 
@@ -3016,6 +3323,7 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   const payload = buildTelegramInboundEnvelope({
     updateId,
     sessionKey,
+    accountId: openclawMuxAccountId,
     rawBody: forwardedBody,
     fromId,
     chatId,
@@ -3298,6 +3606,7 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
     const payload = buildDiscordInboundEnvelope({
       messageId,
       sessionKey,
+      accountId: openclawMuxAccountId,
       rawBody: body,
       fromId,
       channelId,
@@ -3641,6 +3950,7 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
   const payload = buildWhatsAppInboundEnvelope({
     messageId,
     sessionKey,
+    openclawAccountId: openclawMuxAccountId,
     rawBody: body,
     fromId,
     chatJid,
@@ -3931,6 +4241,53 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && pathname === "/v1/mux/outbound/typing") {
+      const body = await readBody<Record<string, unknown>>(req);
+      const channel = normalizeChannel(body.channel);
+      const sessionKey = readNonEmptyString(body.sessionKey);
+      if (!channel) {
+        sendJson(res, 400, { ok: false, error: "channel required" });
+        return;
+      }
+      if (!sessionKey) {
+        sendJson(res, 400, { ok: false, error: "sessionKey required" });
+        return;
+      }
+      if (channel === "telegram") {
+        const boundRoute = resolveTelegramBoundRoute({
+          tenantId: tenant.id,
+          channel,
+          sessionKey,
+        });
+        if (!boundRoute) {
+          sendJson(res, 403, {
+            ok: false,
+            error: "route not bound",
+            code: "ROUTE_NOT_BOUND",
+          });
+          return;
+        }
+        const body: Record<string, unknown> = {
+          chat_id: boundRoute.chatId,
+          action: "typing",
+        };
+        if (boundRoute.topicId) {
+          body.message_thread_id = boundRoute.topicId;
+        }
+        const { response, result } = await sendTelegram("sendChatAction", body);
+        if (!response.ok || result.ok !== true) {
+          sendJson(res, 502, {
+            ok: false,
+            error: "telegram typing failed",
+            details: result,
+          });
+          return;
+        }
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
     if (req.method !== "POST" || pathname !== "/v1/mux/outbound/send") {
       sendJson(res, 404, { ok: false, error: "not found" });
       return;
@@ -4049,6 +4406,7 @@ const server = http.createServer(async (req, res) => {
 
         const to = boundRoute.chatId;
         const messageThreadId = requestedThreadId ?? boundRoute.topicId;
+        const replyMarkup = extractTelegramInlineKeyboard(payload);
 
         const firstMediaUrl = mediaUrls[0];
         let method: "sendMessage" | "sendPhoto" = "sendMessage";
@@ -4066,6 +4424,9 @@ const server = http.createServer(async (req, res) => {
         }
         if (messageThreadId) {
           telegramBody.message_thread_id = messageThreadId;
+        }
+        if (replyMarkup) {
+          telegramBody.reply_markup = replyMarkup;
         }
 
         const { response, result } = await sendTelegram(method, telegramBody);
@@ -4317,6 +4678,7 @@ server.listen(port, host, () => {
     host,
     port,
     dbPath,
+    openclawMuxAccountId,
     tenantCount: tenantSeeds.length,
     pairingCodeSeedCount: pairingCodeSeeds.length,
   });
@@ -4325,6 +4687,7 @@ server.listen(port, host, () => {
     log({
       type: "whatsapp_inbound_started",
       tenantTargetCount,
+      openclawAccountId: openclawMuxAccountId,
       accountId: whatsappAccountId,
       authDir: whatsappAuthDir,
       retryMs: Math.max(100, Math.trunc(whatsappInboundRetryMs)),
@@ -4337,6 +4700,7 @@ server.listen(port, host, () => {
     log({
       type: "telegram_inbound_started",
       tenantTargetCount,
+      openclawAccountId: openclawMuxAccountId,
       pollTimeoutSec: Math.max(1, Math.trunc(telegramPollTimeoutSec)),
       pollRetryMs: Math.max(100, Math.trunc(telegramPollRetryMs)),
       bootstrapLatest: telegramBootstrapLatest,
@@ -4349,6 +4713,7 @@ server.listen(port, host, () => {
     log({
       type: "discord_inbound_started",
       tenantTargetCount,
+      openclawAccountId: openclawMuxAccountId,
       pollIntervalMs: Math.max(200, Math.trunc(discordPollIntervalMs)),
       bootstrapLatest: discordBootstrapLatest,
     });

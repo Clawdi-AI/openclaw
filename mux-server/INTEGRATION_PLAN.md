@@ -43,13 +43,59 @@ If these are needed later, use `mux-server/README.md`.
 
 Set at deploy time:
 
-- mux transport + inbound endpoint auth:
+- mux inbound endpoint auth:
   - `gateway.http.endpoints.mux.enabled=true`
   - `gateway.http.endpoints.mux.baseUrl=<muxUrl>`
   - `gateway.http.endpoints.mux.token=<tenantApiKey>`
-  - `channels.telegram.mux.enabled=true`
-  - `channels.discord.mux.enabled=true`
-  - `channels.whatsapp.mux.enabled=true`
+- dual mode account layout (direct + mux) for each channel:
+  - `channels.<app>.accounts.default.enabled=true` (direct/non-mux traffic)
+  - `channels.<app>.accounts.mux.enabled=false` (do not direct-poll mux account)
+  - `channels.<app>.accounts.mux.mux.enabled=true` (allow mux outbound route)
+- apply this to `telegram`, `discord`, and `whatsapp`.
+- if `channels.<app>.accounts` is present and `default` is missing/disabled, direct channel traffic can stop.
+
+Minimal pattern:
+
+```json
+{
+  "gateway": {
+    "http": {
+      "endpoints": {
+        "mux": {
+          "enabled": true,
+          "baseUrl": "https://mux.example.com",
+          "token": "<tenantApiKey>"
+        }
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "<directBotToken>",
+      "accounts": {
+        "default": { "enabled": true },
+        "mux": { "enabled": false, "mux": { "enabled": true } }
+      }
+    },
+    "discord": {
+      "enabled": true,
+      "token": "<directBotToken>",
+      "accounts": {
+        "default": { "enabled": true },
+        "mux": { "enabled": false, "mux": { "enabled": true } }
+      }
+    },
+    "whatsapp": {
+      "enabled": true,
+      "accounts": {
+        "default": { "enabled": true },
+        "mux": { "enabled": false, "mux": { "enabled": true } }
+      }
+    }
+  }
+}
+```
 
 ### 2) Control plane -> mux APIs
 
@@ -67,6 +113,11 @@ Set at deploy time:
 
 - OpenClaw -> mux: `POST /v1/mux/outbound/send`
 - mux -> OpenClaw: `POST /v1/mux/inbound`
+
+### 4) Mux server runtime setting
+
+- Set `MUX_OPENCLAW_ACCOUNT_ID=mux`.
+- This makes mux inbound events target OpenClaw account `mux`, so direct channel accounts remain untouched.
 
 ## Integration Sequence (Single Tenant)
 

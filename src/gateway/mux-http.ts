@@ -4,6 +4,7 @@ import type { ChatImageContent } from "./chat-attachments.js";
 import { dispatchInboundMessage } from "../auto-reply/dispatch.js";
 import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
 import { normalizeChannelId } from "../channels/plugins/index.js";
+import { sendTypingViaMux } from "../channels/plugins/outbound/mux.js";
 import { loadConfig } from "../config/config.js";
 import { parseMessageWithAttachments } from "./chat-attachments.js";
 import { readJsonBody } from "./hooks.js";
@@ -244,6 +245,22 @@ export async function handleMuxInboundHttpRequest(
   };
 
   try {
+    let markDispatchIdle: (() => void) | undefined;
+    const onReplyStart =
+      channel === "telegram"
+        ? async () => {
+            try {
+              await sendTypingViaMux({
+                cfg,
+                channel: "telegram",
+                accountId: ctx.AccountId,
+                sessionKey,
+              });
+            } catch {
+              // Best-effort typing signal for mux transport.
+            }
+          }
+        : undefined;
     const dispatcher = createReplyDispatcher({
       deliver: async () => {
         // route-reply path handles outbound when OriginatingChannel differs from Surface.
@@ -258,9 +275,14 @@ export async function handleMuxInboundHttpRequest(
       dispatcher,
       replyOptions: {
         ...(parsedImages.length > 0 ? { images: parsedImages } : {}),
+        ...(onReplyStart ? { onReplyStart } : {}),
+        onTypingController: (typing) => {
+          markDispatchIdle = () => typing.markDispatchIdle();
+        },
       },
     });
     await dispatcher.waitForIdle();
+    markDispatchIdle?.();
     sendJson(res, 202, {
       ok: true,
       eventId: readOptionalString(payload.eventId) ?? messageId,

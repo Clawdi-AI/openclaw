@@ -90,6 +90,7 @@ node --import tsx mux-server/src/server.ts
 - `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
 - `MUX_OPENCLAW_INBOUND_URL` (optional, default tenant only): OpenClaw mux inbound URL.
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
+- `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events (recommended: `mux`).
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
 - `MUX_DISCORD_API_BASE_URL` (default `https://discord.com/api/v10`): Discord API base URL.
 - `MUX_TELEGRAM_INBOUND_ENABLED` (default `false`): enable Telegram inbound polling and forwarding.
@@ -132,6 +133,80 @@ Notes:
 
 - Shared-key mode is the only supported model.
 - mux always uses tenant `apiKey` as inbound auth token when forwarding to OpenClaw.
+
+### Dedicated OpenClaw Mux Account
+
+To keep existing direct bots unchanged, run mux traffic through a separate OpenClaw account id:
+
+- Set `MUX_OPENCLAW_ACCOUNT_ID=mux` in mux-server.
+- In each tenant OpenClaw config, keep direct traffic on `default` and mux transport on `mux`.
+- When `channels.<app>.accounts` exists, define `accounts.default.enabled=true` explicitly, or direct polling can stop.
+- Keep `accounts.mux.enabled=false` so OpenClaw does not directly poll the mux account.
+
+Example:
+
+```json
+{
+  "gateway": {
+    "http": {
+      "endpoints": {
+        "mux": {
+          "enabled": true,
+          "baseUrl": "https://mux.example.com",
+          "token": "tenant-api-key"
+        }
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "telegram-direct-bot-token",
+      "accounts": {
+        "default": {
+          "enabled": true
+        },
+        "mux": {
+          "enabled": false,
+          "mux": { "enabled": true }
+        }
+      }
+    },
+    "discord": {
+      "enabled": true,
+      "token": "discord-direct-bot-token",
+      "accounts": {
+        "default": {
+          "enabled": true
+        },
+        "mux": {
+          "enabled": false,
+          "mux": { "enabled": true }
+        }
+      }
+    },
+    "whatsapp": {
+      "enabled": true,
+      "accounts": {
+        "default": {
+          "enabled": true
+        },
+        "mux": {
+          "enabled": false,
+          "mux": { "enabled": true }
+        }
+      }
+    }
+  }
+}
+```
+
+How this works:
+
+- direct inbound/outbound uses `default` account (legacy/non-mux behavior)
+- mux inbound is forwarded by mux-server with `accountId=mux`
+- mux outbound is selected only when OpenClaw context has `AccountId=mux`
+- result: direct and mux traffic run side-by-side without touching each other
 
 `MUX_PAIRING_CODES_JSON` format:
 

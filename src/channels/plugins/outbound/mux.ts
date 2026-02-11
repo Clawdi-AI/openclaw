@@ -44,6 +44,10 @@ type MuxSendResponseBody = {
   error?: unknown;
 };
 
+type MuxTypingResponseBody = {
+  error?: unknown;
+};
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 function normalizeBaseUrl(value?: string): string | undefined {
@@ -158,6 +162,23 @@ function mapMuxSendResponse(
   };
 }
 
+async function readMuxErrorSummary(response: Response): Promise<string> {
+  const bodyText = await response.text();
+  if (!bodyText.trim()) {
+    return response.statusText || "request failed";
+  }
+  try {
+    const parsed = JSON.parse(bodyText) as MuxTypingResponseBody;
+    const message = readString(parsed.error);
+    if (message) {
+      return message;
+    }
+  } catch {
+    // Fall through to raw text.
+  }
+  return bodyText;
+}
+
 export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendResponse> {
   const resolved = requireMuxConfig({
     cfg: params.cfg,
@@ -199,4 +220,39 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
     throw new Error(`mux outbound failed (${response.status}): ${summary}`);
   }
   return mapMuxSendResponse(params.channel, parsedBody);
+}
+
+export async function sendTypingViaMux(params: {
+  cfg: OpenClawConfig;
+  channel: SupportedMuxChannel;
+  accountId?: string;
+  sessionKey?: string | null;
+}): Promise<void> {
+  const resolved = requireMuxConfig({
+    cfg: params.cfg,
+    channel: params.channel,
+    accountId: params.accountId,
+    sessionKey: params.sessionKey,
+  });
+  const url = `${resolved.baseUrl}/v1/mux/outbound/typing`;
+  const payload = {
+    requestId: randomUUID(),
+    channel: params.channel,
+    sessionKey: resolved.sessionKey,
+    accountId: params.accountId,
+  };
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${resolved.token}`,
+      "Content-Type": "application/json; charset=utf-8",
+      "Idempotency-Key": payload.requestId,
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(resolved.timeoutMs),
+  });
+  if (!response.ok) {
+    const summary = await readMuxErrorSummary(response);
+    throw new Error(`mux typing failed (${response.status}): ${summary}`);
+  }
 }

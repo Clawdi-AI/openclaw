@@ -833,6 +833,140 @@ describe("mux server", () => {
     });
   });
 
+  test("telegram outbound forwards inline keyboard from channelData", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/sendMessage") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 901, chat: { id: -100123 } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-BTN",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-BTN",
+      sessionKey: "tg:group:-100123:thread:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "tg:group:-100123:thread:2",
+        text: "paged commands",
+        channelData: {
+          telegram: {
+            buttons: [[{ text: "Next ▶", callback_data: "commands_page_2:main" }]],
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "901",
+      chatId: "-100123",
+    });
+    expect(telegramRequests).toHaveLength(1);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "-100123",
+      text: "paged commands",
+      message_thread_id: 2,
+      reply_markup: {
+        inline_keyboard: [[{ text: "Next ▶", callback_data: "commands_page_2:main" }]],
+      },
+    });
+  });
+
+  test("telegram typing endpoint sends chat action for bound route", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/sendChatAction") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-TYPING",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-TYPING",
+      sessionKey: "tg:group:-100123:thread:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const typing = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/typing`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "tg:group:-100123:thread:2",
+      }),
+    });
+
+    expect(typing.status).toBe(200);
+    expect(await typing.json()).toEqual({ ok: true });
+    expect(telegramRequests).toHaveLength(1);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "-100123",
+      action: "typing",
+      message_thread_id: 2,
+    });
+  });
+
   test("sends discord outbound through guild-bound route and enforces guild lock", async () => {
     const discordRequests: Array<{
       method: string;
@@ -1158,6 +1292,128 @@ describe("mux server", () => {
         (request) => typeof request.offset === "number" && Number(request.offset) >= 1,
       ),
     ).toBe(true);
+  });
+
+  test("forwards Telegram commands pagination callbacks as mux inbound commands", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const callbackAnswers: Array<Record<string, unknown>> = [];
+    let releaseUpdates = false;
+    let hasSentUpdate = false;
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/getUpdates") {
+        const body = await readJsonBody(req);
+        const hasOffset = typeof body.offset === "number";
+        const shouldSend = hasOffset && releaseUpdates && !hasSentUpdate;
+        if (shouldSend) {
+          hasSentUpdate = true;
+        }
+        const result = shouldSend
+          ? [
+              {
+                update_id: 470,
+                callback_query: {
+                  id: "cbq-1",
+                  from: { id: 1234 },
+                  data: "commands_page_2:main",
+                  message: {
+                    message_id: 777,
+                    date: 1_700_000_001,
+                    text: "ℹ️ Slash commands",
+                    from: { id: 9999 },
+                    chat: { id: -100555, type: "supergroup" },
+                  },
+                },
+              },
+            ]
+          : [];
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/botdummy-token/answerCallbackQuery") {
+        callbackAnswers.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-CB-TG-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100555",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_INBOUND_ENABLED: "true",
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-CB-TG-1",
+      sessionKey: "tg:group:-100555",
+    });
+    expect(claim.status).toBe(200);
+    releaseUpdates = true;
+
+    await waitForCondition(
+      () => inboundRequests.length > 0 && callbackAnswers.length > 0,
+      5_000,
+      "timed out waiting for callback forwarding",
+    );
+
+    expect(inboundRequests[0]).toMatchObject({
+      eventId: "tgcb:470",
+      channel: "telegram",
+      sessionKey: "tg:group:-100555",
+      body: "/commands",
+      from: "telegram:1234",
+      to: "telegram:-100555",
+      accountId: "default",
+      messageId: "777",
+      channelData: {
+        routeKey: "telegram:default:chat:-100555",
+        telegram: {
+          callbackData: "commands_page_2:main",
+          commandsPage: 2,
+          callbackMessageId: "777",
+        },
+      },
+    });
+    expect(callbackAnswers[0]).toMatchObject({
+      callback_query_id: "cbq-1",
+    });
   });
 
   test("retries Telegram inbound without advancing offset when forward fails", async () => {
