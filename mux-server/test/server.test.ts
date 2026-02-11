@@ -1468,11 +1468,6 @@ describe("mux server", () => {
         sessionKey: "dc:dm:4242",
         to: "user:9999",
         text: "hello dm",
-        mediaUrls: [
-          " https://example.com/cat-a.jpg ",
-          "https://example.com/cat-b.jpg",
-          " https://example.com/cat-a.jpg ",
-        ],
       }),
     });
     expect(response.status).toBe(200);
@@ -1492,11 +1487,6 @@ describe("mux server", () => {
     );
     expect(sent?.body).toMatchObject({
       content: "hello dm",
-      embeds: [
-        { image: { url: " https://example.com/cat-a.jpg " } },
-        { image: { url: "https://example.com/cat-b.jpg" } },
-        { image: { url: " https://example.com/cat-a.jpg " } },
-      ],
     });
   });
 

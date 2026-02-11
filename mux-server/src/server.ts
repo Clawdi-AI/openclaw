@@ -1,3 +1,4 @@
+import { RequestClient } from "@buape/carbon";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -207,6 +208,20 @@ type WebRuntimeModules = {
   setActiveWebListener: (accountId: string | null | undefined, listener: unknown | null) => void;
 };
 
+type DiscordRuntimeModules = {
+  sendMessageDiscord: (
+    to: string,
+    text: string,
+    opts: {
+      token?: string;
+      rest?: RequestClient;
+      mediaUrl?: string;
+      verbose?: boolean;
+      replyTo?: string;
+    },
+  ) => Promise<{ messageId: string; channelId: string }>;
+};
+
 type TelegramIncomingMessage = {
   message_id?: number;
   date?: number;
@@ -312,6 +327,7 @@ function resolveDefaultWhatsAppAuthDir(): string {
 }
 
 let webRuntimeModulesPromise: Promise<WebRuntimeModules> | null = null;
+let discordRuntimeModulesPromise: Promise<DiscordRuntimeModules> | null = null;
 
 async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
   if (!webRuntimeModulesPromise) {
@@ -343,6 +359,24 @@ async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
     })();
   }
   return await webRuntimeModulesPromise;
+}
+
+async function loadDiscordRuntimeModules(): Promise<DiscordRuntimeModules> {
+  if (!discordRuntimeModulesPromise) {
+    discordRuntimeModulesPromise = (async () => {
+      const outboundModulePath = "../../src/discord/" + "send.outbound.js";
+      const outboundModule = (await import(outboundModulePath)) as {
+        sendMessageDiscord?: DiscordRuntimeModules["sendMessageDiscord"];
+      };
+      if (typeof outboundModule.sendMessageDiscord !== "function") {
+        throw new Error("failed to load Discord runtime modules");
+      }
+      return {
+        sendMessageDiscord: outboundModule.sendMessageDiscord,
+      };
+    })();
+  }
+  return await discordRuntimeModulesPromise;
 }
 
 const host = process.env.MUX_HOST || "127.0.0.1";
@@ -1305,38 +1339,6 @@ async function resolveDiscordChannelGuildId(channelId: string): Promise<string |
     expiresAtMs: now + discordChannelGuildCacheTtlMs,
   });
   return guildId;
-}
-
-async function sendDiscordMessage(params: {
-  channelId: string;
-  content?: string;
-  mediaUrls?: string[];
-  replyToMessageId?: string;
-}): Promise<{ response: Response; result: Record<string, unknown> }> {
-  const body: Record<string, unknown> = {};
-  if (typeof params.content === "string") {
-    body.content = params.content;
-  }
-  if (Array.isArray(params.mediaUrls) && params.mediaUrls.length > 0) {
-    const embeds = params.mediaUrls
-      .slice(0, 10)
-      .map((url) => ({ image: { url } }))
-      .filter((embed) => typeof embed.image.url === "string" && embed.image.url.length > 0);
-    if (embeds.length > 0) {
-      body.embeds = embeds;
-    }
-  }
-  if (params.replyToMessageId) {
-    body.message_reference = {
-      message_id: params.replyToMessageId,
-      fail_if_not_exists: false,
-    };
-  }
-  return await discordRequest({
-    method: "POST",
-    path: `/channels/${params.channelId}/messages`,
-    body,
-  });
 }
 
 async function sendDiscordTyping(params: {
@@ -2610,9 +2612,12 @@ function claimWhatsAppPairingToken(params: {
 }
 
 async function sendDiscordPairingNotice(params: { channelId: string; text: string }) {
-  const { response } = await sendDiscordMessage({
-    channelId: params.channelId,
-    content: params.text,
+  const { response } = await discordRequest({
+    method: "POST",
+    path: `/channels/${params.channelId}/messages`,
+    body: {
+      content: params.text,
+    },
   });
   if (!response.ok) {
     throw new Error(`discord pairing notice failed (${response.status})`);
@@ -4676,36 +4681,69 @@ const server = http.createServer(async (req, res) => {
           };
         }
 
-        const { response, result } = await sendDiscordMessage({
-          channelId: resolvedTarget.channelId,
-          content: hasText ? text : undefined,
-          mediaUrls,
-          replyToMessageId: replyToDiscordMessageId,
+        const { sendMessageDiscord } = await loadDiscordRuntimeModules();
+        const outboundTarget = `channel:${resolvedTarget.channelId}`;
+        const normalizedMediaUrls = mediaUrls
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0);
+        const discordToken = requireDiscordBotToken();
+        const discordRest = new RequestClient(discordToken, {
+          baseUrl: discordApiBaseUrl,
+          apiVersion: 10,
         });
+        const providerMessageIds: string[] = [];
+        let messageId = "unknown";
+        let channelId = resolvedTarget.channelId;
+        try {
+          if (normalizedMediaUrls.length === 0) {
+            const sent = await sendMessageDiscord(outboundTarget, text, {
+              token: discordToken,
+              rest: discordRest,
+              verbose: false,
+              ...(replyToDiscordMessageId ? { replyTo: replyToDiscordMessageId } : {}),
+            });
+            messageId = sent.messageId || "unknown";
+            channelId = sent.channelId || resolvedTarget.channelId;
+            providerMessageIds.push(messageId);
+          } else {
+            for (let i = 0; i < normalizedMediaUrls.length; i += 1) {
+              const sent = await sendMessageDiscord(outboundTarget, i === 0 ? text : "", {
+                token: discordToken,
+                rest: discordRest,
+                verbose: false,
+                mediaUrl: normalizedMediaUrls[i],
+                ...(i === 0 && replyToDiscordMessageId ? { replyTo: replyToDiscordMessageId } : {}),
+              });
+              if (i === 0) {
+                messageId = sent.messageId || "unknown";
+                channelId = sent.channelId || resolvedTarget.channelId;
+              }
+              providerMessageIds.push(sent.messageId || "unknown");
+            }
+          }
+        } catch (error) {
+          return {
+            statusCode: 502,
+            bodyText: JSON.stringify({
+              ok: false,
+              error: "discord send failed",
+              details: String(error),
+            }),
+          };
+        }
         log({
           type: "discord_send_result",
           tenantId: tenant.id,
           channelId: resolvedTarget.channelId,
-          status: response.status,
-          result,
+          providerMessageIds,
         });
-
-        if (!response.ok) {
-          return {
-            statusCode: 502,
-            bodyText: JSON.stringify({ ok: false, error: "discord send failed", details: result }),
-          };
-        }
-
-        const messageId = readUnsignedNumericString(result.id) ?? "unknown";
-        const channelId = readUnsignedNumericString(result.channel_id) ?? resolvedTarget.channelId;
         return {
           statusCode: 200,
           bodyText: JSON.stringify({
             ok: true,
             messageId,
             channelId,
-            providerMessageIds: [messageId],
+            providerMessageIds,
           }),
         };
       }
