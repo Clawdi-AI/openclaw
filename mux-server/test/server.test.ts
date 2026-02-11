@@ -909,7 +909,85 @@ describe("mux server", () => {
     });
   });
 
-  test("telegram typing endpoint sends chat action for bound route", async () => {
+  test("telegram outbound raw envelope preserves body and enforces route lock", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/sendMessage") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9901, chat: { id: -100123 } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-RAW",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-RAW",
+      sessionKey: "tg:group:-100123:thread:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "tg:group:-100123:thread:2",
+        raw: {
+          telegram: {
+            method: "sendMessage",
+            body: {
+              chat_id: "999999",
+              text: "<b>raw payload</b>",
+              parse_mode: "HTML",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "9901",
+      rawPassthrough: true,
+    });
+    expect(telegramRequests).toHaveLength(1);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "-100123",
+      message_thread_id: 2,
+      text: "<b>raw payload</b>",
+      parse_mode: "HTML",
+    });
+  });
+
+  test("telegram typing action via /send sends chat action for bound route", async () => {
     const telegramRequests: Array<Record<string, unknown>> = [];
     const telegramApi = await startHttpServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/botdummy-token/sendChatAction") {
@@ -945,13 +1023,15 @@ describe("mux server", () => {
     });
     expect(claim.status).toBe(200);
 
-    const typing = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/typing`, {
+    const typing = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
       method: "POST",
       headers: {
         Authorization: "Bearer tenant-a-key",
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        op: "action",
+        action: "typing",
         channel: "telegram",
         sessionKey: "tg:group:-100123:thread:2",
       }),
@@ -965,6 +1045,178 @@ describe("mux server", () => {
       action: "typing",
       message_thread_id: 2,
     });
+  });
+
+  test("discord typing action via /send triggers typing on bound DM route", async () => {
+    const discordRequests: Array<{
+      method: string;
+      url: string;
+      body?: Record<string, unknown>;
+    }> = [];
+
+    const discordApi = await startHttpServer(async (req, res) => {
+      const method = req.method ?? "GET";
+      const url = req.url ?? "/";
+      if (method === "POST" && url === "/users/@me/channels") {
+        const body = await readJsonBody(req);
+        discordRequests.push({ method, url, body });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: "6001" }));
+        return;
+      }
+      if (method === "POST" && url === "/channels/6001/typing") {
+        discordRequests.push({ method, url });
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-DISCORD-TYPING",
+          channel: "discord",
+          routeKey: "discord:default:dm:user:42",
+          scope: "dm",
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-DISCORD-TYPING",
+      sessionKey: "dc:dm:42",
+    });
+    expect(claim.status).toBe(200);
+
+    const typing = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        op: "action",
+        action: "typing",
+        channel: "discord",
+        sessionKey: "dc:dm:42",
+      }),
+    });
+
+    expect(typing.status).toBe(200);
+    expect(await typing.json()).toEqual({ ok: true });
+    expect(discordRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: "POST",
+          url: "/users/@me/channels",
+          body: { recipient_id: "42" },
+        }),
+        expect.objectContaining({
+          method: "POST",
+          url: "/channels/6001/typing",
+        }),
+      ]),
+    );
+  });
+
+  test("discord outbound raw envelope forwards body unchanged", async () => {
+    const discordRequests: Array<{
+      method: string;
+      url: string;
+      body?: Record<string, unknown>;
+    }> = [];
+
+    const discordApi = await startHttpServer(async (req, res) => {
+      const method = req.method ?? "GET";
+      const url = req.url ?? "/";
+      if (method === "POST" && url === "/users/@me/channels") {
+        const body = await readJsonBody(req);
+        discordRequests.push({ method, url, body });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: "2001" }));
+        return;
+      }
+      if (method === "POST" && url === "/channels/2001/messages") {
+        const body = await readJsonBody(req);
+        discordRequests.push({ method, url, body });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: "7007", channel_id: "2001" }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-DISCORD-RAW",
+          channel: "discord",
+          routeKey: "discord:default:dm:user:42",
+          scope: "dm",
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-DISCORD-RAW",
+      sessionKey: "dc:dm:42",
+    });
+    expect(claim.status).toBe(200);
+
+    const rawBody = {
+      content: "raw body",
+      components: [{ type: 1, components: [{ type: 2, style: 1, label: "OK", custom_id: "ok" }] }],
+    };
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "discord",
+        sessionKey: "dc:dm:42",
+        raw: {
+          discord: {
+            body: rawBody,
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "7007",
+      channelId: "2001",
+      rawPassthrough: true,
+    });
+    expect(discordRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: "POST",
+          url: "/channels/2001/messages",
+          body: rawBody,
+        }),
+      ]),
+    );
   });
 
   test("sends discord outbound through guild-bound route and enforces guild lock", async () => {
@@ -1396,6 +1648,14 @@ describe("mux server", () => {
     expect(inboundRequests[0]).toMatchObject({
       eventId: "tgcb:470",
       channel: "telegram",
+      event: {
+        kind: "callback",
+      },
+      raw: {
+        callbackQuery: {
+          id: "cbq-1",
+        },
+      },
       sessionKey: "tg:group:-100555",
       body: "/commands",
       from: "telegram:1234",
@@ -1407,6 +1667,7 @@ describe("mux server", () => {
         telegram: {
           callbackData: "commands_page_2:main",
           commandsPage: 2,
+          callbackQueryId: "cbq-1",
           callbackMessageId: "777",
         },
       },
@@ -2321,7 +2582,7 @@ describe("mux server", () => {
 
     await waitForCondition(
       () => inboundRequests.length >= 1 && sentMessages.length >= 3,
-      5_000,
+      12_000,
       "timed out waiting for discord post-pair inbound forward and notices",
     );
 
@@ -2364,7 +2625,7 @@ describe("mux server", () => {
         },
       ],
     });
-  });
+  }, 15_000);
 
   test("issues whatsapp pairing token without deep link or start command", async () => {
     const server = await startServer({

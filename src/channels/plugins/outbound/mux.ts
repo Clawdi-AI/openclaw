@@ -234,9 +234,11 @@ export async function sendTypingViaMux(params: {
     accountId: params.accountId,
     sessionKey: params.sessionKey,
   });
-  const url = `${resolved.baseUrl}/v1/mux/outbound/typing`;
+  const url = `${resolved.baseUrl}/v1/mux/outbound/send`;
   const payload = {
     requestId: randomUUID(),
+    op: "action",
+    action: "typing",
     channel: params.channel,
     sessionKey: resolved.sessionKey,
     accountId: params.accountId,
@@ -253,6 +255,6 @@ export async function sendTypingViaMux(params: {
   });
   if (!response.ok) {
     const summary = await readMuxErrorSummary(response);
-    throw new Error(`mux typing failed (${response.status}): ${summary}`);
+    throw new Error(`mux action failed (${response.status}): ${summary}`);
   }
 }

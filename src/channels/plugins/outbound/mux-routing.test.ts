@@ -255,11 +255,13 @@ describe("mux outbound routing", () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://mux.local/v1/mux/outbound/typing");
+    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
     expect(init.headers).toEqual(
       expect.objectContaining({ Authorization: `Bearer ${TENANT_TOKEN}` }),
     );
     expect(JSON.parse(String(init.body))).toMatchObject({
+      op: "action",
+      action: "typing",
       channel: "telegram",
       sessionKey: "sess-tg",
     });

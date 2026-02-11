@@ -3,6 +3,8 @@
 
 export type MuxPayload = {
   requestId?: unknown;
+  op?: unknown;
+  action?: unknown;
   channel?: unknown;
   sessionKey?: unknown;
   accountId?: unknown;
@@ -14,6 +16,7 @@ export type MuxPayload = {
   threadId?: unknown;
   channelData?: unknown;
   poll?: unknown;
+  raw?: unknown;
 };
 
 export type MuxInboundAttachment = {
@@ -26,6 +29,11 @@ export type MuxInboundAttachment = {
 type MuxInboundEnvelope = {
   eventId: string;
   channel: "telegram" | "discord" | "whatsapp";
+  event: {
+    kind: "message" | "callback" | "command" | "action";
+    raw: unknown;
+  };
+  raw: unknown;
   sessionKey: string;
   body: string;
   from: string;
@@ -38,6 +46,15 @@ type MuxInboundEnvelope = {
   channelData: Record<string, unknown>;
   attachments?: MuxInboundAttachment[];
 };
+
+type MuxOutboundOperation = {
+  op: "send" | "action";
+  action?: string;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
 
 export function readOutboundText(payload: MuxPayload): { text: string; hasText: boolean } {
   const text = typeof payload.text === "string" ? payload.text : "";
@@ -62,6 +79,26 @@ export function collectOutboundMediaUrls(payload: MuxPayload): string[] {
   return collected;
 }
 
+export function readOutboundOperation(payload: MuxPayload): MuxOutboundOperation {
+  const rawOp = typeof payload.op === "string" ? payload.op.trim().toLowerCase() : "";
+  const rawAction =
+    typeof payload.action === "string" ? payload.action.trim().toLowerCase() : undefined;
+  if (rawOp === "action") {
+    return { op: "action", action: rawAction };
+  }
+  if (rawOp === "typing") {
+    return { op: "action", action: "typing" };
+  }
+  if (rawAction === "typing" && !rawOp) {
+    return { op: "action", action: "typing" };
+  }
+  return { op: "send" };
+}
+
+export function readOutboundRaw(payload: MuxPayload): Record<string, unknown> | null {
+  return asRecord(payload.raw);
+}
+
 export function buildTelegramInboundEnvelope(params: {
   updateId: number;
   sessionKey: string;
@@ -79,9 +116,18 @@ export function buildTelegramInboundEnvelope(params: {
   media: unknown;
   attachments: MuxInboundAttachment[];
 }): MuxInboundEnvelope {
+  const raw = {
+    update: params.rawUpdate,
+    message: params.rawMessage,
+  };
   const payload: MuxInboundEnvelope = {
     eventId: `tg:${params.updateId}`,
     channel: "telegram",
+    event: {
+      kind: "message",
+      raw,
+    },
+    raw,
     sessionKey: params.sessionKey,
     body: params.rawBody,
     from: `telegram:${params.fromId}`,
@@ -111,6 +157,67 @@ export function buildTelegramInboundEnvelope(params: {
   return payload;
 }
 
+export function buildTelegramCallbackInboundEnvelope(params: {
+  updateId: number;
+  sessionKey: string;
+  accountId: string;
+  commandBody: string;
+  fromId: string;
+  chatId: string;
+  topicId?: number;
+  chatType: "direct" | "group";
+  messageId: string;
+  timestampMs: number;
+  routeKey: string;
+  callbackData: string;
+  callbackQueryId?: string;
+  commandsPage: number;
+  rawCallbackQuery: unknown;
+  rawMessage: unknown;
+  rawUpdate: unknown;
+}): MuxInboundEnvelope {
+  const raw = {
+    update: params.rawUpdate,
+    callbackQuery: params.rawCallbackQuery,
+    message: params.rawMessage,
+  };
+  return {
+    eventId: `tgcb:${params.updateId}`,
+    channel: "telegram",
+    event: {
+      kind: "callback",
+      raw,
+    },
+    raw,
+    sessionKey: params.sessionKey,
+    body: params.commandBody,
+    from: `telegram:${params.fromId}`,
+    to: `telegram:${params.chatId}`,
+    accountId: params.accountId,
+    chatType: params.chatType,
+    messageId: params.messageId,
+    timestampMs: params.timestampMs,
+    ...(typeof params.topicId === "number" ? { threadId: params.topicId } : {}),
+    channelData: {
+      accountId: params.accountId,
+      messageId: params.messageId,
+      chatId: params.chatId,
+      topicId: params.topicId ?? null,
+      routeKey: params.routeKey,
+      updateId: params.updateId,
+      telegram: {
+        callbackData: params.callbackData,
+        commandsPage: params.commandsPage,
+        callbackQueryId: params.callbackQueryId,
+        callbackMessageId: params.messageId,
+        rawCallbackQuery: params.rawCallbackQuery,
+        rawMessage: params.rawMessage,
+        rawUpdate: params.rawUpdate,
+      },
+    },
+  };
+}
+
 export function buildDiscordInboundEnvelope(params: {
   messageId: string;
   sessionKey: string;
@@ -127,9 +234,17 @@ export function buildDiscordInboundEnvelope(params: {
   media: unknown;
   attachments: MuxInboundAttachment[];
 }): MuxInboundEnvelope {
+  const raw = {
+    message: params.rawMessage,
+  };
   const payload: MuxInboundEnvelope = {
     eventId: `dc:${params.messageId}`,
     channel: "discord",
+    event: {
+      kind: "message",
+      raw,
+    },
+    raw,
     sessionKey: params.sessionKey,
     body: params.rawBody,
     from: `discord:${params.fromId}`,
@@ -172,9 +287,17 @@ export function buildWhatsAppInboundEnvelope(params: {
   media: unknown;
   attachments: MuxInboundAttachment[];
 }): MuxInboundEnvelope {
+  const raw = {
+    message: params.rawMessage,
+  };
   const payload: MuxInboundEnvelope = {
     eventId: `wa:${params.messageId}`,
     channel: "whatsapp",
+    event: {
+      kind: "message",
+      raw,
+    },
+    raw,
     sessionKey: params.sessionKey,
     body: params.rawBody,
     from: `whatsapp:${params.fromId}`,

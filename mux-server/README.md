@@ -239,6 +239,8 @@ Body:
 ```json
 {
   "requestId": "uuid",
+  "op": "send",
+  "action": null,
   "channel": "telegram",
   "sessionKey": "tg:group:-100123:thread:2",
   "to": "-100123",
@@ -246,7 +248,8 @@ Body:
   "mediaUrl": "https://... or Telegram file_id",
   "mediaUrls": ["https://..."],
   "replyToId": "123",
-  "threadId": 2
+  "threadId": 2,
+  "raw": null
 }
 ```
 
@@ -254,7 +257,9 @@ Behavior:
 
 - `channel` is required (`telegram`, `discord`, or `whatsapp`).
 - `sessionKey` is required.
-- At least one of `text`, `mediaUrl`, or `mediaUrls` is required.
+- `op` defaults to `send` when omitted.
+- `op=action` currently supports `action=typing` (same endpoint, no separate transport contract required).
+- For `op=send`, at least one of `text`, `mediaUrl`, or `mediaUrls` is required unless `raw` is provided.
 - Destination is resolved from mux route mapping `(tenant, channel, sessionKey)`.
 - `to` from request is ignored for Telegram and DM-bound Discord routes.
 - If no route mapping exists, returns `403` with `code: "ROUTE_NOT_BOUND"`.
@@ -264,11 +269,16 @@ Behavior:
 - `threadId` maps to Telegram `message_thread_id`.
 - `replyToId` maps to Telegram `reply_to_message_id`.
 - Discord guild-bound routes validate that destination channel belongs to the bound guild.
+- `raw` is channel-scoped passthrough data:
+- `raw.telegram.body` is forwarded to Telegram API with route lock enforcement (`chat_id` overridden to bound route).
+- `raw.discord.body` is forwarded to Discord message create API on the resolved bound channel.
+- `raw.whatsapp` may provide `text`, `mediaUrl`, `mediaUrls`, and `gifPlayback`.
 
 Transport contract:
 
 - Transport layers preserve original text and provider payload structures.
 - Parsing is allowed for validation/routing and image decode, but transport must not rewrite user text.
+- Inbound envelopes now include `event.kind` + top-level `raw` for unmodified channel payload preservation.
 
 ### `POST /v1/pairings/claim`
 

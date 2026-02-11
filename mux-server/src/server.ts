@@ -7,10 +7,13 @@ import { DatabaseSync } from "node:sqlite";
 import {
   buildWhatsAppInboundEnvelope,
   buildDiscordInboundEnvelope,
+  buildTelegramCallbackInboundEnvelope,
   buildTelegramInboundEnvelope,
   collectOutboundMediaUrls,
   type MuxInboundAttachment,
   type MuxPayload,
+  readOutboundOperation,
+  readOutboundRaw,
   readOutboundText,
 } from "./mux-envelope.js";
 
@@ -1328,6 +1331,15 @@ async function sendDiscordMessage(params: {
     method: "POST",
     path: `/channels/${params.channelId}/messages`,
     body,
+  });
+}
+
+async function sendDiscordTyping(params: {
+  channelId: string;
+}): Promise<{ response: Response; result: Record<string, unknown> }> {
+  return await discordRequest({
+    method: "POST",
+    path: `/channels/${params.channelId}/typing`,
   });
 }
 
@@ -2879,6 +2891,114 @@ async function resolveDiscordInboundChannelId(route: DiscordBoundRoute): Promise
   return null;
 }
 
+async function runOutboundAction(params: {
+  tenant: TenantIdentity;
+  channel: string;
+  sessionKey: string;
+  action?: string;
+}): Promise<SendResult> {
+  if (params.action !== "typing") {
+    return {
+      statusCode: 400,
+      bodyText: JSON.stringify({
+        ok: false,
+        error: "unsupported action",
+        action: params.action ?? null,
+      }),
+    };
+  }
+
+  if (params.channel === "telegram") {
+    const boundRoute = resolveTelegramBoundRoute({
+      tenantId: params.tenant.id,
+      channel: params.channel,
+      sessionKey: params.sessionKey,
+    });
+    if (!boundRoute) {
+      return {
+        statusCode: 403,
+        bodyText: JSON.stringify({
+          ok: false,
+          error: "route not bound",
+          code: "ROUTE_NOT_BOUND",
+        }),
+      };
+    }
+    const body: Record<string, unknown> = {
+      chat_id: boundRoute.chatId,
+      action: "typing",
+    };
+    if (boundRoute.topicId) {
+      body.message_thread_id = boundRoute.topicId;
+    }
+    const { response, result } = await sendTelegram("sendChatAction", body);
+    if (!response.ok || result.ok !== true) {
+      return {
+        statusCode: 502,
+        bodyText: JSON.stringify({ ok: false, error: "telegram typing failed", details: result }),
+      };
+    }
+    return {
+      statusCode: 200,
+      bodyText: JSON.stringify({ ok: true }),
+    };
+  }
+
+  if (params.channel === "discord") {
+    const boundRoute = resolveDiscordBoundRoute({
+      tenantId: params.tenant.id,
+      channel: params.channel,
+      sessionKey: params.sessionKey,
+    });
+    if (!boundRoute) {
+      return {
+        statusCode: 403,
+        bodyText: JSON.stringify({
+          ok: false,
+          error: "route not bound",
+          code: "ROUTE_NOT_BOUND",
+        }),
+      };
+    }
+    const resolvedTarget = await resolveDiscordOutboundChannelId({
+      boundRoute,
+      requestedTo: undefined,
+      requestedThreadId: undefined,
+    });
+    if (!resolvedTarget.ok) {
+      return {
+        statusCode: resolvedTarget.statusCode,
+        bodyText: JSON.stringify({ ok: false, error: resolvedTarget.error }),
+      };
+    }
+    const { response, result } = await sendDiscordTyping({
+      channelId: resolvedTarget.channelId,
+    });
+    if (!response.ok) {
+      return {
+        statusCode: 502,
+        bodyText: JSON.stringify({ ok: false, error: "discord typing failed", details: result }),
+      };
+    }
+    return {
+      statusCode: 200,
+      bodyText: JSON.stringify({ ok: true }),
+    };
+  }
+
+  if (params.channel === "whatsapp") {
+    return {
+      statusCode: 200,
+      bodyText: JSON.stringify({ ok: true, skipped: true, reason: "typing_unsupported" }),
+    };
+  }
+
+  return {
+    statusCode: 400,
+    bodyText: JSON.stringify({ ok: false, error: "unsupported channel" }),
+  };
+}
+
 function extractTelegramMessage(update: TelegramUpdate): TelegramIncomingMessage | null {
   const candidate = update.message ?? update.edited_message;
   if (!candidate || typeof candidate !== "object") {
@@ -3088,35 +3208,25 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     Date.now(),
   );
 
-  const payload = {
-    eventId: `tgcb:${params.updateId}`,
-    channel: "telegram",
+  const payload = buildTelegramCallbackInboundEnvelope({
+    updateId: params.updateId,
     sessionKey,
-    body: "/commands",
-    from: `telegram:${fromId}`,
-    to: `telegram:${chatId}`,
     accountId: openclawMuxAccountId,
+    commandBody: "/commands",
+    fromId,
+    chatId,
+    topicId,
     chatType,
     messageId: callbackMessageId,
     timestampMs,
-    ...(topicId ? { threadId: topicId } : {}),
-    channelData: {
-      accountId: openclawMuxAccountId,
-      messageId: callbackMessageId,
-      chatId,
-      topicId: topicId ?? null,
-      routeKey: binding.routeKey,
-      updateId: params.updateId,
-      telegram: {
-        callbackData,
-        commandsPage: parsedCommandsPage.page,
-        callbackMessageId,
-        rawCallbackQuery: params.callbackQuery,
-        rawMessage: callbackMessage,
-        rawUpdate: params.update,
-      },
-    },
-  };
+    routeKey: binding.routeKey,
+    callbackData,
+    callbackQueryId: callbackQueryId ?? undefined,
+    commandsPage: parsedCommandsPage.page,
+    rawCallbackQuery: params.callbackQuery,
+    rawMessage: callbackMessage,
+    rawUpdate: params.update,
+  });
 
   const response = await fetch(target.url, {
     method: "POST",
@@ -4253,38 +4363,14 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { ok: false, error: "sessionKey required" });
         return;
       }
-      if (channel === "telegram") {
-        const boundRoute = resolveTelegramBoundRoute({
-          tenantId: tenant.id,
-          channel,
-          sessionKey,
-        });
-        if (!boundRoute) {
-          sendJson(res, 403, {
-            ok: false,
-            error: "route not bound",
-            code: "ROUTE_NOT_BOUND",
-          });
-          return;
-        }
-        const body: Record<string, unknown> = {
-          chat_id: boundRoute.chatId,
-          action: "typing",
-        };
-        if (boundRoute.topicId) {
-          body.message_thread_id = boundRoute.topicId;
-        }
-        const { response, result } = await sendTelegram("sendChatAction", body);
-        if (!response.ok || result.ok !== true) {
-          sendJson(res, 502, {
-            ok: false,
-            error: "telegram typing failed",
-            details: result,
-          });
-          return;
-        }
-      }
-      sendJson(res, 200, { ok: true });
+      const typingResult = await runOutboundAction({
+        tenant,
+        channel,
+        sessionKey,
+        action: "typing",
+      });
+      res.writeHead(typingResult.statusCode, { "content-type": "application/json; charset=utf-8" });
+      res.end(typingResult.bodyText);
       return;
     }
 
@@ -4362,6 +4448,8 @@ const server = http.createServer(async (req, res) => {
 
       const channel = normalizeChannel(payload.channel);
       const sessionKey = readNonEmptyString(payload.sessionKey);
+      const operation = readOutboundOperation(payload);
+      const rawOutbound = readOutboundRaw(payload);
       const { text, hasText } = readOutboundText(payload);
       const mediaUrls = collectOutboundMediaUrls(payload);
       const replyToMessageId = readPositiveInt(payload.replyToId);
@@ -4381,7 +4469,15 @@ const server = http.createServer(async (req, res) => {
           bodyText: JSON.stringify({ ok: false, error: "sessionKey required" }),
         };
       }
-      if (!hasText && mediaUrls.length === 0) {
+      if (operation.op === "action") {
+        return await runOutboundAction({
+          tenant,
+          channel,
+          sessionKey,
+          action: operation.action,
+        });
+      }
+      if (!hasText && mediaUrls.length === 0 && !rawOutbound) {
         return {
           statusCode: 400,
           bodyText: JSON.stringify({ ok: false, error: "text or mediaUrl(s) required" }),
@@ -4406,6 +4502,62 @@ const server = http.createServer(async (req, res) => {
 
         const to = boundRoute.chatId;
         const messageThreadId = requestedThreadId ?? boundRoute.topicId;
+        const telegramRaw = asRecord(rawOutbound?.telegram);
+        const telegramRawMethod = readNonEmptyString(telegramRaw?.method);
+        const telegramRawBody = asRecord(telegramRaw?.body);
+        if (telegramRawMethod && telegramRawBody) {
+          const telegramMethod =
+            telegramRawMethod === "sendMessage" ||
+            telegramRawMethod === "sendPhoto" ||
+            telegramRawMethod === "sendChatAction" ||
+            telegramRawMethod === "answerCallbackQuery"
+              ? telegramRawMethod
+              : null;
+          if (!telegramMethod) {
+            return {
+              statusCode: 400,
+              bodyText: JSON.stringify({
+                ok: false,
+                error: "unsupported telegram raw method",
+              }),
+            };
+          }
+          const finalBody: Record<string, unknown> = { ...telegramRawBody };
+          if (telegramMethod !== "answerCallbackQuery") {
+            finalBody.chat_id = to;
+            if (messageThreadId && !readPositiveInt(finalBody.message_thread_id)) {
+              finalBody.message_thread_id = messageThreadId;
+            }
+          }
+          const { response, result } = await sendTelegram(telegramMethod, finalBody);
+          if (!response.ok || result.ok !== true) {
+            return {
+              statusCode: 502,
+              bodyText: JSON.stringify({
+                ok: false,
+                error: "telegram raw send failed",
+                details: result,
+              }),
+            };
+          }
+          const resultData =
+            typeof result.result === "object" && result.result
+              ? (result.result as Record<string, unknown>)
+              : {};
+          const messageId =
+            typeof resultData.message_id === "number" || typeof resultData.message_id === "string"
+              ? String(resultData.message_id)
+              : "unknown";
+          return {
+            statusCode: 200,
+            bodyText: JSON.stringify({
+              ok: true,
+              messageId,
+              providerMessageIds: [messageId],
+              rawPassthrough: true,
+            }),
+          };
+        }
         const replyMarkup = extractTelegramInlineKeyboard(payload);
 
         const firstMediaUrl = mediaUrls[0];
@@ -4535,6 +4687,39 @@ const server = http.createServer(async (req, res) => {
           };
         }
 
+        const discordRaw = asRecord(rawOutbound?.discord);
+        const discordRawBody = asRecord(discordRaw?.body);
+        if (discordRawBody) {
+          const { response, result } = await discordRequest({
+            method: "POST",
+            path: `/channels/${resolvedTarget.channelId}/messages`,
+            body: discordRawBody,
+          });
+          if (!response.ok) {
+            return {
+              statusCode: 502,
+              bodyText: JSON.stringify({
+                ok: false,
+                error: "discord raw send failed",
+                details: result,
+              }),
+            };
+          }
+          const messageId = readUnsignedNumericString(result.id) ?? "unknown";
+          const channelId =
+            readUnsignedNumericString(result.channel_id) ?? resolvedTarget.channelId;
+          return {
+            statusCode: 200,
+            bodyText: JSON.stringify({
+              ok: true,
+              messageId,
+              channelId,
+              providerMessageIds: [messageId],
+              rawPassthrough: true,
+            }),
+          };
+        }
+
         const { response, result } = await sendDiscordMessage({
           channelId: resolvedTarget.channelId,
           content: hasText ? text : undefined,
@@ -4587,12 +4772,28 @@ const server = http.createServer(async (req, res) => {
         }
 
         const { sendMessageWhatsApp } = await loadWebRuntimeModules();
+        const whatsappRaw = asRecord(rawOutbound?.whatsapp);
+        const whatsappText =
+          typeof whatsappRaw?.text === "string" ? whatsappRaw.text : hasText ? text : "";
+        const whatsappRawSingleMedia = readNonEmptyString(whatsappRaw?.mediaUrl);
+        const whatsappRawMediaList = Array.isArray(whatsappRaw?.mediaUrls)
+          ? (whatsappRaw.mediaUrls as unknown[])
+              .filter((item) => typeof item === "string")
+              .map((item) => (item as string).trim())
+              .filter((item) => item.length > 0)
+          : [];
+        const whatsappMediaUrls =
+          whatsappRawSingleMedia || whatsappRawMediaList.length > 0
+            ? [...(whatsappRawSingleMedia ? [whatsappRawSingleMedia] : []), ...whatsappRawMediaList]
+            : mediaUrls;
+        const whatsappGifPlayback = whatsappRaw?.gifPlayback === true;
+
         const providerMessageIds: string[] = [];
         let firstMessageId = "unknown";
         let firstToJid = boundRoute.chatJid;
         try {
-          if (mediaUrls.length === 0) {
-            const sent = await sendMessageWhatsApp(boundRoute.chatJid, text, {
+          if (whatsappMediaUrls.length === 0) {
+            const sent = await sendMessageWhatsApp(boundRoute.chatJid, whatsappText, {
               verbose: false,
               accountId: boundRoute.accountId,
             });
@@ -4600,18 +4801,20 @@ const server = http.createServer(async (req, res) => {
             firstToJid = sent.toJid || boundRoute.chatJid;
             providerMessageIds.push(firstMessageId);
           } else {
-            const first = await sendMessageWhatsApp(boundRoute.chatJid, hasText ? text : "", {
+            const first = await sendMessageWhatsApp(boundRoute.chatJid, whatsappText, {
               verbose: false,
-              mediaUrl: mediaUrls[0],
+              mediaUrl: whatsappMediaUrls[0],
+              ...(whatsappGifPlayback ? { gifPlayback: true } : {}),
               accountId: boundRoute.accountId,
             });
             firstMessageId = first.messageId || "unknown";
             firstToJid = first.toJid || boundRoute.chatJid;
             providerMessageIds.push(firstMessageId);
-            for (const extraMediaUrl of mediaUrls.slice(1)) {
+            for (const extraMediaUrl of whatsappMediaUrls.slice(1)) {
               const extra = await sendMessageWhatsApp(boundRoute.chatJid, "", {
                 verbose: false,
                 mediaUrl: extraMediaUrl,
+                ...(whatsappGifPlayback ? { gifPlayback: true } : {}),
                 accountId: boundRoute.accountId,
               });
               providerMessageIds.push(extra.messageId || "unknown");
