@@ -308,21 +308,22 @@ export async function handleMuxInboundHttpRequest(
 
   try {
     let markDispatchIdle: (() => void) | undefined;
-    const onReplyStart =
-      channel === "telegram"
-        ? async () => {
-            try {
-              await sendTypingViaMux({
-                cfg,
-                channel: "telegram",
-                accountId: ctx.AccountId,
-                sessionKey,
-              });
-            } catch {
-              // Best-effort typing signal for mux transport.
-            }
+    const typingChannel =
+      channel === "telegram" || channel === "discord" || channel === "whatsapp" ? channel : null;
+    const onReplyStart = typingChannel
+      ? async () => {
+          try {
+            await sendTypingViaMux({
+              cfg,
+              channel: typingChannel,
+              accountId: ctx.AccountId,
+              sessionKey,
+            });
+          } catch {
+            // Best-effort typing signal for mux transport.
           }
-        : undefined;
+        }
+      : undefined;
     const dispatcher = createReplyDispatcher({
       deliver: async () => {
         // route-reply path handles outbound when OriginatingChannel differs from Surface.

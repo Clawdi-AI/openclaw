@@ -206,6 +206,7 @@ type WebRuntimeModules = {
       accountId?: string;
     },
   ) => Promise<{ messageId: string; toJid: string }>;
+  sendTypingWhatsApp: (to: string, options: { accountId?: string }) => Promise<void>;
   setActiveWebListener: (accountId: string | null | undefined, listener: unknown | null) => void;
 };
 
@@ -341,6 +342,7 @@ async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
       };
       const outboundModule = (await import(outboundModulePath)) as {
         sendMessageWhatsApp?: WebRuntimeModules["sendMessageWhatsApp"];
+        sendTypingWhatsApp?: WebRuntimeModules["sendTypingWhatsApp"];
       };
       const activeListenerModule = (await import(activeListenerModulePath)) as {
         setActiveWebListener?: WebRuntimeModules["setActiveWebListener"];
@@ -348,6 +350,7 @@ async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
       if (
         typeof inboundModule.monitorWebInbox !== "function" ||
         typeof outboundModule.sendMessageWhatsApp !== "function" ||
+        typeof outboundModule.sendTypingWhatsApp !== "function" ||
         typeof activeListenerModule.setActiveWebListener !== "function"
       ) {
         throw new Error("failed to load WhatsApp runtime modules");
@@ -355,6 +358,7 @@ async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
       return {
         monitorWebInbox: inboundModule.monitorWebInbox,
         sendMessageWhatsApp: outboundModule.sendMessageWhatsApp,
+        sendTypingWhatsApp: outboundModule.sendTypingWhatsApp,
         setActiveWebListener: activeListenerModule.setActiveWebListener,
       };
     })();
@@ -2948,9 +2952,39 @@ async function runOutboundAction(params: {
   }
 
   if (params.channel === "whatsapp") {
+    const boundRoute = resolveWhatsAppBoundRoute({
+      tenantId: params.tenant.id,
+      channel: params.channel,
+      sessionKey: params.sessionKey,
+    });
+    if (!boundRoute) {
+      return {
+        statusCode: 403,
+        bodyText: JSON.stringify({
+          ok: false,
+          error: "route not bound",
+          code: "ROUTE_NOT_BOUND",
+        }),
+      };
+    }
+    const { sendTypingWhatsApp } = await loadWebRuntimeModules();
+    try {
+      await sendTypingWhatsApp(boundRoute.chatJid, {
+        accountId: boundRoute.accountId,
+      });
+    } catch (error) {
+      return {
+        statusCode: 502,
+        bodyText: JSON.stringify({
+          ok: false,
+          error: "whatsapp typing failed",
+          details: String(error),
+        }),
+      };
+    }
     return {
       statusCode: 200,
-      bodyText: JSON.stringify({ ok: true, skipped: true, reason: "typing_unsupported" }),
+      bodyText: JSON.stringify({ ok: true }),
     };
   }
 

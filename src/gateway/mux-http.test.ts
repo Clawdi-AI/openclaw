@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     counts: { tool: 0, block: 0, final: 0 },
   })),
   resolveTelegramCallbackAction: vi.fn(),
+  sendTypingViaMux: vi.fn(async () => {}),
 }));
 
 vi.mock("../config/config.js", async (importOriginal) => {
@@ -32,6 +33,14 @@ vi.mock("../telegram/callback-actions.js", async (importOriginal) => {
   return {
     ...actual,
     resolveTelegramCallbackAction: mocks.resolveTelegramCallbackAction,
+  };
+});
+
+vi.mock("../channels/plugins/outbound/mux.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../channels/plugins/outbound/mux.js")>();
+  return {
+    ...actual,
+    sendTypingViaMux: mocks.sendTypingViaMux,
   };
 });
 
@@ -82,6 +91,7 @@ afterEach(() => {
   mocks.loadConfig.mockReset();
   mocks.dispatchInboundMessage.mockClear();
   mocks.resolveTelegramCallbackAction.mockReset();
+  mocks.sendTypingViaMux.mockReset();
   vi.unstubAllGlobals();
 });
 
@@ -239,6 +249,57 @@ describe("handleMuxInboundHttpRequest", () => {
       },
     });
   });
+
+  test.each(["discord", "whatsapp"] as const)(
+    "sends mux typing action for %s replies",
+    async (channel) => {
+      mocks.loadConfig.mockReturnValue({
+        gateway: {
+          http: {
+            endpoints: {
+              mux: {
+                enabled: true,
+                token: "mux-secret",
+              },
+            },
+          },
+        },
+      });
+      mocks.dispatchInboundMessage.mockImplementationOnce(async (params) => {
+        await params.replyOptions?.onReplyStart?.();
+        return {
+          queuedFinal: false,
+          counts: { tool: 0, block: 0, final: 0 },
+        };
+      });
+
+      const req = createRequest({
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer mux-secret",
+        },
+        body: {
+          channel,
+          sessionKey: `${channel}:session:1`,
+          accountId: "mux",
+          to: `${channel}:123`,
+          from: `${channel}:user:42`,
+          body: "hello",
+          messageId: `${channel}-msg-1`,
+        },
+      });
+      const res = createResponse();
+
+      expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+      expect(res.statusCode).toBe(202);
+      expect(mocks.sendTypingViaMux).toHaveBeenCalledWith({
+        cfg: expect.any(Object),
+        channel,
+        accountId: "mux",
+        sessionKey: `${channel}:session:1`,
+      });
+    },
+  );
 
   test("parses image attachments into replyOptions.images", async () => {
     mocks.loadConfig.mockReturnValue({

@@ -1170,6 +1170,48 @@ describe("mux server", () => {
     );
   });
 
+  test("whatsapp typing action via /send tries composing on bound route", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-TYPING",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550001111@s.whatsapp.net",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-WA-TYPING",
+      sessionKey: "wa:chat:15550001111@s.whatsapp.net",
+    });
+    expect(claim.status).toBe(200);
+
+    const typing = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        op: "action",
+        action: "typing",
+        channel: "whatsapp",
+        sessionKey: "wa:chat:15550001111@s.whatsapp.net",
+      }),
+    });
+
+    expect(typing.status).toBe(502);
+    expect(await typing.json()).toMatchObject({
+      ok: false,
+      error: "whatsapp typing failed",
+    });
+  });
+
   test("discord outbound raw envelope forwards body unchanged", async () => {
     const discordRequests: Array<{
       method: string;
