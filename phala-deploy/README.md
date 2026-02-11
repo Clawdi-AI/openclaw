@@ -2,6 +2,12 @@
 
 Run an OpenClaw gateway inside a Phala Confidential VM (CVM) with optional encrypted S3-backed storage.
 
+## Local Mux E2E (Control-Plane Dry Run)
+
+For local end-to-end testing of `mux-server + openclaw` with real channel credentials but isolated test state, use:
+
+- `phala-deploy/local-mux-e2e/README.md`
+
 ## Storage modes
 
 | Mode                 | State location                            | Persistence              | Best for              |

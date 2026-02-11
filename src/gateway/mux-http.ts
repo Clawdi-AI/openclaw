@@ -6,6 +6,10 @@ import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
 import { normalizeChannelId } from "../channels/plugins/index.js";
 import { sendTypingViaMux } from "../channels/plugins/outbound/mux.js";
 import { loadConfig } from "../config/config.js";
+import {
+  resolveTelegramCallbackAction,
+  type TelegramCallbackButtons,
+} from "../telegram/callback-actions.js";
 import { parseMessageWithAttachments } from "./chat-attachments.js";
 import { readJsonBody } from "./hooks.js";
 
@@ -18,8 +22,14 @@ type MuxInboundAttachment = {
   content?: unknown;
 };
 
+type MuxInboundEvent = {
+  kind?: string;
+  raw?: unknown;
+};
+
 type MuxInboundPayload = {
   eventId?: string;
+  event?: MuxInboundEvent;
   channel?: string;
   sessionKey?: string;
   body?: string;
@@ -92,6 +102,31 @@ function readOptionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function readPositiveInt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.trunc(parsed);
+    }
+  }
+  return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function readMuxBaseUrl(value: unknown): string | undefined {
+  const base = readOptionalString(value);
+  if (!base) {
+    return undefined;
+  }
+  return base.replace(/\/+$/, "");
+}
+
 function resolveThreadId(
   threadId: unknown,
   channelData: Record<string, unknown> | undefined,
@@ -114,6 +149,107 @@ function resolveThreadId(
     return rawThreadId.trim();
   }
   return undefined;
+}
+
+function resolveTelegramCallbackPayload(params: {
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+}): {
+  data: string;
+  chatId: string;
+  callbackMessageId: number;
+  messageThreadId?: number;
+  isGroup: boolean;
+  isForum: boolean;
+  accountId?: string;
+} | null {
+  const eventKind = readOptionalString(params.payload.event?.kind);
+  if (eventKind !== "callback") {
+    return null;
+  }
+  const telegramData = asRecord(params.channelData?.telegram);
+  const callbackData = readOptionalString(telegramData?.callbackData);
+  if (!callbackData) {
+    return null;
+  }
+  const callbackMessageId = readPositiveInt(telegramData?.callbackMessageId);
+  if (!callbackMessageId) {
+    return null;
+  }
+
+  const chatIdFromData = readOptionalString(params.channelData?.chatId);
+  const chatIdFromTo = readOptionalString(params.payload.to)?.replace(/^telegram:/i, "");
+  const chatId = chatIdFromData ?? chatIdFromTo;
+  if (!chatId) {
+    return null;
+  }
+
+  const rawMessage = asRecord(telegramData?.rawMessage);
+  const rawChat = asRecord(rawMessage?.chat);
+  const fallbackThreadId = resolveThreadId(params.payload.threadId, params.channelData);
+  const messageThreadId =
+    readPositiveInt(rawMessage?.message_thread_id) ??
+    (typeof fallbackThreadId === "number" ? fallbackThreadId : readPositiveInt(fallbackThreadId));
+  return {
+    data: callbackData,
+    chatId,
+    callbackMessageId,
+    messageThreadId,
+    isGroup: (readOptionalString(params.payload.chatType) ?? "direct") !== "direct",
+    isForum: rawChat?.is_forum === true,
+    accountId: readOptionalString(params.payload.accountId),
+  };
+}
+
+async function sendTelegramEditViaMux(params: {
+  baseUrl: string;
+  token: string;
+  sessionKey: string;
+  accountId?: string;
+  messageId: number;
+  text: string;
+  buttons: TelegramCallbackButtons;
+}) {
+  const inlineKeyboard =
+    params.buttons.length > 0
+      ? {
+          inline_keyboard: params.buttons.map((row) =>
+            row.map((button) => ({
+              text: button.text,
+              callback_data: button.callback_data,
+            })),
+          ),
+        }
+      : undefined;
+  const response = await fetch(`${params.baseUrl}/v1/mux/outbound/send`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.token}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({
+      channel: "telegram",
+      sessionKey: params.sessionKey,
+      accountId: params.accountId,
+      raw: {
+        telegram: {
+          method: "editMessageText",
+          body: {
+            message_id: params.messageId,
+            text: params.text,
+            ...(inlineKeyboard ? { reply_markup: inlineKeyboard } : {}),
+          },
+        },
+      },
+    }),
+  });
+  if (response.ok) {
+    return;
+  }
+  const detail = await response.text();
+  throw new Error(
+    `mux outbound edit failed (${response.status}): ${detail || response.statusText}`,
+  );
 }
 
 async function parseInboundImages(params: {
@@ -204,15 +340,65 @@ export async function handleMuxInboundHttpRequest(
     sendJson(res, 400, { ok: false, error: "to required" });
     return true;
   }
-  if (!rawMessage.trim() && attachments.length === 0) {
+  const callbackPayload =
+    channel === "telegram" ? resolveTelegramCallbackPayload({ payload, channelData }) : null;
+  if (!rawMessage.trim() && attachments.length === 0 && !callbackPayload) {
     sendJson(res, 400, { ok: false, error: "body or attachment required" });
     return true;
+  }
+
+  let inboundBody = rawMessage;
+  if (callbackPayload) {
+    try {
+      const callbackAction = await resolveTelegramCallbackAction({
+        cfg,
+        accountId: callbackPayload.accountId,
+        data: callbackPayload.data,
+        chatId: callbackPayload.chatId,
+        isGroup: callbackPayload.isGroup,
+        isForum: callbackPayload.isForum,
+        messageThreadId: callbackPayload.messageThreadId,
+      });
+      if (callbackAction.kind === "noop") {
+        sendJson(res, 202, {
+          ok: true,
+          eventId: readOptionalString(payload.eventId) ?? messageId,
+        });
+        return true;
+      }
+      if (callbackAction.kind === "edit") {
+        const muxBaseUrl = readMuxBaseUrl(endpointCfg.baseUrl);
+        if (!muxBaseUrl || !expectedToken) {
+          throw new Error(
+            "gateway.http.endpoints.mux.baseUrl and gateway.http.endpoints.mux.token are required",
+          );
+        }
+        await sendTelegramEditViaMux({
+          baseUrl: muxBaseUrl,
+          token: expectedToken,
+          sessionKey,
+          accountId: callbackPayload.accountId,
+          messageId: callbackPayload.callbackMessageId,
+          text: callbackAction.text,
+          buttons: callbackAction.buttons,
+        });
+        sendJson(res, 202, {
+          ok: true,
+          eventId: readOptionalString(payload.eventId) ?? messageId,
+        });
+        return true;
+      }
+      inboundBody = callbackAction.text;
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: String(err) });
+      return true;
+    }
   }
 
   let parsedImages: ChatImageContent[] = [];
   try {
     parsedImages = await parseInboundImages({
-      message: rawMessage,
+      message: inboundBody,
       attachments,
       // Keep request handling resilient when non-image attachments are provided.
       logWarn: () => {},
@@ -223,11 +409,11 @@ export async function handleMuxInboundHttpRequest(
   }
 
   const ctx: MsgContext = {
-    Body: rawMessage,
-    BodyForAgent: rawMessage,
-    BodyForCommands: rawMessage,
-    RawBody: rawMessage,
-    CommandBody: rawMessage,
+    Body: inboundBody,
+    BodyForAgent: inboundBody,
+    BodyForCommands: inboundBody,
+    RawBody: inboundBody,
+    CommandBody: inboundBody,
     SessionKey: sessionKey,
     From: readOptionalString(payload.from),
     To: originatingTo,

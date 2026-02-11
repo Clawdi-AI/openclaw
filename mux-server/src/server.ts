@@ -1207,7 +1207,12 @@ function requireDiscordBotToken(): string {
 }
 
 async function sendTelegram(
-  method: "sendMessage" | "sendPhoto" | "sendChatAction" | "answerCallbackQuery",
+  method:
+    | "sendMessage"
+    | "sendPhoto"
+    | "sendChatAction"
+    | "editMessageText"
+    | "answerCallbackQuery",
   body: Record<string, unknown>,
 ) {
   const token = requireTelegramBotToken();
@@ -1689,22 +1694,6 @@ function isTelegramCommandText(input: string | null): boolean {
     return false;
   }
   return /^\/[A-Za-z0-9_]+/.test(normalized);
-}
-
-function parseTelegramCommandsPageCallback(data: string): { page: number } | "noop" | null {
-  const match = data.match(/^commands_page_(\d+|noop)(?::.+)?$/);
-  if (!match) {
-    return null;
-  }
-  const pageValue = match[1];
-  if (pageValue === "noop") {
-    return "noop";
-  }
-  const page = Number.parseInt(pageValue, 10);
-  if (!Number.isFinite(page) || page < 1) {
-    return null;
-  }
-  return { page };
 }
 
 function extractPairingTokenFromText(input: string | null): string | null {
@@ -3097,46 +3086,6 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     return;
   }
 
-  const parsedCommandsPage = parseTelegramCommandsPageCallback(callbackData);
-  if (!parsedCommandsPage) {
-    if (callbackQueryId) {
-      try {
-        await answerTelegramCallbackQuery({
-          callbackQueryId,
-          text: "Button is not supported in mux mode yet.",
-        });
-      } catch (error) {
-        log({
-          type: "telegram_callback_answer_error",
-          updateId: params.updateId,
-          error: String(error),
-        });
-      }
-    }
-    log({
-      type: "telegram_callback_ignored",
-      updateId: params.updateId,
-      reason: "unsupported_callback_data",
-      callbackData,
-    });
-    return;
-  }
-
-  if (parsedCommandsPage === "noop") {
-    if (callbackQueryId) {
-      try {
-        await answerTelegramCallbackQuery({ callbackQueryId });
-      } catch (error) {
-        log({
-          type: "telegram_callback_answer_error",
-          updateId: params.updateId,
-          error: String(error),
-        });
-      }
-    }
-    return;
-  }
-
   const chatId =
     typeof callbackMessage.chat?.id === "number" && Number.isFinite(callbackMessage.chat.id)
       ? String(Math.trunc(callbackMessage.chat.id))
@@ -3212,7 +3161,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     updateId: params.updateId,
     sessionKey,
     accountId: openclawMuxAccountId,
-    commandBody: "/commands",
+    rawBody: callbackData,
     fromId,
     chatId,
     topicId,
@@ -3222,7 +3171,6 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     routeKey: binding.routeKey,
     callbackData,
     callbackQueryId: callbackQueryId ?? undefined,
-    commandsPage: parsedCommandsPage.page,
     rawCallbackQuery: params.callbackQuery,
     rawMessage: callbackMessage,
     rawUpdate: params.update,
@@ -3261,7 +3209,6 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     updateId: params.updateId,
     messageId: callbackMessageId,
     callbackData,
-    commandsPage: parsedCommandsPage.page,
   });
 }
 
@@ -4510,6 +4457,7 @@ const server = http.createServer(async (req, res) => {
             telegramRawMethod === "sendMessage" ||
             telegramRawMethod === "sendPhoto" ||
             telegramRawMethod === "sendChatAction" ||
+            telegramRawMethod === "editMessageText" ||
             telegramRawMethod === "answerCallbackQuery"
               ? telegramRawMethod
               : null;
@@ -4525,7 +4473,15 @@ const server = http.createServer(async (req, res) => {
           const finalBody: Record<string, unknown> = { ...telegramRawBody };
           if (telegramMethod !== "answerCallbackQuery") {
             finalBody.chat_id = to;
-            if (messageThreadId && !readPositiveInt(finalBody.message_thread_id)) {
+            const supportsThreadId =
+              telegramMethod === "sendMessage" ||
+              telegramMethod === "sendPhoto" ||
+              telegramMethod === "sendChatAction";
+            if (
+              supportsThreadId &&
+              messageThreadId &&
+              !readPositiveInt(finalBody.message_thread_id)
+            ) {
               finalBody.message_thread_id = messageThreadId;
             }
           }

@@ -161,7 +161,7 @@ export function buildTelegramCallbackInboundEnvelope(params: {
   updateId: number;
   sessionKey: string;
   accountId: string;
-  commandBody: string;
+  rawBody: string;
   fromId: string;
   chatId: string;
   topicId?: number;
@@ -171,7 +171,6 @@ export function buildTelegramCallbackInboundEnvelope(params: {
   routeKey: string;
   callbackData: string;
   callbackQueryId?: string;
-  commandsPage: number;
   rawCallbackQuery: unknown;
   rawMessage: unknown;
   rawUpdate: unknown;
@@ -190,7 +189,7 @@ export function buildTelegramCallbackInboundEnvelope(params: {
     },
     raw,
     sessionKey: params.sessionKey,
-    body: params.commandBody,
+    body: params.rawBody,
     from: `telegram:${params.fromId}`,
     to: `telegram:${params.chatId}`,
     accountId: params.accountId,
@@ -207,7 +206,6 @@ export function buildTelegramCallbackInboundEnvelope(params: {
       updateId: params.updateId,
       telegram: {
         callbackData: params.callbackData,
-        commandsPage: params.commandsPage,
         callbackQueryId: params.callbackQueryId,
         callbackMessageId: params.messageId,
         rawCallbackQuery: params.rawCallbackQuery,

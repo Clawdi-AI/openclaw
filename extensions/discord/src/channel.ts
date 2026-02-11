@@ -337,6 +337,56 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
       });
       return { channel: "discord", ...result };
     },
+    sendPayload: async ({ cfg, to, payload, accountId, deps, replyToId, threadId, sessionKey }) => {
+      if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
+          cfg,
+          channel: "discord",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text: payload.text ?? "",
+          mediaUrl: payload.mediaUrl,
+          mediaUrls: payload.mediaUrls,
+          replyToId,
+          threadId,
+          channelData:
+            typeof payload.channelData === "object" && payload.channelData !== null
+              ? payload.channelData
+              : undefined,
+        });
+        return { channel: "discord", ...result };
+      }
+      const send = deps?.sendDiscord ?? getDiscordRuntime().channel.discord.sendMessageDiscord;
+      const text = payload.text ?? "";
+      const mediaUrls = payload.mediaUrls?.length
+        ? payload.mediaUrls
+        : payload.mediaUrl
+          ? [payload.mediaUrl]
+          : [];
+
+      if (mediaUrls.length === 0) {
+        const result = await send(to, text, {
+          verbose: false,
+          replyTo: replyToId ?? undefined,
+          accountId: accountId ?? undefined,
+        });
+        return { channel: "discord", ...result };
+      }
+
+      let finalResult: Awaited<ReturnType<typeof send>> | undefined;
+      for (let i = 0; i < mediaUrls.length; i += 1) {
+        const mediaUrl = mediaUrls[i];
+        const caption = i === 0 ? text : "";
+        finalResult = await send(to, caption, {
+          verbose: false,
+          mediaUrl,
+          replyTo: replyToId ?? undefined,
+          accountId: accountId ?? undefined,
+        });
+      }
+      return { channel: "discord", ...(finalResult ?? { messageId: "unknown", channelId: to }) };
+    },
     sendPoll: async ({ cfg, to, poll, accountId, sessionKey }) => {
       if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
         const result = await sendViaMux({

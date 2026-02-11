@@ -72,7 +72,7 @@ describe("mux envelope helpers", () => {
       updateId: 470,
       sessionKey: "tg:group:-100555",
       accountId: "default",
-      commandBody: "/commands",
+      rawBody: "commands_page_2:main",
       fromId: "1234",
       chatId: "-100555",
       chatType: "group",
@@ -81,7 +81,6 @@ describe("mux envelope helpers", () => {
       routeKey: "telegram:default:chat:-100555",
       callbackData: "commands_page_2:main",
       callbackQueryId: "cbq-1",
-      commandsPage: 2,
       rawCallbackQuery: { id: "cbq-1" },
       rawMessage: { message_id: 777 },
       rawUpdate: { update_id: 470 },
@@ -89,7 +88,7 @@ describe("mux envelope helpers", () => {
 
     expect(envelope.eventId).toBe("tgcb:470");
     expect(envelope.event.kind).toBe("callback");
-    expect(envelope.body).toBe("/commands");
+    expect(envelope.body).toBe("commands_page_2:main");
     expect((envelope.channelData.telegram as { callbackData: string }).callbackData).toBe(
       "commands_page_2:main",
     );

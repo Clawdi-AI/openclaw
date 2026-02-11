@@ -22,6 +22,7 @@ type MuxSendRequest = {
   replyToId?: string | null;
   threadId?: string | number | null;
   channelData?: Record<string, unknown>;
+  raw?: Record<string, unknown>;
   poll?: PollInput;
 };
 
@@ -200,6 +201,7 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
     replyToId: params.replyToId ?? undefined,
     threadId: params.threadId ?? undefined,
     channelData: params.channelData,
+    raw: params.raw,
     poll: params.poll,
   };
 

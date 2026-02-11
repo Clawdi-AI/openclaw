@@ -74,3 +74,15 @@ USER.md
 mux-server/logs/
 phala-deploy/secrets/
 phala-deploy/.onboarding/
+
+# local mux e2e state
+phala-deploy/local-mux-e2e/.env.local
+phala-deploy/local-mux-e2e/state/
+phala-deploy/backup/
+mux-server/data/
+
+# local operator env
+.global.env
+.project.env
+.rv.json
+.claude/
