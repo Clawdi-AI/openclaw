@@ -161,22 +161,6 @@ describe("/commands on mux telegram", () => {
     expect(buttons).toBeDefined();
     expect(buttons?.length).toBeGreaterThan(0);
   });
-
-  it("respects page requests from mux telegram callback metadata", async () => {
-    const params = buildParams("/commands", cfg, {
-      Provider: "telegram",
-      Surface: "mux",
-      ChannelData: {
-        telegram: {
-          commandsPage: 2,
-        },
-      },
-    });
-    const result = await handleCommands(params);
-    expect(result.shouldContinue).toBe(false);
-    expect(result.reply?.text).toContain("Commands (2/");
-    expect(result.reply?.text).toContain("/commands - List all slash commands.");
-  });
 });
 
 describe("/models command", () => {

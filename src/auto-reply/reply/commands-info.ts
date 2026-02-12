@@ -36,38 +36,11 @@ function resolveEffectiveSurface(params: Parameters<CommandHandler>[0]): string 
   return surface;
 }
 
-function readMuxTelegramCommandsPage(params: Parameters<CommandHandler>[0]): number | undefined {
-  if (params.ctx.Surface !== "mux" || params.ctx.Provider !== "telegram") {
-    return undefined;
-  }
-  const channelData =
-    params.ctx.ChannelData && typeof params.ctx.ChannelData === "object"
-      ? (params.ctx.ChannelData as Record<string, unknown>)
-      : undefined;
-  const telegramData =
-    channelData?.telegram && typeof channelData.telegram === "object"
-      ? (channelData.telegram as Record<string, unknown>)
-      : undefined;
-  const rawPage = telegramData?.commandsPage;
-  if (typeof rawPage === "number" && Number.isFinite(rawPage) && rawPage > 0) {
-    return Math.trunc(rawPage);
-  }
-  if (typeof rawPage === "string" && rawPage.trim()) {
-    const parsed = Number.parseInt(rawPage.trim(), 10);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
-    }
-  }
-  return undefined;
-}
-
 export const handleCommandsListCommand: CommandHandler = async (params, allowTextCommands) => {
   if (!allowTextCommands) {
     return null;
   }
-  const requestedPage = readMuxTelegramCommandsPage(params);
-  const isCommandsRequest = params.command.commandBodyNormalized === "/commands";
-  if (!isCommandsRequest && requestedPage === undefined) {
+  if (params.command.commandBodyNormalized !== "/commands") {
     return null;
   }
   if (!params.command.isAuthorizedSender) {
@@ -86,7 +59,7 @@ export const handleCommandsListCommand: CommandHandler = async (params, allowTex
 
   if (surface === "telegram") {
     const result = buildCommandsMessagePaginated(params.cfg, skillCommands, {
-      page: requestedPage ?? 1,
+      page: 1,
       surface,
     });
 
