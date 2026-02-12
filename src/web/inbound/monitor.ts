@@ -10,7 +10,7 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { saveMediaBuffer } from "../../media/store.js";
 import { jidToE164, resolveJidToE164 } from "../../utils.js";
 import { createWaSocket, getStatusCode, waitForWaConnection } from "../session.js";
-import { checkInboundAccessControl } from "./access-control.js";
+import { checkInboundAccessControl, type InboundAccessControlResult } from "./access-control.js";
 import { isRecentInboundMessage } from "./dedupe.js";
 import {
   describeReplyContext,
@@ -27,8 +27,25 @@ export async function monitorWebInbox(options: {
   accountId: string;
   authDir: string;
   onMessage: (msg: WebInboundMessage) => Promise<void>;
-  /** Bypass OpenClaw sender policy checks (pairing/allowlist). Still drops outbound fromMe echoes. */
-  bypassAccessControl?: boolean;
+  /**
+   * Optional access-control resolver override.
+   * Defaults to checkInboundAccessControl.
+   */
+  resolveAccessControl?: (params: {
+    accountId: string;
+    from: string;
+    selfE164: string | null;
+    senderE164: string | null;
+    group: boolean;
+    pushName?: string;
+    isFromMe: boolean;
+    messageTimestampMs?: number;
+    connectedAtMs?: number;
+    sock: {
+      sendMessage: (jid: string, content: { text: string }) => Promise<unknown>;
+    };
+    remoteJid: string;
+  }) => Promise<InboundAccessControlResult>;
   mediaMaxMb?: number;
   /** Send read receipts for incoming messages (default true). */
   sendReadReceipts?: boolean;
@@ -189,7 +206,6 @@ export async function monitorWebInbox(options: {
           ? await resolveInboundJid(participantJid)
           : null
         : from;
-      const isSamePhone = from === selfE164;
 
       let groupSubject: string | undefined;
       let groupParticipants: string[] | undefined;
@@ -202,27 +218,20 @@ export async function monitorWebInbox(options: {
         ? Number(msg.messageTimestamp) * 1000
         : undefined;
 
-      const access = options.bypassAccessControl
-        ? {
-            // Keep outbound echoes out of inbound routing to avoid feedback loops.
-            allowed: !(Boolean(msg.key?.fromMe) && !isSamePhone),
-            shouldMarkRead: true,
-            isSelfChat: false,
-            resolvedAccountId: options.accountId,
-          }
-        : await checkInboundAccessControl({
-            accountId: options.accountId,
-            from,
-            selfE164,
-            senderE164,
-            group,
-            pushName: msg.pushName ?? undefined,
-            isFromMe: Boolean(msg.key?.fromMe),
-            messageTimestampMs,
-            connectedAtMs,
-            sock: { sendMessage: (jid, content) => sock.sendMessage(jid, content) },
-            remoteJid,
-          });
+      const resolveAccessControl = options.resolveAccessControl ?? checkInboundAccessControl;
+      const access = await resolveAccessControl({
+        accountId: options.accountId,
+        from,
+        selfE164,
+        senderE164,
+        group,
+        pushName: msg.pushName ?? undefined,
+        isFromMe: Boolean(msg.key?.fromMe),
+        messageTimestampMs,
+        connectedAtMs,
+        sock: { sendMessage: (jid, content) => sock.sendMessage(jid, content) },
+        remoteJid,
+      });
       if (!access.allowed) {
         continue;
       }

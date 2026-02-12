@@ -68,6 +68,7 @@ type PairingTokenRow = {
   tenant_id: string;
   channel: string;
   session_key: string | null;
+  route_key: string | null;
 };
 
 type ActiveBindingRow = {
@@ -90,6 +91,12 @@ type SessionRouteBindingRow = {
 type ActiveBindingLookupRow = {
   tenant_id: string;
   binding_id: string;
+};
+
+type LiveBindingLookupRow = {
+  tenant_id: string;
+  binding_id: string;
+  status: string;
 };
 
 type ActiveDiscordBindingRow = {
@@ -190,9 +197,28 @@ type WebRuntimeModules = {
     accountId: string;
     authDir: string;
     onMessage: (msg: WebInboundMessage) => Promise<void>;
+    resolveAccessControl?: (params: {
+      accountId: string;
+      from: string;
+      selfE164: string | null;
+      senderE164: string | null;
+      group: boolean;
+      pushName?: string;
+      isFromMe: boolean;
+      messageTimestampMs?: number;
+      connectedAtMs?: number;
+      sock: {
+        sendMessage: (jid: string, content: { text: string }) => Promise<unknown>;
+      };
+      remoteJid: string;
+    }) => Promise<{
+      allowed: boolean;
+      shouldMarkRead: boolean;
+      isSelfChat: boolean;
+      resolvedAccountId: string;
+    }>;
     mediaMaxMb?: number;
     sendReadReceipts?: boolean;
-    bypassAccessControl?: boolean;
     debounceMs?: number;
     shouldDebounce?: (msg: WebInboundMessage) => boolean;
   }) => Promise<WebMonitorListener>;
@@ -442,6 +468,13 @@ const pairingInvalidText =
 const unpairedHintText =
   readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT) ||
   "This chat is not paired yet. Open your dashboard and use a new pairing link.";
+const requestBodyMaxBytes = (() => {
+  const parsed = Number(process.env.MUX_MAX_BODY_BYTES || 10 * 1024 * 1024);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 10 * 1024 * 1024;
+  }
+  return Math.trunc(parsed);
+})();
 
 if (telegramInboundEnabled && !telegramBotToken?.trim()) {
   console.error("TELEGRAM_BOT_TOKEN is required when MUX_TELEGRAM_INBOUND_ENABLED=true");
@@ -572,9 +605,31 @@ const stmtClaimPairingCode = db.prepare(`
   WHERE code = ? AND claimed_by_tenant_id IS NULL AND expires_at_ms > ?
 `);
 
+const stmtRevertPairingCodeClaim = db.prepare(`
+  UPDATE pairing_codes
+  SET claimed_by_tenant_id = NULL, claimed_at_ms = NULL
+  WHERE code = ? AND claimed_by_tenant_id = ?
+`);
+
 const stmtDeleteExpiredPairingTokens = db.prepare(`
   DELETE FROM pairing_tokens
   WHERE expires_at_ms <= ?
+`);
+
+const stmtDeactivateStaleDiscordPendingBindings = db.prepare(`
+  UPDATE bindings
+  SET status = 'inactive', updated_at_ms = ?
+  WHERE channel = 'discord'
+    AND status = 'pending'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pairing_tokens pt
+      WHERE pt.tenant_id = bindings.tenant_id
+        AND pt.channel = 'discord'
+        AND pt.route_key = bindings.route_key
+        AND pt.consumed_at_ms IS NULL
+        AND pt.expires_at_ms > ?
+    )
 `);
 
 const stmtInsertPairingToken = db.prepare(`
@@ -583,17 +638,18 @@ const stmtInsertPairingToken = db.prepare(`
     tenant_id,
     channel,
     session_key,
+    route_key,
     created_at_ms,
     expires_at_ms,
     consumed_at_ms,
     consumed_binding_id,
     consumed_route_key
   )
-  VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+  VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
 `);
 
 const stmtSelectActivePairingTokenByHash = db.prepare(`
-  SELECT tenant_id, channel, session_key
+  SELECT tenant_id, channel, session_key, route_key
   FROM pairing_tokens
   WHERE token_hash = ? AND consumed_at_ms IS NULL AND expires_at_ms > ?
   LIMIT 1
@@ -704,6 +760,15 @@ const stmtSelectActiveBindingByRouteKey = db.prepare(`
   SELECT tenant_id, binding_id
   FROM bindings
   WHERE channel = ? AND route_key = ? AND status = 'active'
+  ORDER BY updated_at_ms DESC
+  LIMIT 1
+`);
+
+const stmtSelectLiveBindingByRouteKey = db.prepare(`
+  SELECT tenant_id, binding_id, status
+  FROM bindings
+  WHERE channel = ? AND route_key = ? AND status IN ('active', 'pending')
+  ORDER BY updated_at_ms DESC
   LIMIT 1
 `);
 
@@ -854,6 +919,37 @@ function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | nul
   }
   const timeoutMs = readPositiveInt(row?.inbound_timeout_ms) ?? 15_000;
   return { url, token, timeoutMs };
+}
+
+function resolveLiveBindingByRouteKey(
+  channel: string,
+  routeKey: string,
+): LiveBindingLookupRow | null {
+  const row = stmtSelectLiveBindingByRouteKey.get(channel, routeKey) as
+    | LiveBindingLookupRow
+    | undefined;
+  if (!row?.tenant_id || !row?.binding_id || !row?.status) {
+    return null;
+  }
+  return {
+    tenant_id: String(row.tenant_id),
+    binding_id: String(row.binding_id),
+    status: String(row.status),
+  };
+}
+
+function isRouteBoundByAnotherTenant(params: {
+  channel: string;
+  routeKey: string;
+  tenantId: string;
+}): boolean {
+  const row = resolveLiveBindingByRouteKey(params.channel, params.routeKey);
+  return Boolean(row && row.tenant_id !== params.tenantId);
+}
+
+function isSqliteUniqueConstraintError(error: unknown): boolean {
+  const text = String(error);
+  return text.includes("SQLITE_CONSTRAINT") && text.includes("UNIQUE");
 }
 
 function countActiveTenantInboundTargets(): number {
@@ -1020,6 +1116,7 @@ function initializeDatabase(database: DatabaseSync) {
       tenant_id TEXT NOT NULL,
       channel TEXT NOT NULL,
       session_key TEXT,
+      route_key TEXT,
       created_at_ms INTEGER NOT NULL,
       expires_at_ms INTEGER NOT NULL,
       consumed_at_ms INTEGER,
@@ -1040,6 +1137,11 @@ function initializeDatabase(database: DatabaseSync) {
       updated_at_ms INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_bindings_tenant_channel ON bindings(tenant_id, channel);
+    CREATE INDEX IF NOT EXISTS idx_bindings_channel_route_status
+      ON bindings(channel, route_key, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_bindings_channel_route_live_unique
+      ON bindings(channel, route_key)
+      WHERE status IN ('active', 'pending');
 
     CREATE TABLE IF NOT EXISTS session_routes (
       tenant_id TEXT NOT NULL,
@@ -1099,6 +1201,7 @@ function initializeDatabase(database: DatabaseSync) {
       ON whatsapp_inbound_queue(next_attempt_at_ms, id);
   `);
   ensureTenantInboundTargetColumns(database);
+  ensurePairingTokenColumns(database);
 }
 
 function ensureTenantInboundTargetColumns(database: DatabaseSync) {
@@ -1112,6 +1215,16 @@ function ensureTenantInboundTargetColumns(database: DatabaseSync) {
   }
   if (!columnNames.has("inbound_timeout_ms")) {
     database.exec("ALTER TABLE tenants ADD COLUMN inbound_timeout_ms INTEGER");
+  }
+}
+
+function ensurePairingTokenColumns(database: DatabaseSync) {
+  const rows = database.prepare("PRAGMA table_info(pairing_tokens)").all() as Array<{
+    name?: unknown;
+  }>;
+  const columnNames = new Set(rows.map((row) => (typeof row.name === "string" ? row.name : "")));
+  if (!columnNames.has("route_key")) {
+    database.exec("ALTER TABLE pairing_tokens ADD COLUMN route_key TEXT");
   }
 }
 
@@ -1217,16 +1330,41 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
+class HttpBodyError extends Error {
+  readonly statusCode: number;
+
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.statusCode = statusCode;
+    this.name = "HttpBodyError";
+  }
+}
+
 async function readBody<T extends object>(req: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let tooLarge = false;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const chunkBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += chunkBuffer.length;
+    if (totalBytes > requestBodyMaxBytes) {
+      tooLarge = true;
+      continue;
+    }
+    chunks.push(chunkBuffer);
+  }
+  if (tooLarge) {
+    throw new HttpBodyError(413, "payload too large");
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) {
     return {} as T;
   }
-  return JSON.parse(raw) as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new HttpBodyError(400, "invalid JSON body");
+  }
 }
 
 function requireTelegramBotToken(): string {
@@ -1556,6 +1694,27 @@ function hashPairingToken(token: string): string {
 
 function purgeExpiredPairingTokens(nowMs: number) {
   stmtDeleteExpiredPairingTokens.run(nowMs);
+  stmtDeactivateStaleDiscordPendingBindings.run(nowMs, nowMs);
+}
+
+function runTokenClaimTransaction<T>(claim: () => T | null): T | null {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = claim();
+    if (result === null) {
+      db.exec("ROLLBACK");
+      return null;
+    }
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Ignore rollback failures if transaction already closed.
+    }
+    throw error;
+  }
 }
 
 function issuePairingTokenForTenant(params: {
@@ -1612,15 +1771,25 @@ function issuePairingTokenForTenant(params: {
       };
     }
     if (!existing?.binding_id) {
-      stmtInsertPendingBinding.run(
-        `bind_${randomUUID()}`,
-        params.tenant.id,
-        "discord",
-        "dm",
-        routeKey,
-        nowMs,
-        nowMs,
-      );
+      try {
+        stmtInsertPendingBinding.run(
+          `bind_${randomUUID()}`,
+          params.tenant.id,
+          "discord",
+          "dm",
+          routeKey,
+          nowMs,
+          nowMs,
+        );
+      } catch (error) {
+        if (isSqliteUniqueConstraintError(error)) {
+          return {
+            statusCode: 409,
+            payload: { ok: false, error: "route already bound" },
+          };
+        }
+        throw error;
+      }
     }
     routeKeyForAudit = routeKey;
   }
@@ -1630,6 +1799,7 @@ function issuePairingTokenForTenant(params: {
     params.tenant.id,
     params.channel,
     sessionKey,
+    routeKeyForAudit ?? null,
     nowMs,
     expiresAtMs,
   );
@@ -2367,6 +2537,15 @@ function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?
   if (row.claimed_by_tenant_id) {
     return { statusCode: 409, payload: { ok: false, error: "pairing code already claimed" } };
   }
+  if (
+    isRouteBoundByAnotherTenant({
+      channel: String(row.channel),
+      routeKey: String(row.route_key),
+      tenantId: tenant.id,
+    })
+  ) {
+    return { statusCode: 409, payload: { ok: false, error: "route already bound" } };
+  }
 
   const claimResult = stmtClaimPairingCode.run(tenant.id, now, code, now);
   if (claimResult.changes === 0) {
@@ -2381,15 +2560,23 @@ function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?
   }
 
   const bindingId = `bind_${randomUUID()}`;
-  stmtInsertBinding.run(
-    bindingId,
-    tenant.id,
-    String(row.channel),
-    String(row.scope),
-    String(row.route_key),
-    now,
-    now,
-  );
+  try {
+    stmtInsertBinding.run(
+      bindingId,
+      tenant.id,
+      String(row.channel),
+      String(row.scope),
+      String(row.route_key),
+      now,
+      now,
+    );
+  } catch (error) {
+    if (isSqliteUniqueConstraintError(error)) {
+      stmtRevertPairingCodeClaim.run(code, tenant.id);
+      return { statusCode: 409, payload: { ok: false, error: "route already bound" } };
+    }
+    throw error;
+  }
   const resolvedSessionKey = readNonEmptyString(sessionKey);
   if (resolvedSessionKey) {
     stmtUpsertSessionRoute.run(
@@ -2419,52 +2606,69 @@ function claimTelegramPairingToken(params: {
   chatId: string;
   topicId?: number;
 }): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
-  const now = Date.now();
-  purgeExpiredPairingTokens(now);
-  const tokenHash = hashPairingToken(params.token);
-  const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
-  if (!row || String(row.channel) !== "telegram") {
-    return null;
-  }
+  return runTokenClaimTransaction(() => {
+    const now = Date.now();
+    purgeExpiredPairingTokens(now);
+    const tokenHash = hashPairingToken(params.token);
+    const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+      | PairingTokenRow
+      | undefined;
+    if (!row || String(row.channel) !== "telegram") {
+      return null;
+    }
 
-  const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
-  if (consumeResult.changes === 0) {
-    return null;
-  }
+    const tenantId = String(row.tenant_id);
+    const routeKey = buildTelegramRouteKey(params.chatId, params.topicId);
+    if (isRouteBoundByAnotherTenant({ channel: "telegram", routeKey, tenantId })) {
+      return null;
+    }
 
-  const tenantId = String(row.tenant_id);
-  const routeKey = buildTelegramRouteKey(params.chatId, params.topicId);
-  const existing = stmtSelectActiveBindingByTenantAndRoute.get(tenantId, "telegram", routeKey) as
-    | ExistingBindingRow
-    | undefined;
+    const existing = stmtSelectActiveBindingByTenantAndRoute.get(tenantId, "telegram", routeKey) as
+      | ExistingBindingRow
+      | undefined;
 
-  const bindingId = (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
-  if (!existing?.binding_id) {
-    stmtInsertBinding.run(
-      bindingId,
+    const bindingId =
+      (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
+    if (!existing?.binding_id) {
+      try {
+        stmtInsertBinding.run(
+          bindingId,
+          tenantId,
+          "telegram",
+          params.topicId ? "topic" : "chat",
+          routeKey,
+          now,
+          now,
+        );
+      } catch (error) {
+        if (isSqliteUniqueConstraintError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    }
+
+    const preferredSessionKey = readNonEmptyString(row.session_key);
+    const sessionKey =
+      preferredSessionKey || deriveTelegramSessionKey(params.chatId, params.topicId);
+    stmtUpsertSessionRoute.run(
       tenantId,
       "telegram",
-      params.topicId ? "topic" : "chat",
-      routeKey,
-      now,
+      sessionKey,
+      bindingId,
+      JSON.stringify({ routeKey }),
       now,
     );
-  }
 
-  const preferredSessionKey = readNonEmptyString(row.session_key);
-  const sessionKey = preferredSessionKey || deriveTelegramSessionKey(params.chatId, params.topicId);
-  stmtUpsertSessionRoute.run(
-    tenantId,
-    "telegram",
-    sessionKey,
-    bindingId,
-    JSON.stringify({ routeKey }),
-    now,
-  );
+    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+    if (consumeResult.changes === 0) {
+      return null;
+    }
 
-  stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
-  writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey }, now);
-  return { tenantId, bindingId, routeKey, sessionKey };
+    stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+    writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey }, now);
+    return { tenantId, bindingId, routeKey, sessionKey };
+  });
 }
 
 function claimDiscordPairingToken(params: {
@@ -2474,54 +2678,61 @@ function claimDiscordPairingToken(params: {
   routeKey: string;
   channelId: string;
 }): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
-  const now = Date.now();
-  purgeExpiredPairingTokens(now);
-  const tokenHash = hashPairingToken(params.token);
-  const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
-  if (!row || String(row.channel) !== "discord" || String(row.tenant_id) !== params.tenantId) {
-    return null;
-  }
+  return runTokenClaimTransaction(() => {
+    const now = Date.now();
+    purgeExpiredPairingTokens(now);
+    const tokenHash = hashPairingToken(params.token);
+    const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+      | PairingTokenRow
+      | undefined;
+    if (!row || String(row.channel) !== "discord" || String(row.tenant_id) !== params.tenantId) {
+      return null;
+    }
+    if (readNonEmptyString(row.route_key) !== params.routeKey) {
+      return null;
+    }
 
-  const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
-  if (consumeResult.changes === 0) {
-    return null;
-  }
+    const activateResult = stmtActivatePendingBinding.run(now, params.bindingId, params.tenantId);
+    if (activateResult.changes === 0) {
+      return null;
+    }
 
-  const activateResult = stmtActivatePendingBinding.run(now, params.bindingId, params.tenantId);
-  if (activateResult.changes === 0) {
-    return null;
-  }
+    const route = parseDiscordRouteKey(params.routeKey);
+    if (!route) {
+      return null;
+    }
 
-  const route = parseDiscordRouteKey(params.routeKey);
-  if (!route) {
-    return null;
-  }
+    const preferredSessionKey = readNonEmptyString(row.session_key);
+    const sessionKey =
+      preferredSessionKey || deriveDiscordSessionKey({ route, channelId: params.channelId });
+    stmtUpsertSessionRoute.run(
+      params.tenantId,
+      "discord",
+      sessionKey,
+      params.bindingId,
+      JSON.stringify({ routeKey: params.routeKey, channelId: params.channelId }),
+      now,
+    );
 
-  const preferredSessionKey = readNonEmptyString(row.session_key);
-  const sessionKey =
-    preferredSessionKey || deriveDiscordSessionKey({ route, channelId: params.channelId });
-  stmtUpsertSessionRoute.run(
-    params.tenantId,
-    "discord",
-    sessionKey,
-    params.bindingId,
-    JSON.stringify({ routeKey: params.routeKey, channelId: params.channelId }),
-    now,
-  );
+    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+    if (consumeResult.changes === 0) {
+      return null;
+    }
 
-  stmtAttachPairingTokenBinding.run(params.bindingId, params.routeKey, tokenHash);
-  writeAuditLog(
-    params.tenantId,
-    "pairing_token_claimed",
-    { bindingId: params.bindingId, routeKey: params.routeKey },
-    now,
-  );
-  return {
-    tenantId: params.tenantId,
-    bindingId: params.bindingId,
-    routeKey: params.routeKey,
-    sessionKey,
-  };
+    stmtAttachPairingTokenBinding.run(params.bindingId, params.routeKey, tokenHash);
+    writeAuditLog(
+      params.tenantId,
+      "pairing_token_claimed",
+      { bindingId: params.bindingId, routeKey: params.routeKey },
+      now,
+    );
+    return {
+      tenantId: params.tenantId,
+      bindingId: params.bindingId,
+      routeKey: params.routeKey,
+      sessionKey,
+    };
+  });
 }
 
 function claimWhatsAppPairingToken(params: {
@@ -2530,56 +2741,72 @@ function claimWhatsAppPairingToken(params: {
   accountId: string;
   chatType: "direct" | "group";
 }): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
-  const now = Date.now();
-  purgeExpiredPairingTokens(now);
-  const tokenHash = hashPairingToken(params.token);
-  const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
-  if (!row || String(row.channel) !== "whatsapp") {
-    return null;
-  }
+  return runTokenClaimTransaction(() => {
+    const now = Date.now();
+    purgeExpiredPairingTokens(now);
+    const tokenHash = hashPairingToken(params.token);
+    const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+      | PairingTokenRow
+      | undefined;
+    if (!row || String(row.channel) !== "whatsapp") {
+      return null;
+    }
 
-  const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
-  if (consumeResult.changes === 0) {
-    return null;
-  }
+    const tenantId = String(row.tenant_id);
+    const routeKey = buildWhatsAppRouteKey(params.chatJid, params.accountId);
+    if (isRouteBoundByAnotherTenant({ channel: "whatsapp", routeKey, tenantId })) {
+      return null;
+    }
 
-  const tenantId = String(row.tenant_id);
-  const routeKey = buildWhatsAppRouteKey(params.chatJid, params.accountId);
-  const existing = stmtSelectActiveBindingByTenantAndRoute.get(tenantId, "whatsapp", routeKey) as
-    | ExistingBindingRow
-    | undefined;
-  const bindingId = (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
-  if (!existing?.binding_id) {
-    stmtInsertBinding.run(
-      bindingId,
+    const existing = stmtSelectActiveBindingByTenantAndRoute.get(tenantId, "whatsapp", routeKey) as
+      | ExistingBindingRow
+      | undefined;
+    const bindingId =
+      (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
+    if (!existing?.binding_id) {
+      try {
+        stmtInsertBinding.run(
+          bindingId,
+          tenantId,
+          "whatsapp",
+          params.chatType === "group" ? "group" : "chat",
+          routeKey,
+          now,
+          now,
+        );
+      } catch (error) {
+        if (isSqliteUniqueConstraintError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    }
+
+    const preferredSessionKey = readNonEmptyString(row.session_key);
+    const sessionKey =
+      preferredSessionKey || deriveWhatsAppSessionKey(params.chatJid, params.chatType);
+    stmtUpsertSessionRoute.run(
       tenantId,
       "whatsapp",
-      params.chatType === "group" ? "group" : "chat",
-      routeKey,
-      now,
+      sessionKey,
+      bindingId,
+      JSON.stringify({
+        routeKey,
+        accountId: params.accountId,
+        chatJid: params.chatJid,
+      }),
       now,
     );
-  }
 
-  const preferredSessionKey = readNonEmptyString(row.session_key);
-  const sessionKey =
-    preferredSessionKey || deriveWhatsAppSessionKey(params.chatJid, params.chatType);
-  stmtUpsertSessionRoute.run(
-    tenantId,
-    "whatsapp",
-    sessionKey,
-    bindingId,
-    JSON.stringify({
-      routeKey,
-      accountId: params.accountId,
-      chatJid: params.chatJid,
-    }),
-    now,
-  );
+    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+    if (consumeResult.changes === 0) {
+      return null;
+    }
 
-  stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
-  writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey }, now);
-  return { tenantId, bindingId, routeKey, sessionKey };
+    stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+    writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey }, now);
+    return { tenantId, bindingId, routeKey, sessionKey };
+  });
 }
 
 async function sendDiscordPairingNotice(params: { channelId: string; text: string }) {
@@ -3573,6 +3800,7 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
           messageId,
           channelId,
         });
+        lastAckedMessageId = messageId;
         continue;
       }
       try {
@@ -4098,8 +4326,18 @@ async function runWhatsAppInboundLoop() {
         verbose: false,
         accountId: whatsappAccountId,
         authDir: whatsappAuthDir,
-        // Mux owns pairing and tenant routing. Keep inbox transport raw here.
-        bypassAccessControl: true,
+        // Mux owns pairing and tenant routing. Keep inbox transport raw here
+        // while still dropping outbound fromMe echoes to avoid loops.
+        resolveAccessControl: async (params) => {
+          const isSamePhone = params.from === params.selfE164;
+          const isOutboundEcho = params.isFromMe && !isSamePhone;
+          return {
+            allowed: !isOutboundEcho,
+            shouldMarkRead: true,
+            isSelfChat: false,
+            resolvedAccountId: params.accountId,
+          };
+        },
         onMessage: async (message) => {
           enqueueWhatsAppInboundMessage(message);
         },
@@ -4793,6 +5031,10 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(sendResult.statusCode, { "content-type": "application/json; charset=utf-8" });
     res.end(sendResult.bodyText);
   } catch (error) {
+    if (error instanceof HttpBodyError) {
+      sendJson(res, error.statusCode, { ok: false, error: error.message });
+      return;
+    }
     log({ type: "relay_error", error: String(error) });
     sendJson(res, 500, { ok: false, error: String(error) });
   }

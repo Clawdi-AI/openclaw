@@ -6,22 +6,15 @@ import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
 import { normalizeChannelId } from "../channels/plugins/index.js";
 import {
   asMuxRecord,
-  buildTelegramRawEditMessageText,
-  normalizeMuxBaseUrl,
   normalizeMuxInboundAttachments,
   readMuxNonEmptyString,
   readMuxOptionalNumber,
-  readMuxPositiveInt,
   resolveMuxThreadId,
   toMuxInboundPayload,
-  type MuxInboundPayload,
 } from "../channels/plugins/mux-envelope.js";
 import { sendTypingViaMux } from "../channels/plugins/outbound/mux.js";
 import { loadConfig } from "../config/config.js";
-import {
-  resolveTelegramCallbackAction,
-  type TelegramCallbackButtons,
-} from "../telegram/callback-actions.js";
+import { warn } from "../globals.js";
 import { parseMessageWithAttachments } from "./chat-attachments.js";
 import { readJsonBody } from "./hooks.js";
 
@@ -40,96 +33,6 @@ function resolveBearerToken(req: IncomingMessage): string | null {
   }
   const match = auth.match(/^Bearer\s+(.+)$/i);
   return match?.[1]?.trim() || null;
-}
-
-function resolveTelegramCallbackPayload(params: {
-  payload: MuxInboundPayload;
-  channelData: Record<string, unknown> | undefined;
-}): {
-  data: string;
-  chatId: string;
-  callbackMessageId: number;
-  messageThreadId?: number;
-  isGroup: boolean;
-  isForum: boolean;
-  accountId?: string;
-} | null {
-  const eventKind = readMuxNonEmptyString(params.payload.event?.kind);
-  if (eventKind !== "callback") {
-    return null;
-  }
-  const telegramData = asMuxRecord(params.channelData?.telegram);
-  const callbackData = readMuxNonEmptyString(telegramData?.callbackData);
-  if (!callbackData) {
-    return null;
-  }
-  const callbackMessageId = readMuxPositiveInt(telegramData?.callbackMessageId);
-  if (!callbackMessageId) {
-    return null;
-  }
-
-  const chatIdFromData = readMuxNonEmptyString(params.channelData?.chatId);
-  const chatIdFromTo = readMuxNonEmptyString(params.payload.to)?.replace(/^telegram:/i, "");
-  const chatId = chatIdFromData ?? chatIdFromTo;
-  if (!chatId) {
-    return null;
-  }
-
-  const rawMessage = asMuxRecord(telegramData?.rawMessage);
-  const rawChat = asMuxRecord(rawMessage?.chat);
-  const fallbackThreadId = resolveMuxThreadId(params.payload.threadId, params.channelData);
-  const messageThreadId =
-    readMuxPositiveInt(rawMessage?.message_thread_id) ??
-    (typeof fallbackThreadId === "number"
-      ? fallbackThreadId
-      : readMuxPositiveInt(fallbackThreadId));
-  return {
-    data: callbackData,
-    chatId,
-    callbackMessageId,
-    messageThreadId,
-    isGroup: (readMuxNonEmptyString(params.payload.chatType) ?? "direct") !== "direct",
-    isForum: rawChat?.is_forum === true,
-    accountId: readMuxNonEmptyString(params.payload.accountId),
-  };
-}
-
-async function sendTelegramEditViaMux(params: {
-  baseUrl: string;
-  token: string;
-  sessionKey: string;
-  accountId?: string;
-  messageId: number;
-  text: string;
-  buttons: TelegramCallbackButtons;
-}) {
-  const telegramEdit = buildTelegramRawEditMessageText({
-    messageId: params.messageId,
-    text: params.text,
-    buttons: params.buttons,
-  });
-  const response = await fetch(`${params.baseUrl}/v1/mux/outbound/send`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.token}`,
-      "Content-Type": "application/json; charset=utf-8",
-    },
-    body: JSON.stringify({
-      channel: "telegram",
-      sessionKey: params.sessionKey,
-      accountId: params.accountId,
-      raw: {
-        telegram: telegramEdit,
-      },
-    }),
-  });
-  if (response.ok) {
-    return;
-  }
-  const detail = await response.text();
-  throw new Error(
-    `mux outbound edit failed (${response.status}): ${detail || response.statusText}`,
-  );
 }
 
 async function parseInboundImages(params: {
@@ -216,80 +119,17 @@ export async function handleMuxInboundHttpRequest(
     sendJson(res, 400, { ok: false, error: "to required" });
     return true;
   }
-  const callbackPayload =
-    channel === "telegram" ? resolveTelegramCallbackPayload({ payload, channelData }) : null;
-  if (!rawMessage.trim() && attachments.length === 0 && !callbackPayload) {
+  if (!rawMessage.trim() && attachments.length === 0) {
     sendJson(res, 400, { ok: false, error: "body or attachment required" });
     return true;
   }
 
-  let inboundBody = rawMessage;
-  if (callbackPayload) {
-    try {
-      const callbackAction = await resolveTelegramCallbackAction({
-        cfg,
-        accountId: callbackPayload.accountId,
-        data: callbackPayload.data,
-        chatId: callbackPayload.chatId,
-        isGroup: callbackPayload.isGroup,
-        isForum: callbackPayload.isForum,
-        messageThreadId: callbackPayload.messageThreadId,
-      });
-      if (callbackAction.kind === "noop") {
-        sendJson(res, 202, {
-          ok: true,
-          eventId: readMuxNonEmptyString(payload.eventId) ?? messageId,
-        });
-        return true;
-      }
-      if (callbackAction.kind === "edit") {
-        const muxBaseUrl = normalizeMuxBaseUrl(endpointCfg.baseUrl);
-        if (!muxBaseUrl || !expectedToken) {
-          throw new Error(
-            "gateway.http.endpoints.mux.baseUrl and gateway.http.endpoints.mux.token are required",
-          );
-        }
-        await sendTelegramEditViaMux({
-          baseUrl: muxBaseUrl,
-          token: expectedToken,
-          sessionKey,
-          accountId: callbackPayload.accountId,
-          messageId: callbackPayload.callbackMessageId,
-          text: callbackAction.text,
-          buttons: callbackAction.buttons,
-        });
-        sendJson(res, 202, {
-          ok: true,
-          eventId: readMuxNonEmptyString(payload.eventId) ?? messageId,
-        });
-        return true;
-      }
-      inboundBody = callbackAction.text;
-    } catch (err) {
-      sendJson(res, 500, { ok: false, error: String(err) });
-      return true;
-    }
-  }
-
-  let parsedImages: ChatImageContent[] = [];
-  try {
-    parsedImages = await parseInboundImages({
-      message: inboundBody,
-      attachments,
-      // Keep request handling resilient when non-image attachments are provided.
-      logWarn: () => {},
-    });
-  } catch (err) {
-    sendJson(res, 400, { ok: false, error: String(err) });
-    return true;
-  }
-
   const ctx: MsgContext = {
-    Body: inboundBody,
-    BodyForAgent: inboundBody,
-    BodyForCommands: inboundBody,
-    RawBody: inboundBody,
-    CommandBody: inboundBody,
+    Body: rawMessage,
+    BodyForAgent: rawMessage,
+    BodyForCommands: rawMessage,
+    RawBody: rawMessage,
+    CommandBody: rawMessage,
     SessionKey: sessionKey,
     From: readMuxNonEmptyString(payload.from),
     To: originatingTo,
@@ -306,7 +146,20 @@ export async function handleMuxInboundHttpRequest(
     CommandAuthorized: true,
   };
 
-  try {
+  const dispatchPromise = (async () => {
+    let parsedImages: ChatImageContent[] = [];
+    try {
+      parsedImages = await parseInboundImages({
+        message: rawMessage,
+        attachments,
+        // Keep request handling resilient when non-image attachments are provided.
+        logWarn: () => {},
+      });
+    } catch (err) {
+      warn(`mux inbound attachment parse failed messageId=${messageId}: ${String(err)}`);
+      return;
+    }
+
     let markDispatchIdle: (() => void) | undefined;
     const typingChannel =
       channel === "telegram" || channel === "discord" || channel === "whatsapp" ? channel : null;
@@ -332,27 +185,31 @@ export async function handleMuxInboundHttpRequest(
         // route-reply errors are surfaced in dispatch flow and logs.
       },
     });
-    await dispatchInboundMessage({
-      ctx,
-      cfg,
-      dispatcher,
-      replyOptions: {
-        ...(parsedImages.length > 0 ? { images: parsedImages } : {}),
-        ...(onReplyStart ? { onReplyStart } : {}),
-        onTypingController: (typing) => {
-          markDispatchIdle = () => typing.markDispatchIdle();
+    try {
+      await dispatchInboundMessage({
+        ctx,
+        cfg,
+        dispatcher,
+        replyOptions: {
+          ...(parsedImages.length > 0 ? { images: parsedImages } : {}),
+          ...(onReplyStart ? { onReplyStart } : {}),
+          onTypingController: (typing) => {
+            markDispatchIdle = () => typing.markDispatchIdle();
+          },
         },
-      },
-    });
-    await dispatcher.waitForIdle();
-    markDispatchIdle?.();
-    sendJson(res, 202, {
-      ok: true,
-      eventId: readMuxNonEmptyString(payload.eventId) ?? messageId,
-    });
-    return true;
-  } catch (err) {
-    sendJson(res, 500, { ok: false, error: String(err) });
-    return true;
-  }
+      });
+      await dispatcher.waitForIdle();
+    } catch (err) {
+      warn(`mux inbound dispatch failed messageId=${messageId}: ${String(err)}`);
+    } finally {
+      markDispatchIdle?.();
+    }
+  })();
+
+  void dispatchPromise;
+  sendJson(res, 202, {
+    ok: true,
+    eventId: readMuxNonEmptyString(payload.eventId) ?? messageId,
+  });
+  return true;
 }

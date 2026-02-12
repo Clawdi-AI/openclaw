@@ -4,6 +4,7 @@ import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -350,6 +351,42 @@ describe("mux server", () => {
     });
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ ok: false, error: "unauthorized" });
+  });
+
+  test("returns 400 for invalid JSON body", async () => {
+    const server = await startServer();
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+      body: "{not-json",
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ ok: false, error: "invalid JSON body" });
+  });
+
+  test("returns 413 when request body exceeds max size", async () => {
+    const server = await startServer({
+      extraEnv: {
+        MUX_MAX_BODY_BYTES: "128",
+      },
+    });
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        text: "x".repeat(2_000),
+      }),
+    });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ ok: false, error: "payload too large" });
   });
 
   test("supports per-tenant auth from MUX_TENANTS_JSON", async () => {
@@ -789,6 +826,49 @@ describe("mux server", () => {
     expect(await secondClaim.json()).toEqual({
       ok: false,
       error: "pairing code already claimed",
+    });
+  });
+
+  test("rejects cross-tenant route collisions during pairing claim", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        { id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" },
+        { id: "tenant-b", name: "Tenant B", apiKey: "tenant-b-key" },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-ROUTE-A",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100555",
+          scope: "chat",
+        },
+        {
+          code: "PAIR-ROUTE-B",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100555",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    const first = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-ROUTE-A",
+      sessionKey: "tg:group:-100555",
+    });
+    expect(first.status).toBe(200);
+
+    const second = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-b-key",
+      code: "PAIR-ROUTE-B",
+      sessionKey: "tg:group:-100555",
+    });
+    expect(second.status).toBe(409);
+    expect(await second.json()).toEqual({
+      ok: false,
+      error: "route already bound",
     });
   });
 
@@ -2760,6 +2840,267 @@ describe("mux server", () => {
       ],
     });
   }, 15_000);
+
+  test("acks discord invalid pairing token message to avoid replay spam", async () => {
+    const dmChannelId = "997001";
+    const dmUserId = "9090";
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const discordMessages: Array<Record<string, unknown>> = [
+      {
+        id: "1001",
+        channel_id: dmChannelId,
+        type: 0,
+        content: "mpt_invalid_token_value_abcdefghijklmnopqrstuvwxyz",
+        author: {
+          id: dmUserId,
+          bot: false,
+          username: "tester",
+        },
+        attachments: [],
+        mentions: [],
+        mention_roles: [],
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+    ];
+
+    const discordApi = await startHttpServer(async (req, res) => {
+      const method = req.method ?? "GET";
+      const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (method === "POST" && requestUrl.pathname === "/users/@me/channels") {
+        const body = await readJsonBody(req);
+        if (String(body.recipient_id ?? "") !== dmUserId) {
+          res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "unexpected recipient" }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: dmChannelId, type: 1 }));
+        return;
+      }
+
+      if (method === "GET" && requestUrl.pathname === `/channels/${dmChannelId}/messages`) {
+        const afterRaw = requestUrl.searchParams.get("after");
+        const after = afterRaw ? BigInt(afterRaw) : 0n;
+        const deliverable = discordMessages.filter((entry) => {
+          const id = String(entry.id ?? "0");
+          if (!/^\d+$/.test(id)) {
+            return false;
+          }
+          return BigInt(id) > after;
+        });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(deliverable));
+        return;
+      }
+
+      if (method === "POST" && requestUrl.pathname === `/channels/${dmChannelId}/messages`) {
+        sentMessages.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            id: String(9000 + sentMessages.length),
+            channel_id: dmChannelId,
+          }),
+        );
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      extraEnv: {
+        MUX_DISCORD_INBOUND_ENABLED: "true",
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+        MUX_DISCORD_POLL_INTERVAL_MS: "50",
+        MUX_DISCORD_BOOTSTRAP_LATEST: "false",
+        MUX_PAIRING_INVALID_TEXT: "Invalid token. Request a new link.",
+      },
+    });
+
+    const tokenResponse = await createPairingToken({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      channel: "discord",
+      routeKey: "discord:default:dm:user:9090",
+      sessionKey: "dc:dm:9090",
+      ttlSec: 120,
+    });
+    expect(tokenResponse.status).toBe(200);
+
+    await waitForCondition(
+      () => sentMessages.some((message) => String(message.content ?? "").includes("Invalid token")),
+      8_000,
+      "timed out waiting for discord invalid-token notice",
+    );
+    const noticeCountAtFirstAck = sentMessages.length;
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 500));
+    expect(sentMessages.length).toBe(noticeCountAtFirstAck);
+  }, 15_000);
+
+  test("releases stale discord pending route lock after token expiry", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        { id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" },
+        { id: "tenant-b", name: "Tenant B", apiKey: "tenant-b-key" },
+      ]),
+    });
+
+    const firstToken = await createPairingToken({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      channel: "discord",
+      routeKey: "discord:default:dm:user:777777",
+      sessionKey: "dc:dm:777777",
+      ttlSec: 1,
+    });
+    expect(firstToken.status).toBe(200);
+
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 1_250));
+
+    const secondToken = await createPairingToken({
+      port: server.port,
+      apiKey: "tenant-b-key",
+      channel: "discord",
+      routeKey: "discord:default:dm:user:777777",
+      sessionKey: "dc:dm:777777",
+      ttlSec: 120,
+    });
+    expect(secondToken.status).toBe(200);
+    expect(await secondToken.json()).toMatchObject({
+      ok: true,
+      channel: "discord",
+    });
+  }, 15_000);
+
+  test("does not consume discord token when first claim fails activation", async () => {
+    const dmChannelId = "997001";
+    const dmUserId = "9090";
+    const routeKey = `discord:default:dm:user:${dmUserId}`;
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const discordMessages: Array<Record<string, unknown>> = [];
+
+    const discordApi = await startHttpServer(async (req, res) => {
+      const method = req.method ?? "GET";
+      const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (method === "POST" && requestUrl.pathname === "/users/@me/channels") {
+        const body = await readJsonBody(req);
+        if (String(body.recipient_id ?? "") !== dmUserId) {
+          res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "unexpected recipient" }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: dmChannelId, type: 1 }));
+        return;
+      }
+
+      if (method === "GET" && requestUrl.pathname === `/channels/${dmChannelId}/messages`) {
+        const afterRaw = requestUrl.searchParams.get("after");
+        const after = afterRaw ? BigInt(afterRaw) : 0n;
+        const deliverable = discordMessages.filter((entry) => {
+          const id = String(entry.id ?? "0");
+          if (!/^\d+$/.test(id)) {
+            return false;
+          }
+          return BigInt(id) > after;
+        });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(deliverable));
+        return;
+      }
+
+      if (method === "POST" && requestUrl.pathname === `/channels/${dmChannelId}/messages`) {
+        sentMessages.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            id: String(9000 + sentMessages.length),
+            channel_id: dmChannelId,
+          }),
+        );
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      extraEnv: {
+        MUX_DISCORD_INBOUND_ENABLED: "true",
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+        MUX_DISCORD_POLL_INTERVAL_MS: "50",
+        MUX_DISCORD_BOOTSTRAP_LATEST: "false",
+        MUX_PAIRING_INVALID_TEXT: "Invalid token. Request a new link.",
+      },
+    });
+
+    const tokenResponse = await createPairingToken({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      channel: "discord",
+      routeKey,
+      sessionKey: "dc:dm:9090",
+      ttlSec: 120,
+    });
+    expect(tokenResponse.status).toBe(200);
+    const tokenBody = (await tokenResponse.json()) as { token: string };
+
+    const dbPath = resolve(server.tempDir, "mux-server.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.prepare(
+      "UPDATE pairing_tokens SET route_key = ? WHERE tenant_id = ? AND channel = 'discord' AND consumed_at_ms IS NULL",
+    ).run("discord:default:dm:user:999999", "tenant-a");
+    db.close();
+
+    discordMessages.push({
+      id: "1001",
+      channel_id: dmChannelId,
+      type: 0,
+      content: tokenBody.token,
+      author: { id: dmUserId, bot: false, username: "tester" },
+      attachments: [],
+      mentions: [],
+      mention_roles: [],
+      timestamp: "2026-01-01T00:00:01.000Z",
+    });
+
+    await waitForCondition(
+      () => sentMessages.some((message) => String(message.content ?? "").includes("Invalid token")),
+      6_000,
+      "timed out waiting for failed discord token claim",
+    );
+
+    const dbRestore = new DatabaseSync(dbPath);
+    dbRestore
+      .prepare(
+        "UPDATE pairing_tokens SET route_key = ? WHERE tenant_id = ? AND channel = 'discord' AND consumed_at_ms IS NULL",
+      )
+      .run(routeKey, "tenant-a");
+    dbRestore.close();
+
+    discordMessages.push({
+      id: "1002",
+      channel_id: dmChannelId,
+      type: 0,
+      content: tokenBody.token,
+      author: { id: dmUserId, bot: false, username: "tester" },
+      attachments: [],
+      mentions: [],
+      mention_roles: [],
+      timestamp: "2026-01-01T00:00:02.000Z",
+    });
+
+    await waitForCondition(
+      () => sentMessages.some((message) => String(message.content ?? "").includes("Paired")),
+      6_000,
+      "timed out waiting for successful discord token claim after failure",
+    );
+  }, 20_000);
 
   test("issues whatsapp pairing token without deep link or start command", async () => {
     const server = await startServer({
