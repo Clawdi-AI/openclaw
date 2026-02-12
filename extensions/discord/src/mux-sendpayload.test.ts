@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { telegramPlugin } from "./channel.js";
+import { discordPlugin } from "./channel.js";
 
 const originalFetch = globalThis.fetch;
 const TENANT_TOKEN = "tenant-key";
@@ -32,15 +32,17 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("telegram extension mux outbound sendPayload", () => {
-  it("telegram sendPayload passes channelData through mux", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-tg-1", chatId: "tg-chat-1" }));
+describe("discord extension mux outbound sendPayload", () => {
+  it("passes channelData through mux", async () => {
+    const fetchSpy = vi.fn(async () =>
+      jsonResponse({ messageId: "mx-discord-1", channelId: "dc-channel-1" }),
+    );
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
       ...baseMuxGatewayConfig(),
       channels: {
-        telegram: {
+        discord: {
           accounts: {
             mux: {
               mux: {
@@ -52,35 +54,45 @@ describe("telegram extension mux outbound sendPayload", () => {
       },
     } as OpenClawConfig;
 
-    const result = await telegramPlugin.outbound?.sendPayload?.({
+    const result = await discordPlugin.outbound?.sendPayload?.({
       cfg,
-      to: "telegram:123",
+      to: "channel:123",
       text: "ignored",
       accountId: "mux",
-      sessionKey: "sess-tg",
+      sessionKey: "sess-discord",
       payload: {
         text: "hello",
         channelData: {
-          telegram: {
-            buttons: [[{ text: "Next", callback_data: "commands_page_2:main" }]],
+          raw: {
+            discord: {
+              body: { content: "hello" },
+            },
           },
         },
       },
     });
 
-    expect(result).toMatchObject({ channel: "telegram", messageId: "mx-tg-1" });
+    expect(result).toMatchObject({ channel: "discord", messageId: "mx-discord-1" });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(String(init.body)) as {
       channel?: string;
       sessionKey?: string;
       channelData?: Record<string, unknown>;
+      raw?: Record<string, unknown>;
     };
-    expect(body.channel).toBe("telegram");
-    expect(body.sessionKey).toBe("sess-tg");
+    expect(body.channel).toBe("discord");
+    expect(body.sessionKey).toBe("sess-discord");
     expect(body.channelData).toEqual({
-      telegram: {
-        buttons: [[{ text: "Next", callback_data: "commands_page_2:main" }]],
+      raw: {
+        discord: {
+          body: { content: "hello" },
+        },
+      },
+    });
+    expect(body.raw).toEqual({
+      discord: {
+        body: { content: "hello" },
       },
     });
   });

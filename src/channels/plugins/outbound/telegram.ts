@@ -1,13 +1,31 @@
 import type { ChannelOutboundAdapter } from "../types.js";
 import { markdownToTelegramHtmlChunks } from "../../../telegram/format.js";
 import { sendMessageTelegram } from "../../../telegram/send.js";
-import {
-  buildTelegramRawSend,
-  readTelegramMessageThreadId,
-  readTelegramReplyToMessageId,
-  type TelegramButtons,
-} from "../mux-envelope.js";
+import { buildTelegramRawSend, type TelegramButtons } from "../mux-envelope.js";
 import { isMuxEnabled, sendViaMux } from "./mux.js";
+
+function parseReplyToMessageId(replyToId?: string | null) {
+  if (!replyToId) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(replyToId, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseThreadId(threadId?: string | number | null) {
+  if (threadId == null) {
+    return undefined;
+  }
+  if (typeof threadId === "number") {
+    return Number.isFinite(threadId) ? Math.trunc(threadId) : undefined;
+  }
+  const trimmed = threadId.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 export const telegramOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
@@ -15,8 +33,8 @@ export const telegramOutbound: ChannelOutboundAdapter = {
   chunkerMode: "markdown",
   textChunkLimit: 4000,
   sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, sessionKey }) => {
-    const replyToMessageId = readTelegramReplyToMessageId(replyToId);
-    const messageThreadId = readTelegramMessageThreadId(threadId);
+    const replyToMessageId = parseReplyToMessageId(replyToId);
+    const messageThreadId = parseThreadId(threadId);
     if (isMuxEnabled({ cfg, channel: "telegram", accountId: accountId ?? undefined })) {
       const result = await sendViaMux({
         cfg,
@@ -59,8 +77,8 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     threadId,
     sessionKey,
   }) => {
-    const replyToMessageId = readTelegramReplyToMessageId(replyToId);
-    const messageThreadId = readTelegramMessageThreadId(threadId);
+    const replyToMessageId = parseReplyToMessageId(replyToId);
+    const messageThreadId = parseThreadId(threadId);
     if (isMuxEnabled({ cfg, channel: "telegram", accountId: accountId ?? undefined })) {
       const result = await sendViaMux({
         cfg,
@@ -96,8 +114,8 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     return { channel: "telegram", ...result };
   },
   sendPayload: async ({ cfg, to, payload, accountId, deps, replyToId, threadId, sessionKey }) => {
-    const replyToMessageId = readTelegramReplyToMessageId(replyToId);
-    const messageThreadId = readTelegramMessageThreadId(threadId);
+    const replyToMessageId = parseReplyToMessageId(replyToId);
+    const messageThreadId = parseThreadId(threadId);
     const telegramData = payload.channelData?.telegram as
       | { buttons?: TelegramButtons; quoteText?: string }
       | undefined;

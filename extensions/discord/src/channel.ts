@@ -33,24 +33,6 @@ import { getDiscordRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("discord");
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
-}
-
-function buildDiscordRawSend(params: {
-  text: string;
-  mediaUrl?: string;
-  replyToId?: string | null;
-}) {
-  return {
-    send: {
-      text: params.text,
-      ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
-      ...(params.replyToId ? { replyTo: params.replyToId } : {}),
-    },
-  };
-}
-
 const discordMessageActions: ChannelMessageActionAdapter = {
   listActions: (ctx) => getDiscordRuntime().channel.discord.messageActions.listActions(ctx),
   extractToolSend: (ctx) => getDiscordRuntime().channel.discord.messageActions.extractToolSend(ctx),
@@ -311,10 +293,12 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
           replyToId,
           threadId,
           raw: {
-            discord: buildDiscordRawSend({
-              text,
-              replyToId,
-            }),
+            discord: {
+              send: {
+                text,
+                ...(replyToId ? { replyTo: replyToId } : {}),
+              },
+            },
           },
         });
         return { channel: "discord", ...result };
@@ -350,11 +334,13 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
           replyToId,
           threadId,
           raw: {
-            discord: buildDiscordRawSend({
-              text,
-              mediaUrl,
-              replyToId,
-            }),
+            discord: {
+              send: {
+                text,
+                ...(mediaUrl ? { mediaUrl } : {}),
+                ...(replyToId ? { replyTo: replyToId } : {}),
+              },
+            },
           },
         });
         return { channel: "discord", ...result };
@@ -374,8 +360,9 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
           typeof payload.channelData === "object" && payload.channelData !== null
             ? payload.channelData
             : undefined;
-        const rawFromChannelData = asRecord(asRecord(channelData)?.raw);
-        const rawDiscord = asRecord(rawFromChannelData?.discord);
+        const rawDiscord = (
+          channelData as { raw?: { discord?: Record<string, unknown> } } | undefined
+        )?.raw?.discord;
         const fallbackMediaUrl =
           payload.mediaUrl ??
           (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0
@@ -394,13 +381,13 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
           threadId,
           channelData,
           raw: {
-            discord:
-              rawDiscord ??
-              buildDiscordRawSend({
+            discord: rawDiscord ?? {
+              send: {
                 text: payload.text ?? "",
-                mediaUrl: fallbackMediaUrl,
-                replyToId,
-              }),
+                ...(fallbackMediaUrl ? { mediaUrl: fallbackMediaUrl } : {}),
+                ...(replyToId ? { replyTo: replyToId } : {}),
+              },
+            },
           },
         });
         return { channel: "discord", ...result };

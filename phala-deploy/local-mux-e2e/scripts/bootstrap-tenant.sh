@@ -15,11 +15,14 @@ OPENCLAW_INBOUND_INTERNAL="http://openclaw:18789/v1/mux/inbound"
 
 mkdir -p "${STATE_DIR}"
 
+# Keep compose env injection simple and explicit.
+: "${MUX_ADMIN_TOKEN:=dummy}"
+: "${TELEGRAM_BOT_TOKEN:=dummy}"
+: "${DISCORD_BOT_TOKEN:=dummy}"
+export MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN
+
 compose() {
-  MUX_ADMIN_TOKEN="${MUX_ADMIN_TOKEN:-dummy}" \
-    TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-dummy}" \
-    DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-dummy}" \
-    docker compose -f "${COMPOSE_FILE}" "$@"
+  docker compose -f "${COMPOSE_FILE}" "$@"
 }
 
 mux_admin_token="${MUX_ADMIN_TOKEN:-}"

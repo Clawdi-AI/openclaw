@@ -36,10 +36,6 @@ import { getWhatsAppRuntime } from "./runtime.js";
 
 const meta = getChatChannelMeta("whatsapp");
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
-}
-
 function buildWhatsAppRawSend(params: { text: string; mediaUrl?: string; gifPlayback?: boolean }) {
   return {
     send: {
@@ -427,8 +423,9 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
           typeof payload.channelData === "object" && payload.channelData !== null
             ? payload.channelData
             : undefined;
-        const rawFromChannelData = asRecord(asRecord(channelData)?.raw);
-        const rawWhatsApp = asRecord(rawFromChannelData?.whatsapp);
+        const rawWhatsApp = (
+          channelData as { raw?: { whatsapp?: Record<string, unknown> } } | undefined
+        )?.raw?.whatsapp;
         const fallbackMediaUrl =
           payload.mediaUrl ??
           (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0

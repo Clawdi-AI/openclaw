@@ -448,27 +448,37 @@ const telegramApiBaseUrl = (
 const discordApiBaseUrl = (
   process.env.MUX_DISCORD_API_BASE_URL || "https://discord.com/api/v10"
 ).replace(/\/+$/, "");
-const telegramInboundEnabled = process.env.MUX_TELEGRAM_INBOUND_ENABLED === "true";
-const telegramPollTimeoutSec = Number(process.env.MUX_TELEGRAM_POLL_TIMEOUT_SEC || 25);
-const telegramPollRetryMs = Number(process.env.MUX_TELEGRAM_POLL_RETRY_MS || 1_000);
-const telegramBootstrapLatest = process.env.MUX_TELEGRAM_BOOTSTRAP_LATEST !== "false";
-const telegramInboundMediaMaxBytes = Number(
-  process.env.MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
-);
-const discordInboundEnabled = process.env.MUX_DISCORD_INBOUND_ENABLED === "true";
-const discordPollIntervalMs = Number(process.env.MUX_DISCORD_POLL_INTERVAL_MS || 2_000);
-const discordBootstrapLatest = process.env.MUX_DISCORD_BOOTSTRAP_LATEST !== "false";
-const discordInboundMediaMaxBytes = Number(
-  process.env.MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
-);
-const discordPendingGcEnabled = process.env.MUX_DISCORD_PENDING_GC_ENABLED === "true";
-const whatsappInboundEnabled = process.env.MUX_WHATSAPP_INBOUND_ENABLED === "true";
 // OpenClaw account id for mux-routed inbound events. Keep this separate from
 // platform account ids so direct channel bots can remain unchanged.
 const openclawMuxAccountId = readNonEmptyString(process.env.MUX_OPENCLAW_ACCOUNT_ID) || "default";
 const whatsappAccountId = readNonEmptyString(process.env.MUX_WHATSAPP_ACCOUNT_ID) || "default";
 const whatsappAuthDir =
   readNonEmptyString(process.env.MUX_WHATSAPP_AUTH_DIR) || resolveDefaultWhatsAppAuthDir();
+
+const telegramInboundEnabled = resolveInboundEnabled(
+  "MUX_TELEGRAM_INBOUND_ENABLED",
+  Boolean(readNonEmptyString(telegramBotToken)),
+);
+const telegramPollTimeoutSec = Number(process.env.MUX_TELEGRAM_POLL_TIMEOUT_SEC || 25);
+const telegramPollRetryMs = Number(process.env.MUX_TELEGRAM_POLL_RETRY_MS || 1_000);
+const telegramBootstrapLatest = process.env.MUX_TELEGRAM_BOOTSTRAP_LATEST !== "false";
+const telegramInboundMediaMaxBytes = Number(
+  process.env.MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
+);
+const discordInboundEnabled = resolveInboundEnabled(
+  "MUX_DISCORD_INBOUND_ENABLED",
+  Boolean(readNonEmptyString(discordBotToken)),
+);
+const discordPollIntervalMs = Number(process.env.MUX_DISCORD_POLL_INTERVAL_MS || 2_000);
+const discordBootstrapLatest = process.env.MUX_DISCORD_BOOTSTRAP_LATEST !== "false";
+const discordInboundMediaMaxBytes = Number(
+  process.env.MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
+);
+const discordPendingGcEnabled = process.env.MUX_DISCORD_PENDING_GC_ENABLED === "true";
+const whatsappInboundEnabled = resolveInboundEnabled(
+  "MUX_WHATSAPP_INBOUND_ENABLED",
+  fs.existsSync(path.join(whatsappAuthDir, "creds.json")),
+);
 const whatsappInboundMediaMaxBytes = Number(
   process.env.MUX_WHATSAPP_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
@@ -1343,6 +1353,21 @@ function readPositiveInt(value: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+function resolveInboundEnabled(envName: string, defaultEnabled: boolean): boolean {
+  const raw = process.env[envName];
+  if (raw == null || raw.trim() === "") {
+    return defaultEnabled;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+  throw new Error(`${envName} must be 'true' or 'false'`);
 }
 
 function readUnsignedNumericString(value: unknown): string | undefined {
