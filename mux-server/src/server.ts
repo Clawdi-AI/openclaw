@@ -338,6 +338,28 @@ type TelegramUpdate = {
   callback_query?: TelegramCallbackQuery;
 };
 
+type BotControlCommand =
+  | {
+      kind: "help";
+    }
+  | {
+      kind: "status";
+    }
+  | {
+      kind: "unpair";
+    }
+  | {
+      kind: "switch";
+      token?: string;
+    };
+
+type NoticeChannel = "telegram" | "discord" | "whatsapp";
+type TelegramParseMode = "HTML";
+type StyledNotice = {
+  text: string;
+  parseMode?: TelegramParseMode;
+};
+
 type TelegramCallbackQuery = {
   id?: string;
   from?: { id?: number };
@@ -439,6 +461,7 @@ const discordBootstrapLatest = process.env.MUX_DISCORD_BOOTSTRAP_LATEST !== "fal
 const discordInboundMediaMaxBytes = Number(
   process.env.MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
+const discordPendingGcEnabled = process.env.MUX_DISCORD_PENDING_GC_ENABLED === "true";
 const whatsappInboundEnabled = process.env.MUX_WHATSAPP_INBOUND_ENABLED === "true";
 // OpenClaw account id for mux-routed inbound events. Keep this separate from
 // platform account ids so direct channel bots can remain unchanged.
@@ -459,15 +482,13 @@ const whatsappQueueBatchSize = Number(process.env.MUX_WHATSAPP_QUEUE_BATCH_SIZE 
 const pairingTokenTtlSec = Number(process.env.MUX_PAIRING_TOKEN_TTL_SEC || 15 * 60);
 const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
 const telegramBotUsername = readNonEmptyString(process.env.MUX_TELEGRAM_BOT_USERNAME);
-const pairingSuccessText =
-  readNonEmptyString(process.env.MUX_PAIRING_SUCCESS_TEXT) ||
-  "Paired successfully. You can chat now.";
-const pairingInvalidText =
-  readNonEmptyString(process.env.MUX_PAIRING_INVALID_TEXT) ||
-  "Pairing link is invalid or expired. Request a new link from your dashboard.";
-const unpairedHintText =
-  readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT) ||
-  "This chat is not paired yet. Open your dashboard and use a new pairing link.";
+const pairingSuccessTextOverride = readNonEmptyString(process.env.MUX_PAIRING_SUCCESS_TEXT);
+const pairingInvalidTextOverride = readNonEmptyString(process.env.MUX_PAIRING_INVALID_TEXT);
+const botControlHelpTextOverride = readNonEmptyString(process.env.MUX_BOT_HELP_TEXT);
+const botUnpairSuccessTextOverride = readNonEmptyString(process.env.MUX_BOT_UNPAIR_SUCCESS_TEXT);
+const botNotPairedTextOverride = readNonEmptyString(process.env.MUX_BOT_NOT_PAIRED_TEXT);
+const botSwitchUsageTextOverride = readNonEmptyString(process.env.MUX_BOT_SWITCH_USAGE_TEXT);
+const configuredUnpairedHintText = readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT);
 const requestBodyMaxBytes = (() => {
   const parsed = Number(process.env.MUX_MAX_BODY_BYTES || 10 * 1024 * 1024);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -712,6 +733,18 @@ const stmtUnbindActiveBinding = db.prepare(`
   UPDATE bindings
   SET status = 'inactive', updated_at_ms = ?
   WHERE binding_id = ? AND tenant_id = ? AND status = 'active'
+`);
+
+const stmtDeactivateLiveBinding = db.prepare(`
+  UPDATE bindings
+  SET status = 'inactive', updated_at_ms = ?
+  WHERE binding_id = ? AND tenant_id = ? AND status IN ('active', 'pending')
+`);
+
+const stmtSetBindingPending = db.prepare(`
+  UPDATE bindings
+  SET status = 'pending', updated_at_ms = ?
+  WHERE binding_id = ? AND tenant_id = ? AND status IN ('active', 'pending')
 `);
 
 const stmtDeleteSessionRoutesByBinding = db.prepare(`
@@ -1694,7 +1727,9 @@ function hashPairingToken(token: string): string {
 
 function purgeExpiredPairingTokens(nowMs: number) {
   stmtDeleteExpiredPairingTokens.run(nowMs);
-  stmtDeactivateStaleDiscordPendingBindings.run(nowMs, nowMs);
+  if (discordPendingGcEnabled) {
+    stmtDeactivateStaleDiscordPendingBindings.run(nowMs, nowMs);
+  }
 }
 
 function runTokenClaimTransaction<T>(claim: () => T | null): T | null {
@@ -1759,18 +1794,8 @@ function issuePairingTokenForTenant(params: {
         payload: { ok: false, error: "discord token pairing currently supports dm routeKey only" },
       };
     }
-    const existing = stmtSelectActiveBindingByTenantAndRoute.get(
-      params.tenant.id,
-      "discord",
-      routeKey,
-    ) as ExistingBindingRow | undefined;
-    if (existing?.status === "active") {
-      return {
-        statusCode: 409,
-        payload: { ok: false, error: "route already bound" },
-      };
-    }
-    if (!existing?.binding_id) {
+    const liveBinding = resolveLiveBindingByRouteKey("discord", routeKey);
+    if (!liveBinding) {
       try {
         stmtInsertPendingBinding.run(
           `bind_${randomUUID()}`,
@@ -1850,6 +1875,152 @@ function normalizeControlText(input: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function parseBotControlCommand(input: string | null): BotControlCommand | null {
+  const normalized = normalizeControlText(input);
+  if (!normalized) {
+    return null;
+  }
+  const match = normalized.match(
+    /^[/!](bot_help|bot_status|bot_unpair|bot_switch)(?:@[A-Za-z0-9_]+)?(?:\s+(.*))?$/i,
+  );
+  if (!match?.[1]) {
+    return null;
+  }
+  const command = match[1].toLowerCase();
+  if (command === "bot_help") {
+    return { kind: "help" };
+  }
+  if (command === "bot_status") {
+    return { kind: "status" };
+  }
+  if (command === "bot_unpair") {
+    return { kind: "unpair" };
+  }
+  const arg = normalizeControlText(match[2] ?? null);
+  const token = extractPairingTokenFromText(arg);
+  return { kind: "switch", ...(token ? { token } : {}) };
+}
+
+function escapeTelegramHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function styleBold(channel: NoticeChannel, text: string): string {
+  if (channel === "telegram") {
+    return `<b>${escapeTelegramHtml(text)}</b>`;
+  }
+  return `**${text}**`;
+}
+
+function styleCode(channel: NoticeChannel, text: string): string {
+  if (channel === "telegram") {
+    return `<code>${escapeTelegramHtml(text)}</code>`;
+  }
+  return `\`${text}\``;
+}
+
+function styleText(channel: NoticeChannel, text: string): string {
+  return channel === "telegram" ? escapeTelegramHtml(text) : text;
+}
+
+function buildStyledNotice(channel: NoticeChannel, lines: string[]): StyledNotice {
+  if (channel === "telegram") {
+    return { text: lines.join("\n"), parseMode: "HTML" };
+  }
+  return { text: lines.join("\n") };
+}
+
+function renderPairingSuccessNotice(channel: NoticeChannel): StyledNotice {
+  if (pairingSuccessTextOverride) {
+    return { text: pairingSuccessTextOverride };
+  }
+  return buildStyledNotice(channel, [
+    styleBold(channel, "Paired successfully"),
+    "",
+    "You can chat now.",
+  ]);
+}
+
+function renderPairingInvalidNotice(channel: NoticeChannel): StyledNotice {
+  if (pairingInvalidTextOverride) {
+    return { text: pairingInvalidTextOverride };
+  }
+  return buildStyledNotice(channel, [
+    styleBold(channel, "Pairing link is invalid or expired"),
+    "",
+    "Request a new link from your dashboard.",
+  ]);
+}
+
+function renderBotHelpNotice(channel: NoticeChannel): StyledNotice {
+  if (botControlHelpTextOverride) {
+    return { text: botControlHelpTextOverride };
+  }
+  const command = (value: string): string =>
+    channel === "telegram" ? styleText(channel, value) : styleCode(channel, value);
+  return buildStyledNotice(channel, [
+    styleBold(channel, "Bot control commands"),
+    "",
+    `• ${command("/bot_help")} - Show bot control help.`,
+    `• ${command("/bot_status")} - Show current pairing status.`,
+    `• ${command("/bot_unpair")} - Unlink this chat from OpenClaw.`,
+    `• ${command("/bot_switch <token>")} - Switch this chat to another OpenClaw.`,
+    "",
+    `After pairing, ${command("/help")} is provided by your OpenClaw instance.`,
+  ]);
+}
+
+function renderBotUnpairSuccessNotice(channel: NoticeChannel): StyledNotice {
+  if (botUnpairSuccessTextOverride) {
+    return { text: botUnpairSuccessTextOverride };
+  }
+  return buildStyledNotice(channel, [
+    styleBold(channel, "Unpaired successfully"),
+    "",
+    `Use ${styleCode(channel, "/bot_switch <token>")} to pair again.`,
+  ]);
+}
+
+function renderBotNotPairedNotice(channel: NoticeChannel): StyledNotice {
+  if (botNotPairedTextOverride) {
+    return { text: botNotPairedTextOverride };
+  }
+  return buildStyledNotice(channel, [
+    styleBold(channel, "This chat is not paired yet"),
+    "",
+    `Use ${styleCode(channel, "/bot_switch <token>")} to pair this chat.`,
+  ]);
+}
+
+function renderBotSwitchUsageNotice(channel: NoticeChannel): StyledNotice {
+  if (botSwitchUsageTextOverride) {
+    return { text: botSwitchUsageTextOverride };
+  }
+  return buildStyledNotice(channel, [
+    `Usage: ${styleCode(channel, "/bot_switch <pairing-token>")}`,
+  ]);
+}
+
+function renderUnpairedHintNotice(channel: NoticeChannel): StyledNotice {
+  if (configuredUnpairedHintText) {
+    return { text: configuredUnpairedHintText };
+  }
+  const stepThree =
+    channel === "telegram"
+      ? `3) Send the token here (or use ${styleCode(channel, "/start <token>")}).`
+      : "3) Send the token in this chat.";
+  return buildStyledNotice(channel, [
+    styleBold(channel, "OpenClaw: this chat is not paired yet"),
+    "",
+    styleBold(channel, "Pairing steps"),
+    "1) Open your dashboard.",
+    "2) Generate a pairing link/token for this channel.",
+    stepThree,
+    "",
+    `After pairing, ${styleCode(channel, "/help")} is provided by your OpenClaw instance.`,
+  ]);
+}
+
 function extractPairingTokenFromTelegramMessage(message: TelegramIncomingMessage): string | null {
   const rawText = typeof message.text === "string" ? message.text : undefined;
   const rawCaption = typeof message.caption === "string" ? message.caption : undefined;
@@ -1871,6 +2042,16 @@ function isTelegramCommandText(input: string | null): boolean {
     return false;
   }
   return /^\/[A-Za-z0-9_]+/.test(normalized);
+}
+
+function hasTelegramMessageContent(message: TelegramIncomingMessage): boolean {
+  if (normalizeControlText(message.text ?? message.caption ?? null)) {
+    return true;
+  }
+  if (Array.isArray(message.photo) && message.photo.length > 0) {
+    return true;
+  }
+  return Boolean(message.document || message.video || message.animation);
 }
 
 function extractPairingTokenFromText(input: string | null): string | null {
@@ -1900,12 +2081,32 @@ function isDiscordCommandText(input: string): boolean {
   return /^\/[A-Za-z0-9_]+/.test(normalized);
 }
 
+function hasDiscordMessageContent(message: Record<string, unknown>): boolean {
+  const text = typeof message.content === "string" ? message.content : null;
+  if (normalizeControlText(text)) {
+    return true;
+  }
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  return attachments.some((attachment) => Boolean(attachment && typeof attachment === "object"));
+}
+
 function isWhatsAppCommandText(input: string): boolean {
   const normalized = normalizeControlText(input);
   if (!normalized) {
     return false;
   }
   return /^[/!][A-Za-z0-9_]+/.test(normalized);
+}
+
+function hasWhatsAppMessageContent(message: WebInboundMessage): boolean {
+  if (normalizeControlText(message.body)) {
+    return true;
+  }
+  return Boolean(
+    readNonEmptyString(message.mediaPath) ||
+    readNonEmptyString(message.mediaType) ||
+    readNonEmptyString(message.mediaUrl),
+  );
 }
 
 function isImageMimeType(value: string | undefined): boolean {
@@ -2151,11 +2352,15 @@ async function sendTelegramPairingNotice(params: {
   chatId: string;
   topicId?: number;
   text: string;
+  parseMode?: TelegramParseMode;
 }) {
   const body: Record<string, unknown> = {
     chat_id: params.chatId,
     text: params.text,
   };
+  if (params.parseMode) {
+    body.parse_mode = params.parseMode;
+  }
   if (params.topicId) {
     body.message_thread_id = params.topicId;
   }
@@ -2528,6 +2733,95 @@ function writeAuditLog(
   stmtInsertAuditLog.run(tenantId, eventType, JSON.stringify(payload), timestampMs);
 }
 
+function deactivateLiveBinding(params: {
+  tenantId: string;
+  bindingId: string;
+  auditEventType: string;
+}): boolean {
+  const now = Date.now();
+  const update = stmtDeactivateLiveBinding.run(now, params.bindingId, params.tenantId);
+  if (update.changes === 0) {
+    return false;
+  }
+  stmtDeleteSessionRoutesByBinding.run(params.bindingId, params.tenantId);
+  writeAuditLog(params.tenantId, params.auditEventType, { bindingId: params.bindingId }, now);
+  return true;
+}
+
+function setBindingPending(params: {
+  tenantId: string;
+  bindingId: string;
+  auditEventType: string;
+}): boolean {
+  const now = Date.now();
+  const update = stmtSetBindingPending.run(now, params.bindingId, params.tenantId);
+  if (update.changes === 0) {
+    return false;
+  }
+  stmtDeleteSessionRoutesByBinding.run(params.bindingId, params.tenantId);
+  writeAuditLog(params.tenantId, params.auditEventType, { bindingId: params.bindingId }, now);
+  return true;
+}
+
+function resolveBindingSessionKey(params: {
+  tenantId: string;
+  channel: "telegram" | "discord" | "whatsapp";
+  bindingId: string;
+}): string | null {
+  const row = stmtSelectSessionKeyByBinding.get(
+    params.tenantId,
+    params.channel,
+    params.bindingId,
+  ) as { session_key?: unknown } | undefined;
+  return readNonEmptyString(row?.session_key);
+}
+
+function renderBotStatusNotice(params: {
+  channel: NoticeChannel;
+  paired: boolean;
+  routeKey?: string;
+  sessionKey?: string | null;
+}): StyledNotice {
+  const channelLabel =
+    params.channel === "telegram"
+      ? "telegram"
+      : params.channel === "discord"
+        ? "discord"
+        : "whatsapp";
+  const lines = [
+    styleBold(params.channel, "Bot status"),
+    `Channel: ${styleText(params.channel, channelLabel)}`,
+    `Paired: ${params.paired ? "yes" : "no"}`,
+  ];
+  const sessionKey = readNonEmptyString(params.sessionKey ?? null);
+  if (sessionKey) {
+    lines.push(`Session key: ${styleCode(params.channel, sessionKey)}`);
+  }
+  if (params.routeKey) {
+    lines.push(`Route: ${styleCode(params.channel, params.routeKey)}`);
+  }
+  lines.push(
+    params.paired
+      ? `Use ${styleCode(params.channel, "/bot_unpair")} to unlink this chat.`
+      : `Use ${styleCode(params.channel, "/bot_switch <token>")} to pair this chat.`,
+  );
+  return buildStyledNotice(params.channel, lines);
+}
+
+function peekActivePairingToken(
+  token: string,
+  channel: "telegram" | "discord" | "whatsapp",
+): PairingTokenRow | null {
+  const now = Date.now();
+  purgeExpiredPairingTokens(now);
+  const tokenHash = hashPairingToken(token);
+  const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
+  if (!row || String(row.channel) !== channel) {
+    return null;
+  }
+  return row;
+}
+
 function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?: string) {
   const now = Date.now();
   const row = stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
@@ -2729,6 +3023,110 @@ function claimDiscordPairingToken(params: {
     return {
       tenantId: params.tenantId,
       bindingId: params.bindingId,
+      routeKey: params.routeKey,
+      sessionKey,
+    };
+  });
+}
+
+function claimDiscordPairingTokenForRoute(params: {
+  token: string;
+  routeKey: string;
+  channelId: string;
+}): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
+  return runTokenClaimTransaction(() => {
+    const now = Date.now();
+    purgeExpiredPairingTokens(now);
+    const tokenHash = hashPairingToken(params.token);
+    const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+      | PairingTokenRow
+      | undefined;
+    if (!row || String(row.channel) !== "discord") {
+      return null;
+    }
+    const tenantId = String(row.tenant_id);
+    if (!tenantId) {
+      return null;
+    }
+    if (readNonEmptyString(row.route_key) !== params.routeKey) {
+      return null;
+    }
+    const liveBinding = resolveLiveBindingByRouteKey("discord", params.routeKey);
+    if (liveBinding && liveBinding.tenant_id !== tenantId) {
+      stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
+      stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
+      writeAuditLog(
+        liveBinding.tenant_id,
+        "pairing_unbound_by_route_takeover",
+        {
+          bindingId: liveBinding.binding_id,
+          routeKey: params.routeKey,
+          takeoverTenantId: tenantId,
+        },
+        now,
+      );
+    }
+
+    const existing = stmtSelectActiveBindingByTenantAndRoute.get(
+      tenantId,
+      "discord",
+      params.routeKey,
+    ) as ExistingBindingRow | undefined;
+    if (existing?.status === "active") {
+      return null;
+    }
+    const bindingId =
+      (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
+    if (!existing?.binding_id) {
+      try {
+        stmtInsertPendingBinding.run(
+          bindingId,
+          tenantId,
+          "discord",
+          "dm",
+          params.routeKey,
+          now,
+          now,
+        );
+      } catch (error) {
+        if (isSqliteUniqueConstraintError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    }
+
+    const activateResult = stmtActivatePendingBinding.run(now, bindingId, tenantId);
+    if (activateResult.changes === 0) {
+      return null;
+    }
+
+    const route = parseDiscordRouteKey(params.routeKey);
+    if (!route) {
+      return null;
+    }
+    const preferredSessionKey = readNonEmptyString(row.session_key);
+    const sessionKey =
+      preferredSessionKey || deriveDiscordSessionKey({ route, channelId: params.channelId });
+    stmtUpsertSessionRoute.run(
+      tenantId,
+      "discord",
+      sessionKey,
+      bindingId,
+      JSON.stringify({ routeKey: params.routeKey, channelId: params.channelId }),
+      now,
+    );
+
+    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+    if (consumeResult.changes === 0) {
+      return null;
+    }
+
+    stmtAttachPairingTokenBinding.run(bindingId, params.routeKey, tokenHash);
+    writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey: params.routeKey }, now);
+    return {
+      tenantId,
+      bindingId,
       routeKey: params.routeKey,
       sessionKey,
     };
@@ -3445,6 +3843,305 @@ async function forwardTelegramCallbackQueryToTenant(params: {
   });
 }
 
+async function handleTelegramBotControlCommand(params: {
+  command: BotControlCommand;
+  chatId: string;
+  topicId?: number;
+  binding: { tenantId: string; bindingId: string; routeKey: string } | null;
+}) {
+  if (params.command.kind === "help") {
+    const notice = renderBotHelpNotice("telegram");
+    await sendTelegramPairingNotice({
+      chatId: params.chatId,
+      topicId: params.topicId,
+      text: notice.text,
+      parseMode: notice.parseMode,
+    });
+    return;
+  }
+  if (params.command.kind === "status") {
+    const notice = renderBotStatusNotice({
+      channel: "telegram",
+      paired: Boolean(params.binding),
+      routeKey: params.binding?.routeKey,
+      sessionKey: params.binding
+        ? resolveBindingSessionKey({
+            tenantId: params.binding.tenantId,
+            channel: "telegram",
+            bindingId: params.binding.bindingId,
+          })
+        : null,
+    });
+    await sendTelegramPairingNotice({
+      chatId: params.chatId,
+      topicId: params.topicId,
+      text: notice.text,
+      parseMode: notice.parseMode,
+    });
+    return;
+  }
+  if (params.command.kind === "unpair") {
+    if (!params.binding) {
+      const notice = renderBotNotPairedNotice("telegram");
+      await sendTelegramPairingNotice({
+        chatId: params.chatId,
+        topicId: params.topicId,
+        text: notice.text,
+        parseMode: notice.parseMode,
+      });
+      return;
+    }
+    const removed = deactivateLiveBinding({
+      tenantId: params.binding.tenantId,
+      bindingId: params.binding.bindingId,
+      auditEventType: "pairing_unbound_by_bot",
+    });
+    const notice = removed
+      ? renderBotUnpairSuccessNotice("telegram")
+      : renderBotNotPairedNotice("telegram");
+    await sendTelegramPairingNotice({
+      chatId: params.chatId,
+      topicId: params.topicId,
+      text: notice.text,
+      parseMode: notice.parseMode,
+    });
+    return;
+  }
+  if (!params.command.token) {
+    const notice = renderBotSwitchUsageNotice("telegram");
+    await sendTelegramPairingNotice({
+      chatId: params.chatId,
+      topicId: params.topicId,
+      text: notice.text,
+      parseMode: notice.parseMode,
+    });
+    return;
+  }
+  const tokenRow = peekActivePairingToken(params.command.token, "telegram");
+  if (!tokenRow) {
+    const notice = renderPairingInvalidNotice("telegram");
+    await sendTelegramPairingNotice({
+      chatId: params.chatId,
+      topicId: params.topicId,
+      text: notice.text,
+      parseMode: notice.parseMode,
+    });
+    return;
+  }
+  if (params.binding) {
+    deactivateLiveBinding({
+      tenantId: params.binding.tenantId,
+      bindingId: params.binding.bindingId,
+      auditEventType: "pairing_unbound_by_bot_switch",
+    });
+  }
+  const claimed = claimTelegramPairingToken({
+    token: params.command.token,
+    chatId: params.chatId,
+    topicId: params.topicId,
+  });
+  const notice = claimed
+    ? renderPairingSuccessNotice("telegram")
+    : renderPairingInvalidNotice("telegram");
+  await sendTelegramPairingNotice({
+    chatId: params.chatId,
+    topicId: params.topicId,
+    text: notice.text,
+    parseMode: notice.parseMode,
+  });
+}
+
+async function handleDiscordBotControlCommand(params: {
+  command: BotControlCommand;
+  channelId: string;
+  routeKey: string;
+  tenantId: string;
+  bindingId: string;
+  status: "active" | "pending";
+}): Promise<{ routeReset: boolean; pending?: boolean }> {
+  if (params.command.kind === "help") {
+    const notice = renderBotHelpNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return { routeReset: false };
+  }
+  if (params.command.kind === "status") {
+    const notice = renderBotStatusNotice({
+      channel: "discord",
+      paired: params.status === "active",
+      routeKey: params.routeKey,
+      sessionKey:
+        params.status === "active"
+          ? resolveBindingSessionKey({
+              tenantId: params.tenantId,
+              channel: "discord",
+              bindingId: params.bindingId,
+            })
+          : null,
+    });
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return { routeReset: false };
+  }
+  if (params.command.kind === "unpair") {
+    const removed = setBindingPending({
+      tenantId: params.tenantId,
+      bindingId: params.bindingId,
+      auditEventType: "pairing_unbound_by_bot",
+    });
+    const notice = removed
+      ? renderBotUnpairSuccessNotice("discord")
+      : renderBotNotPairedNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return { routeReset: false, pending: true };
+  }
+  if (!params.command.token) {
+    const notice = renderBotSwitchUsageNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return { routeReset: false };
+  }
+  const tokenRow = peekActivePairingToken(params.command.token, "discord");
+  if (!tokenRow || readNonEmptyString(tokenRow.route_key) !== params.routeKey) {
+    const notice = renderPairingInvalidNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return { routeReset: false };
+  }
+  deactivateLiveBinding({
+    tenantId: params.tenantId,
+    bindingId: params.bindingId,
+    auditEventType: "pairing_unbound_by_bot_switch",
+  });
+  const claimed = claimDiscordPairingTokenForRoute({
+    token: params.command.token,
+    routeKey: params.routeKey,
+    channelId: params.channelId,
+  });
+  const notice = claimed
+    ? renderPairingSuccessNotice("discord")
+    : renderPairingInvalidNotice("discord");
+  await sendDiscordPairingNotice({
+    channelId: params.channelId,
+    text: notice.text,
+  });
+  return { routeReset: true, pending: false };
+}
+
+async function handleWhatsAppBotControlCommand(params: {
+  command: BotControlCommand;
+  chatJid: string;
+  accountId: string;
+  chatType: "direct" | "group";
+  binding: { tenantId: string; bindingId: string; routeKey: string } | null;
+}) {
+  if (params.command.kind === "help") {
+    const notice = renderBotHelpNotice("whatsapp");
+    await sendWhatsAppPairingNotice({
+      chatJid: params.chatJid,
+      accountId: params.accountId,
+      text: notice.text,
+    });
+    return;
+  }
+  if (params.command.kind === "status") {
+    const notice = renderBotStatusNotice({
+      channel: "whatsapp",
+      paired: Boolean(params.binding),
+      routeKey: params.binding?.routeKey,
+      sessionKey: params.binding
+        ? resolveBindingSessionKey({
+            tenantId: params.binding.tenantId,
+            channel: "whatsapp",
+            bindingId: params.binding.bindingId,
+          })
+        : null,
+    });
+    await sendWhatsAppPairingNotice({
+      chatJid: params.chatJid,
+      accountId: params.accountId,
+      text: notice.text,
+    });
+    return;
+  }
+  if (params.command.kind === "unpair") {
+    if (!params.binding) {
+      const notice = renderBotNotPairedNotice("whatsapp");
+      await sendWhatsAppPairingNotice({
+        chatJid: params.chatJid,
+        accountId: params.accountId,
+        text: notice.text,
+      });
+      return;
+    }
+    const removed = deactivateLiveBinding({
+      tenantId: params.binding.tenantId,
+      bindingId: params.binding.bindingId,
+      auditEventType: "pairing_unbound_by_bot",
+    });
+    const notice = removed
+      ? renderBotUnpairSuccessNotice("whatsapp")
+      : renderBotNotPairedNotice("whatsapp");
+    await sendWhatsAppPairingNotice({
+      chatJid: params.chatJid,
+      accountId: params.accountId,
+      text: notice.text,
+    });
+    return;
+  }
+  if (!params.command.token) {
+    const notice = renderBotSwitchUsageNotice("whatsapp");
+    await sendWhatsAppPairingNotice({
+      chatJid: params.chatJid,
+      accountId: params.accountId,
+      text: notice.text,
+    });
+    return;
+  }
+  const tokenRow = peekActivePairingToken(params.command.token, "whatsapp");
+  if (!tokenRow) {
+    const notice = renderPairingInvalidNotice("whatsapp");
+    await sendWhatsAppPairingNotice({
+      chatJid: params.chatJid,
+      accountId: params.accountId,
+      text: notice.text,
+    });
+    return;
+  }
+  if (params.binding) {
+    deactivateLiveBinding({
+      tenantId: params.binding.tenantId,
+      bindingId: params.binding.bindingId,
+      auditEventType: "pairing_unbound_by_bot_switch",
+    });
+  }
+  const claimed = claimWhatsAppPairingToken({
+    token: params.command.token,
+    chatJid: params.chatJid,
+    accountId: params.accountId,
+    chatType: params.chatType,
+  });
+  const notice = claimed
+    ? renderPairingSuccessNotice("whatsapp")
+    : renderPairingInvalidNotice("whatsapp");
+  await sendWhatsAppPairingNotice({
+    chatJid: params.chatJid,
+    accountId: params.accountId,
+    text: notice.text,
+  });
+}
+
 async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   const updateId =
     typeof update.update_id === "number" && Number.isFinite(update.update_id)
@@ -3480,16 +4177,42 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   const bodyText = typeof message.text === "string" ? message.text : null;
   const bodyCaption = typeof message.caption === "string" ? message.caption : null;
   const body = bodyText ?? bodyCaption ?? "";
-  const pairingToken = extractPairingTokenFromTelegramMessage(message);
+  const chatType = message.chat?.type === "private" ? "direct" : "group";
   const binding = resolveTelegramBindingForIncoming(chatId, topicId);
+  const botControlCommand = parseBotControlCommand(body);
+  if (botControlCommand) {
+    try {
+      await handleTelegramBotControlCommand({
+        command: botControlCommand,
+        chatId,
+        topicId,
+        binding,
+      });
+    } catch (error) {
+      log({
+        type: "telegram_bot_control_error",
+        updateId,
+        chatId,
+        topicId: topicId ?? null,
+        error: String(error),
+      });
+    }
+    return;
+  }
+  const pairingToken = extractPairingTokenFromTelegramMessage(message);
   if (!binding) {
     if (!pairingToken) {
-      if (isTelegramCommandText(body)) {
+      const shouldSendUnpairedNotice =
+        isTelegramCommandText(body) ||
+        (chatType === "direct" && hasTelegramMessageContent(message));
+      if (shouldSendUnpairedNotice) {
         try {
+          const notice = renderUnpairedHintNotice("telegram");
           await sendTelegramPairingNotice({
             chatId,
             topicId,
-            text: unpairedHintText,
+            text: notice.text,
+            parseMode: notice.parseMode,
           });
         } catch (error) {
           log({
@@ -3508,10 +4231,12 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     });
     if (!claimed) {
       try {
+        const notice = renderPairingInvalidNotice("telegram");
         await sendTelegramPairingNotice({
           chatId,
           topicId,
-          text: pairingInvalidText,
+          text: notice.text,
+          parseMode: notice.parseMode,
         });
       } catch (error) {
         log({
@@ -3530,10 +4255,12 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     }
 
     try {
+      const notice = renderPairingSuccessNotice("telegram");
       await sendTelegramPairingNotice({
         chatId,
         topicId,
-        text: pairingSuccessText,
+        text: notice.text,
+        parseMode: notice.parseMode,
       });
     } catch (error) {
       log({
@@ -3590,7 +4317,6 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     typeof message.date === "number" && Number.isFinite(message.date)
       ? Math.trunc(message.date) * 1_000
       : Date.now();
-  const chatType = message.chat?.type === "private" ? "direct" : "group";
 
   const existingRoute = stmtSelectSessionKeyByBinding.get(
     binding.tenantId,
@@ -3749,14 +4475,47 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
     }
 
     const body = typeof message.content === "string" ? message.content : "";
+    const botControlCommand = parseBotControlCommand(body);
+    if (botControlCommand) {
+      try {
+        const result = await handleDiscordBotControlCommand({
+          command: botControlCommand,
+          channelId,
+          routeKey: params.route_key,
+          tenantId: params.tenant_id,
+          bindingId: params.binding_id,
+          status: pending ? "pending" : "active",
+        });
+        lastAckedMessageId = messageId;
+        if (typeof result.pending === "boolean") {
+          pending = result.pending;
+        }
+        if (result.routeReset) {
+          break;
+        }
+      } catch (error) {
+        log({
+          type: "discord_bot_control_error",
+          tenantId: params.tenant_id,
+          bindingId: params.binding_id,
+          routeKey: params.route_key,
+          messageId,
+          error: String(error),
+        });
+      }
+      continue;
+    }
     const pairingToken = extractPairingTokenFromDiscordMessage(message);
     if (pending) {
       if (!pairingToken) {
-        if (isDiscordCommandText(body)) {
+        const shouldSendUnpairedNotice =
+          isDiscordCommandText(body) || (route.kind === "dm" && hasDiscordMessageContent(message));
+        if (shouldSendUnpairedNotice) {
           try {
+            const notice = renderUnpairedHintNotice("discord");
             await sendDiscordPairingNotice({
               channelId,
-              text: unpairedHintText,
+              text: notice.text,
             });
           } catch (error) {
             log({
@@ -3771,18 +4530,44 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
         lastAckedMessageId = messageId;
         continue;
       }
-      const claimed = claimDiscordPairingToken({
+      const tokenRow = peekActivePairingToken(pairingToken, "discord");
+      if (!tokenRow || readNonEmptyString(tokenRow.route_key) !== params.route_key) {
+        try {
+          const notice = renderPairingInvalidNotice("discord");
+          await sendDiscordPairingNotice({
+            channelId,
+            text: notice.text,
+          });
+        } catch (error) {
+          log({
+            type: "discord_pairing_invalid_notice_error",
+            tenantId: params.tenant_id,
+            bindingId: params.binding_id,
+            messageId,
+            error: String(error),
+          });
+        }
+        log({
+          type: "discord_pairing_token_invalid",
+          tenantId: params.tenant_id,
+          bindingId: params.binding_id,
+          messageId,
+          channelId,
+        });
+        lastAckedMessageId = messageId;
+        continue;
+      }
+      const claimed = claimDiscordPairingTokenForRoute({
         token: pairingToken,
-        tenantId: params.tenant_id,
-        bindingId: params.binding_id,
         routeKey: params.route_key,
         channelId,
       });
       if (!claimed) {
         try {
+          const notice = renderPairingInvalidNotice("discord");
           await sendDiscordPairingNotice({
             channelId,
-            text: pairingInvalidText,
+            text: notice.text,
           });
         } catch (error) {
           log({
@@ -3804,9 +4589,10 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
         continue;
       }
       try {
+        const notice = renderPairingSuccessNotice("discord");
         await sendDiscordPairingNotice({
           channelId,
-          text: pairingSuccessText,
+          text: notice.text,
         });
       } catch (error) {
         log({
@@ -4104,20 +4890,44 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
   const accountId = readNonEmptyString(message.accountId) ?? whatsappAccountId;
   const chatType = message.chatType === "group" ? "group" : "direct";
   const body = typeof message.body === "string" ? message.body : "";
-  const pairingToken = extractPairingTokenFromWhatsAppMessage(message);
   const binding = resolveWhatsAppBindingForIncoming({
     chatJid,
     accountId,
   });
+  const botControlCommand = parseBotControlCommand(body);
+  if (botControlCommand) {
+    try {
+      await handleWhatsAppBotControlCommand({
+        command: botControlCommand,
+        chatJid,
+        accountId,
+        chatType,
+        binding,
+      });
+    } catch (error) {
+      log({
+        type: "whatsapp_bot_control_error",
+        chatJid,
+        accountId,
+        error: String(error),
+      });
+    }
+    return;
+  }
+  const pairingToken = extractPairingTokenFromWhatsAppMessage(message);
 
   if (!binding) {
     if (!pairingToken) {
-      if (isWhatsAppCommandText(body)) {
+      const shouldSendUnpairedNotice =
+        isWhatsAppCommandText(body) ||
+        (chatType === "direct" && hasWhatsAppMessageContent(message));
+      if (shouldSendUnpairedNotice) {
         try {
+          const notice = renderUnpairedHintNotice("whatsapp");
           await sendWhatsAppPairingNotice({
             chatJid,
             accountId,
-            text: unpairedHintText,
+            text: notice.text,
           });
         } catch (error) {
           log({
@@ -4138,10 +4948,11 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     });
     if (!claimed) {
       try {
+        const notice = renderPairingInvalidNotice("whatsapp");
         await sendWhatsAppPairingNotice({
           chatJid,
           accountId,
-          text: pairingInvalidText,
+          text: notice.text,
         });
       } catch (error) {
         log({
@@ -4159,10 +4970,11 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     }
 
     try {
+      const notice = renderPairingSuccessNotice("whatsapp");
       await sendWhatsAppPairingNotice({
         chatJid,
         accountId,
-        text: pairingSuccessText,
+        text: notice.text,
       });
     } catch (error) {
       log({

@@ -634,6 +634,37 @@ In Telegram + OpenClaw flows:
 - `/help` is Telegram slash-command style.
 - `!help` may be interpreted as command/bang syntax by OpenClaw.
 
+## Future Work: Session Selection (Not Implemented Yet)
+
+Current behavior is intentionally simple:
+
+- pairing tokens are issued for a fixed OpenClaw target session (today: `agent:main:main`)
+- `/bot_*` commands only cover pairing/unpairing and quick switch by token
+
+Planned behavior:
+
+- mux exposes a tenant-authenticated session-discovery endpoint under `/v1/mux/*`
+  - example: `GET /v1/mux/sessions`
+  - returns OpenClaw sessions visible to that tenant key
+- dashboard flow lets user choose target session first, then requests pairing token for that session
+- bot control commands can switch the current chat binding to another existing session without leaving chat
+  - example command set:
+    - `/bot_sessions` list available sessions
+    - `/bot_use <session>` switch current chat to selected session
+    - `/bot_status` show current binding target
+
+Why this exists:
+
+- removes hard dependency on a single session target
+- keeps control-plane UX consistent across Telegram, Discord, and WhatsApp
+- lets users move a chat between sessions without re-provisioning OpenClaw
+
+Constraints for this future work:
+
+- mux remains a thin router (no tenant business logic)
+- auth remains tenant-key scoped
+- no backward-compatibility layer is required before launch
+
 ## Tests
 
 From repo root:

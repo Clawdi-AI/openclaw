@@ -180,3 +180,39 @@ For each newly provisioned tenant:
 - One OpenClaw per tenant.
 - Telegram + Discord + WhatsApp.
 - No multi-region clustering in MVP.
+
+## Future Work: Session-Aware Pairing UX
+
+This is intentionally deferred. Current MVP can stay on fixed session target (`agent:main:main`).
+
+### Goal
+
+Let users choose and switch the OpenClaw session bound to each chat without manual operator intervention.
+
+### Planned Contract
+
+- mux-side API (tenant auth):
+  - `GET /v1/mux/sessions`
+  - Returns sessions available to the tenant's OpenClaw.
+- pairing token request:
+  - keep `POST /v1/pairings/token`
+  - require explicit `sessionKey` selected by dashboard
+- bot control commands:
+  - `/bot_sessions` list sessions
+  - `/bot_use <session>` switch binding for current chat
+  - `/bot_status` show current binding target
+
+### Control Plane Flow
+
+1. Dashboard loads available sessions from control-plane backend.
+2. Backend calls mux `/v1/mux/sessions` with tenant key.
+3. User picks session in UI.
+4. Backend calls `POST /v1/pairings/token` with that session.
+5. User redeems token in Telegram/Discord/WhatsApp.
+6. User can later switch target session from chat using `/bot_*` commands.
+
+### Design Constraints
+
+- Keep shared-key tenant auth.
+- Keep mux as a thin transport/control adapter.
+- Avoid introducing per-channel special logic in control plane.

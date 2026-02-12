@@ -2543,7 +2543,7 @@ describe("mux server", () => {
       update_id: 3002,
       message: {
         message_id: 8002,
-        text: "hello after pair",
+        text: "/help",
         date: 1_700_000_001,
         from: { id: 1234 },
         chat: { id: -100777, type: "supergroup" },
@@ -2564,7 +2564,7 @@ describe("mux server", () => {
       update_id: 3004,
       message: {
         message_id: 8004,
-        text: "/help",
+        text: "hello before pairing",
         date: 1_700_000_003,
         from: { id: 1234 },
         chat: { id: 999, type: "private" },
@@ -2581,7 +2581,7 @@ describe("mux server", () => {
     expect(inboundRequests[0]).toMatchObject({
       channel: "telegram",
       sessionKey: "tg:group:-100777:thread:2",
-      body: "hello after pair",
+      body: "/help",
       messageId: "8002",
       threadId: 2,
       channelData: {
@@ -2753,7 +2753,7 @@ describe("mux server", () => {
       id: "1001",
       channel_id: dmChannelId,
       type: 0,
-      content: "/help",
+      content: "hello before pairing",
       author: baseAuthor,
       attachments: [],
       mentions: [],
@@ -2840,6 +2840,458 @@ describe("mux server", () => {
       ],
     });
   }, 15_000);
+
+  test("telegram bot control commands support help, status, unpair, and switch", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const pendingUpdates: Array<Record<string, unknown>> = [];
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      if (req.url === "/botdummy-token/getUpdates") {
+        const body = await readJsonBody(req);
+        const offset = typeof body.offset === "number" ? Number(body.offset) : 0;
+        const deliverable = pendingUpdates
+          .map((entry) => {
+            const updateId = Number(entry.update_id ?? 0);
+            return { entry, updateId };
+          })
+          .filter((entry) => Number.isFinite(entry.updateId) && entry.updateId >= offset)
+          .sort((a, b) => a.updateId - b.updateId);
+        const result = deliverable.map((entry) => entry.entry);
+        if (deliverable.length > 0) {
+          const maxDelivered = deliverable[deliverable.length - 1]?.updateId ?? 0;
+          for (let i = pendingUpdates.length - 1; i >= 0; i -= 1) {
+            const updateId = Number(pendingUpdates[i]?.update_id ?? 0);
+            if (Number.isFinite(updateId) && updateId <= maxDelivered) {
+              pendingUpdates.splice(i, 1);
+            }
+          }
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+      if (req.url === "/botdummy-token/sendMessage") {
+        sentMessages.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: {
+              message_id: 1101,
+              chat: { id: -100888, type: "supergroup", title: "mux-bot-control" },
+            },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 2_000,
+        },
+        {
+          id: "tenant-b",
+          name: "Tenant B",
+          apiKey: "tenant-b-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-BOT-CTRL",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100888",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_INBOUND_ENABLED: "true",
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const initialClaim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-BOT-CTRL",
+      sessionKey: "tg:group:-100888",
+    });
+    expect(initialClaim.status).toBe(200);
+
+    const switchTokenResponse = await createPairingToken({
+      port: server.port,
+      apiKey: "tenant-b-key",
+      channel: "telegram",
+      sessionKey: "tg:group:-100888:switch",
+      ttlSec: 120,
+    });
+    expect(switchTokenResponse.status).toBe(200);
+    const switchTokenBody = (await switchTokenResponse.json()) as { token: string };
+    expect(switchTokenBody.token.startsWith("mpt_")).toBe(true);
+
+    pendingUpdates.push(
+      {
+        update_id: 4101,
+        message: {
+          message_id: 9101,
+          text: "/bot_help",
+          date: 1_700_000_100,
+          from: { id: 1234 },
+          chat: { id: -100888, type: "supergroup" },
+        },
+      },
+      {
+        update_id: 4102,
+        message: {
+          message_id: 9102,
+          text: "/bot_status",
+          date: 1_700_000_101,
+          from: { id: 1234 },
+          chat: { id: -100888, type: "supergroup" },
+        },
+      },
+      {
+        update_id: 4103,
+        message: {
+          message_id: 9103,
+          text: "/bot_unpair",
+          date: 1_700_000_102,
+          from: { id: 1234 },
+          chat: { id: -100888, type: "supergroup" },
+        },
+      },
+      {
+        update_id: 4104,
+        message: {
+          message_id: 9104,
+          text: `/bot_switch ${switchTokenBody.token}`,
+          date: 1_700_000_103,
+          from: { id: 1234 },
+          chat: { id: -100888, type: "supergroup" },
+        },
+      },
+      {
+        update_id: 4105,
+        message: {
+          message_id: 9105,
+          text: "/help",
+          date: 1_700_000_104,
+          from: { id: 1234 },
+          chat: { id: -100888, type: "supergroup" },
+        },
+      },
+    );
+
+    await waitForCondition(
+      () => inboundRequests.length >= 1 && sentMessages.length >= 4,
+      7_000,
+      "timed out waiting for telegram bot control flow",
+    );
+
+    expect(
+      sentMessages.some((msg) => String(msg.text ?? "").includes("Bot control commands")),
+    ).toBe(true);
+    expect(sentMessages.some((msg) => String(msg.text ?? "").includes("Bot status"))).toBe(true);
+    expect(sentMessages.some((msg) => String(msg.text ?? "").includes("Paired: yes"))).toBe(true);
+    expect(
+      sentMessages.some((msg) => String(msg.text ?? "").includes("Unpaired successfully")),
+    ).toBe(true);
+    expect(sentMessages.some((msg) => String(msg.text ?? "").includes("Paired successfully"))).toBe(
+      true,
+    );
+
+    expect(inboundRequests).toHaveLength(1);
+    expect(inboundRequests[0]).toMatchObject({
+      channel: "telegram",
+      sessionKey: "tg:group:-100888:switch",
+      body: "/help",
+      channelData: {
+        routeKey: "telegram:default:chat:-100888",
+      },
+    });
+
+    const pairingsA = await listPairings({ port: server.port, apiKey: "tenant-a-key" });
+    expect(pairingsA.status).toBe(200);
+    expect(await pairingsA.json()).toEqual({ items: [] });
+
+    const pairingsB = await listPairings({ port: server.port, apiKey: "tenant-b-key" });
+    expect(pairingsB.status).toBe(200);
+    expect(await pairingsB.json()).toEqual({
+      items: [
+        {
+          bindingId: expect.stringContaining("bind_"),
+          channel: "telegram",
+          scope: "chat",
+          routeKey: "telegram:default:chat:-100888",
+        },
+      ],
+    });
+  });
+
+  test("discord bot control commands support status, unpair, and switch on an active route", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const dmChannelId = "778001";
+    const dmUserId = "4242";
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const pendingMessages: Array<Record<string, unknown>> = [];
+    const discordApi = await startHttpServer(async (req, res) => {
+      const method = req.method ?? "GET";
+      const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+
+      if (method === "POST" && requestUrl.pathname === "/users/@me/channels") {
+        const body = await readJsonBody(req);
+        const recipientId = String(body.recipient_id ?? "");
+        if (recipientId === dmUserId) {
+          res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ id: dmChannelId }));
+          return;
+        }
+      }
+
+      if (method === "GET" && requestUrl.pathname === `/channels/${dmChannelId}/messages`) {
+        const after = requestUrl.searchParams.get("after");
+        const afterNum = after && /^\d+$/.test(after) ? BigInt(after) : null;
+        const deliverable = pendingMessages
+          .filter((message) => {
+            const id = String(message.id ?? "");
+            if (!/^\d+$/.test(id)) {
+              return false;
+            }
+            return afterNum === null ? true : BigInt(id) > afterNum;
+          })
+          .sort((a, b) => Number(String(a.id ?? "0")) - Number(String(b.id ?? "0")));
+        if (deliverable.length > 0) {
+          const maxDelivered = BigInt(String(deliverable[deliverable.length - 1]?.id ?? "0"));
+          for (let i = pendingMessages.length - 1; i >= 0; i -= 1) {
+            const id = String(pendingMessages[i]?.id ?? "0");
+            if (/^\d+$/.test(id) && BigInt(id) <= maxDelivered) {
+              pendingMessages.splice(i, 1);
+            }
+          }
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(deliverable));
+        return;
+      }
+
+      if (method === "POST" && requestUrl.pathname === `/channels/${dmChannelId}/messages`) {
+        sentMessages.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            id: String(9500 + sentMessages.length),
+            channel_id: dmChannelId,
+          }),
+        );
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 2_000,
+        },
+        {
+          id: "tenant-b",
+          name: "Tenant B",
+          apiKey: "tenant-b-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-DC-BOT-CTRL",
+          channel: "discord",
+          routeKey: "discord:default:dm:user:4242",
+          scope: "dm",
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_INBOUND_ENABLED: "true",
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+        MUX_DISCORD_POLL_INTERVAL_MS: "50",
+        MUX_DISCORD_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const initialClaim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-DC-BOT-CTRL",
+      sessionKey: "dc:dm:4242",
+    });
+    expect(initialClaim.status).toBe(200);
+
+    const switchTokenResponse = await createPairingToken({
+      port: server.port,
+      apiKey: "tenant-b-key",
+      channel: "discord",
+      routeKey: "discord:default:dm:user:4242",
+      sessionKey: "dc:dm:4242:switch",
+      ttlSec: 120,
+    });
+    expect(switchTokenResponse.status).toBe(200);
+    const switchTokenBody = (await switchTokenResponse.json()) as { token: string };
+    expect(switchTokenBody.token.startsWith("mpt_")).toBe(true);
+
+    pendingMessages.push(
+      {
+        id: "1201",
+        channel_id: dmChannelId,
+        type: 0,
+        content: "!bot_status",
+        author: { id: dmUserId, bot: false, username: "tester" },
+        attachments: [],
+        mentions: [],
+        mention_roles: [],
+        timestamp: "2026-01-01T00:10:01.000Z",
+      },
+      {
+        id: "1202",
+        channel_id: dmChannelId,
+        type: 0,
+        content: "/bot_unpair",
+        author: { id: dmUserId, bot: false, username: "tester" },
+        attachments: [],
+        mentions: [],
+        mention_roles: [],
+        timestamp: "2026-01-01T00:10:02.000Z",
+      },
+      {
+        id: "1203",
+        channel_id: dmChannelId,
+        type: 0,
+        content: "!bot_status",
+        author: { id: dmUserId, bot: false, username: "tester" },
+        attachments: [],
+        mentions: [],
+        mention_roles: [],
+        timestamp: "2026-01-01T00:10:03.000Z",
+      },
+      {
+        id: "1204",
+        channel_id: dmChannelId,
+        type: 0,
+        content: `!bot_switch ${switchTokenBody.token}`,
+        author: { id: dmUserId, bot: false, username: "tester" },
+        attachments: [],
+        mentions: [],
+        mention_roles: [],
+        timestamp: "2026-01-01T00:10:04.000Z",
+      },
+    );
+
+    await waitForCondition(
+      () => sentMessages.some((msg) => String(msg.content ?? "").includes("Paired successfully")),
+      12_000,
+      "timed out waiting for discord bot switch success",
+    );
+
+    pendingMessages.push({
+      id: "1205",
+      channel_id: dmChannelId,
+      type: 0,
+      content: "/help",
+      author: { id: dmUserId, bot: false, username: "tester" },
+      attachments: [],
+      mentions: [],
+      mention_roles: [],
+      timestamp: "2026-01-01T00:10:05.000Z",
+    });
+
+    await waitForCondition(
+      () => inboundRequests.length >= 1,
+      12_000,
+      "timed out waiting for discord /help forward after switch",
+    );
+
+    expect(sentMessages.some((msg) => String(msg.content ?? "").includes("Bot status"))).toBe(true);
+    expect(sentMessages.some((msg) => String(msg.content ?? "").includes("Paired: yes"))).toBe(
+      true,
+    );
+    expect(sentMessages.some((msg) => String(msg.content ?? "").includes("Paired: no"))).toBe(true);
+    expect(
+      sentMessages.some((msg) => String(msg.content ?? "").includes("Unpaired successfully")),
+    ).toBe(true);
+    expect(
+      sentMessages.some((msg) => String(msg.content ?? "").includes("Paired successfully")),
+    ).toBe(true);
+
+    expect(inboundRequests).toHaveLength(1);
+    expect(inboundRequests[0]).toMatchObject({
+      channel: "discord",
+      sessionKey: "dc:dm:4242:switch",
+      body: "/help",
+      channelData: {
+        routeKey: "discord:default:dm:user:4242",
+      },
+    });
+
+    const pairingsA = await listPairings({ port: server.port, apiKey: "tenant-a-key" });
+    expect(pairingsA.status).toBe(200);
+    expect(await pairingsA.json()).toEqual({ items: [] });
+
+    const pairingsB = await listPairings({ port: server.port, apiKey: "tenant-b-key" });
+    expect(pairingsB.status).toBe(200);
+    expect(await pairingsB.json()).toEqual({
+      items: [
+        {
+          bindingId: expect.stringContaining("bind_"),
+          channel: "discord",
+          scope: "dm",
+          routeKey: "discord:default:dm:user:4242",
+        },
+      ],
+    });
+  }, 20_000);
 
   test("acks discord invalid pairing token message to avoid replay spam", async () => {
     const dmChannelId = "997001";
