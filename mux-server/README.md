@@ -93,16 +93,13 @@ node --import tsx mux-server/src/server.ts
 - `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events (recommended: `mux`).
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
 - `MUX_DISCORD_API_BASE_URL` (default `https://discord.com/api/v10`): Discord API base URL.
-- `MUX_TELEGRAM_INBOUND_ENABLED` (default `auto`): enable Telegram inbound polling and forwarding. Auto mode enables when `TELEGRAM_BOT_TOKEN` is present.
 - `MUX_TELEGRAM_POLL_TIMEOUT_SEC` (default `25`): Telegram long-poll timeout.
 - `MUX_TELEGRAM_POLL_RETRY_MS` (default `1000`): backoff after poll errors.
 - `MUX_TELEGRAM_BOOTSTRAP_LATEST` (default `true`): when enabled, skips historical backlog on cold start.
 - `MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size fetched from Telegram for inbound image attachments.
-- `MUX_DISCORD_INBOUND_ENABLED` (default `auto`): enable Discord inbound polling and forwarding. Auto mode enables when `DISCORD_BOT_TOKEN` is present.
 - `MUX_DISCORD_POLL_INTERVAL_MS` (default `2000`): Discord poll interval.
 - `MUX_DISCORD_BOOTSTRAP_LATEST` (default `true`): when enabled, skips historical backlog on cold start.
 - `MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size fetched from Discord attachment URLs for inbound image attachments.
-- `MUX_WHATSAPP_INBOUND_ENABLED` (default `auto`): enable WhatsApp inbound monitoring and forwarding. Auto mode enables when `<MUX_WHATSAPP_AUTH_DIR>/creds.json` exists.
 - `MUX_WHATSAPP_ACCOUNT_ID` (default `default`): WhatsApp account id to monitor.
 - `MUX_WHATSAPP_AUTH_DIR` (optional): WhatsApp auth directory; defaults to OpenClaw's default web auth dir.
 - `MUX_WHATSAPP_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size read from saved WhatsApp inbound media files for image attachments.
@@ -133,7 +130,10 @@ Notes:
 
 - Shared-key mode is the only supported model.
 - mux always uses tenant `apiKey` as inbound auth token when forwarding to OpenClaw.
-- For channel inbound enable flags, set explicit `true` or `false` to override auto-detection.
+- Inbound listeners are auto-enabled by capability:
+- Telegram when `TELEGRAM_BOT_TOKEN` is set.
+- Discord when `DISCORD_BOT_TOKEN` is set.
+- WhatsApp when `<MUX_WHATSAPP_AUTH_DIR>/creds.json` exists.
 
 ### Dedicated OpenClaw Mux Account
 

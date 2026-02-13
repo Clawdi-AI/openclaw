@@ -76,7 +76,6 @@ Listener defaults in local e2e:
 - Telegram inbound starts automatically when `TELEGRAM_BOT_TOKEN` is present.
 - Discord inbound starts automatically when `DISCORD_BOT_TOKEN` is present.
 - WhatsApp inbound starts automatically when `state/wa-auth/default/creds.json` exists.
-- Force behavior with `MUX_*_INBOUND_ENABLED=true|false` in `.env.local` if needed.
 
 ## Pairing UX Test
 

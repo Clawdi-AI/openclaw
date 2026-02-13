@@ -468,20 +468,14 @@ const whatsappAccountId = readNonEmptyString(process.env.MUX_WHATSAPP_ACCOUNT_ID
 const whatsappAuthDir =
   readNonEmptyString(process.env.MUX_WHATSAPP_AUTH_DIR) || resolveDefaultWhatsAppAuthDir();
 
-const telegramInboundEnabled = resolveInboundEnabled(
-  "MUX_TELEGRAM_INBOUND_ENABLED",
-  Boolean(readNonEmptyString(telegramBotToken)),
-);
+const telegramInboundEnabled = Boolean(readNonEmptyString(telegramBotToken));
 const telegramPollTimeoutSec = Number(process.env.MUX_TELEGRAM_POLL_TIMEOUT_SEC || 25);
 const telegramPollRetryMs = Number(process.env.MUX_TELEGRAM_POLL_RETRY_MS || 1_000);
 const telegramBootstrapLatest = process.env.MUX_TELEGRAM_BOOTSTRAP_LATEST !== "false";
 const telegramInboundMediaMaxBytes = Number(
   process.env.MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
-const discordInboundEnabled = resolveInboundEnabled(
-  "MUX_DISCORD_INBOUND_ENABLED",
-  Boolean(readNonEmptyString(discordBotToken)),
-);
+const discordInboundEnabled = Boolean(readNonEmptyString(discordBotToken));
 const discordPollIntervalMs = Number(process.env.MUX_DISCORD_POLL_INTERVAL_MS || 2_000);
 const discordBootstrapLatest = process.env.MUX_DISCORD_BOOTSTRAP_LATEST !== "false";
 const discordInboundMediaMaxBytes = Number(
@@ -498,10 +492,7 @@ const discordGatewayReconnectInitialMs = Number(
 const discordGatewayReconnectMaxMs = Number(
   process.env.MUX_DISCORD_GATEWAY_RECONNECT_MAX_MS || 30_000,
 );
-const whatsappInboundEnabled = resolveInboundEnabled(
-  "MUX_WHATSAPP_INBOUND_ENABLED",
-  fs.existsSync(path.join(whatsappAuthDir, "creds.json")),
-);
+const whatsappInboundEnabled = fs.existsSync(path.join(whatsappAuthDir, "creds.json"));
 const whatsappInboundMediaMaxBytes = Number(
   process.env.MUX_WHATSAPP_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
@@ -529,15 +520,6 @@ const requestBodyMaxBytes = (() => {
   }
   return Math.trunc(parsed);
 })();
-
-if (telegramInboundEnabled && !telegramBotToken?.trim()) {
-  console.error("TELEGRAM_BOT_TOKEN is required when MUX_TELEGRAM_INBOUND_ENABLED=true");
-  process.exit(1);
-}
-if (discordInboundEnabled && !discordBotToken?.trim()) {
-  console.error("DISCORD_BOT_TOKEN is required when MUX_DISCORD_INBOUND_ENABLED=true");
-  process.exit(1);
-}
 
 let tenantSeeds: TenantSeed[] = [];
 try {
@@ -1387,21 +1369,6 @@ function readPositiveInt(value: unknown): number | undefined {
     }
   }
   return undefined;
-}
-
-function resolveInboundEnabled(envName: string, defaultEnabled: boolean): boolean {
-  const raw = process.env[envName];
-  if (raw == null || raw.trim() === "") {
-    return defaultEnabled;
-  }
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === "true") {
-    return true;
-  }
-  if (normalized === "false") {
-    return false;
-  }
-  throw new Error(`${envName} must be 'true' or 'false'`);
 }
 
 function getWhatsAppCredentialHealth() {

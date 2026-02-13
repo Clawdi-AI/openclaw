@@ -513,7 +513,6 @@ describe("mux server", () => {
         extraEnv: {
           MUX_ADMIN_TOKEN: "admin-secret",
           MUX_WHATSAPP_AUTH_DIR: authDir,
-          MUX_WHATSAPP_INBOUND_ENABLED: "false",
         },
       });
 
@@ -522,26 +521,28 @@ describe("mux server", () => {
         adminToken: "admin-secret",
       });
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({
-        ok: true,
+      const body = (await response.json()) as {
+        ok: boolean;
         whatsapp: {
-          status: "disabled",
-          inboundEnabled: false,
-          authDir,
-          authDirExists: true,
-          credsPath: resolve(authDir, "creds.json"),
-          creds: {
-            present: true,
-          },
-          fileCounts: {
-            session: 1,
-            preKey: 1,
-          },
-          runtime: {
-            listenerActive: false,
-          },
-        },
-      });
+          status: string;
+          inboundEnabled: boolean;
+          authDir: string;
+          authDirExists: boolean;
+          credsPath: string;
+          creds: { present: boolean };
+          fileCounts: { session: number; preKey: number };
+          runtime: { listenerActive: boolean };
+        };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.whatsapp.inboundEnabled).toBe(true);
+      expect(body.whatsapp.authDir).toBe(authDir);
+      expect(body.whatsapp.authDirExists).toBe(true);
+      expect(body.whatsapp.credsPath).toBe(resolve(authDir, "creds.json"));
+      expect(body.whatsapp.creds.present).toBe(true);
+      expect(body.whatsapp.fileCounts.session).toBe(1);
+      expect(body.whatsapp.fileCounts.preKey).toBe(1);
+      expect(["starting_or_idle", "listening", "listener_error"]).toContain(body.whatsapp.status);
     } finally {
       rmSync(authDir, { recursive: true, force: true });
     }
@@ -607,7 +608,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_TELEGRAM_INBOUND_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -742,7 +742,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_TELEGRAM_INBOUND_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -1778,7 +1777,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_TELEGRAM_INBOUND_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -1905,7 +1903,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_TELEGRAM_INBOUND_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -2028,7 +2025,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_TELEGRAM_INBOUND_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -2153,7 +2149,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_TELEGRAM_INBOUND_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -2314,7 +2309,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_DISCORD_INBOUND_ENABLED: "true",
         MUX_DISCORD_API_BASE_URL: discordApi.url,
         MUX_DISCORD_POLL_INTERVAL_MS: "50",
         MUX_DISCORD_BOOTSTRAP_LATEST: "false",
@@ -2465,7 +2459,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_DISCORD_INBOUND_ENABLED: "true",
         MUX_DISCORD_API_BASE_URL: discordApi.url,
         MUX_DISCORD_POLL_INTERVAL_MS: "50",
         MUX_DISCORD_BOOTSTRAP_LATEST: "false",
@@ -2568,7 +2561,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_TELEGRAM_INBOUND_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -2785,7 +2777,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_DISCORD_INBOUND_ENABLED: "true",
         MUX_DISCORD_API_BASE_URL: discordApi.url,
         MUX_DISCORD_POLL_INTERVAL_MS: "50",
         MUX_DISCORD_BOOTSTRAP_LATEST: "false",
@@ -2998,7 +2989,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_TELEGRAM_INBOUND_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -3223,7 +3213,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_DISCORD_INBOUND_ENABLED: "true",
         MUX_DISCORD_API_BASE_URL: discordApi.url,
         MUX_DISCORD_POLL_INTERVAL_MS: "50",
         MUX_DISCORD_BOOTSTRAP_LATEST: "false",
@@ -3432,7 +3421,6 @@ describe("mux server", () => {
     const server = await startServer({
       tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
       extraEnv: {
-        MUX_DISCORD_INBOUND_ENABLED: "true",
         MUX_DISCORD_API_BASE_URL: discordApi.url,
         MUX_DISCORD_POLL_INTERVAL_MS: "50",
         MUX_DISCORD_BOOTSTRAP_LATEST: "false",
@@ -3551,7 +3539,6 @@ describe("mux server", () => {
     const server = await startServer({
       tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
       extraEnv: {
-        MUX_DISCORD_INBOUND_ENABLED: "true",
         MUX_DISCORD_API_BASE_URL: discordApi.url,
         MUX_DISCORD_POLL_INTERVAL_MS: "50",
         MUX_DISCORD_BOOTSTRAP_LATEST: "false",
