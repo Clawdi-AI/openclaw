@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     queuedFinal: false,
     counts: { tool: 0, block: 0, final: 0 },
   })),
+  resolveTelegramCallbackAction: vi.fn(),
   sendTypingViaMux: vi.fn(async () => {}),
 }));
 
@@ -24,6 +25,14 @@ vi.mock("../auto-reply/dispatch.js", async (importOriginal) => {
   return {
     ...actual,
     dispatchInboundMessage: mocks.dispatchInboundMessage,
+  };
+});
+
+vi.mock("../telegram/callback-actions.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../telegram/callback-actions.js")>();
+  return {
+    ...actual,
+    resolveTelegramCallbackAction: mocks.resolveTelegramCallbackAction,
   };
 });
 
@@ -81,6 +90,7 @@ function createResponse(): ServerResponse & { bodyText: string; headersMap: Map<
 afterEach(() => {
   mocks.loadConfig.mockReset();
   mocks.dispatchInboundMessage.mockClear();
+  mocks.resolveTelegramCallbackAction.mockReset();
   mocks.sendTypingViaMux.mockReset();
   vi.unstubAllGlobals();
 });
@@ -402,7 +412,7 @@ describe("handleMuxInboundHttpRequest", () => {
     expect(mocks.dispatchInboundMessage).toHaveBeenCalledTimes(1);
   });
 
-  test("forwards callback events as regular inbound transport payload", async () => {
+  test("handles telegram callback edit actions via mux raw outbound", async () => {
     mocks.loadConfig.mockReturnValue({
       gateway: {
         http: {
@@ -410,11 +420,24 @@ describe("handleMuxInboundHttpRequest", () => {
             mux: {
               enabled: true,
               token: "mux-secret",
+              baseUrl: "http://mux.local",
             },
           },
         },
       },
     });
+    mocks.resolveTelegramCallbackAction.mockResolvedValue({
+      kind: "edit",
+      text: "page two",
+      buttons: [[{ text: "Prev", callback_data: "commands_page_1:main" }]],
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      text: async () => "",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
 
     const req = createRequest({
       headers: {
@@ -445,6 +468,85 @@ describe("handleMuxInboundHttpRequest", () => {
 
     expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
     expect(res.statusCode).toBe(202);
+    expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    expect(mocks.resolveTelegramCallbackAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: "commands_page_2:main",
+        chatId: "-100555",
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      channel: "telegram",
+      sessionKey: "tg:group:-100555",
+      accountId: "default",
+      raw: {
+        telegram: {
+          method: "editMessageText",
+          body: {
+            message_id: 777,
+            text: "page two",
+            reply_markup: {
+              inline_keyboard: [[{ text: "Prev", callback_data: "commands_page_1:main" }]],
+            },
+          },
+        },
+      },
+    });
+  });
+
+  test("forwards telegram callback actions as synthetic command text", async () => {
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              token: "mux-secret",
+              baseUrl: "http://mux.local",
+            },
+          },
+        },
+      },
+    });
+    mocks.resolveTelegramCallbackAction.mockResolvedValue({
+      kind: "forward",
+      text: "/model openai/gpt-5",
+    });
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer mux-secret",
+      },
+      body: {
+        eventId: "tgcb:471",
+        event: { kind: "callback" },
+        channel: "telegram",
+        sessionKey: "tg:group:-100555",
+        to: "telegram:-100555",
+        from: "telegram:1234",
+        body: "mdl_sel_openai:gpt-5",
+        accountId: "default",
+        chatType: "group",
+        messageId: "778",
+        channelData: {
+          chatId: "-100555",
+          routeKey: "telegram:default:chat:-100555",
+          telegram: {
+            callbackData: "mdl_sel_openai:gpt-5",
+            callbackMessageId: "778",
+          },
+        },
+      },
+    });
+    const res = createResponse();
+
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
     await waitForAsyncDispatch();
     expect(mocks.dispatchInboundMessage).toHaveBeenCalledTimes(1);
     const call = mocks.dispatchInboundMessage.mock.calls[0]?.[0] as
@@ -453,21 +555,13 @@ describe("handleMuxInboundHttpRequest", () => {
             Body?: string;
             RawBody?: string;
             CommandBody?: string;
-            ChannelData?: Record<string, unknown>;
           };
         }
       | undefined;
     expect(call?.ctx).toMatchObject({
-      Body: "commands_page_2:main",
-      RawBody: "commands_page_2:main",
-      CommandBody: "commands_page_2:main",
-      ChannelData: {
-        chatId: "-100555",
-        telegram: {
-          callbackData: "commands_page_2:main",
-          callbackMessageId: "777",
-        },
-      },
+      Body: "/model openai/gpt-5",
+      RawBody: "/model openai/gpt-5",
+      CommandBody: "/model openai/gpt-5",
     });
   });
 });
