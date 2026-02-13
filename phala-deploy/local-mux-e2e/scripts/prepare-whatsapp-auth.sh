@@ -4,12 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-SRC="${WA_AUTH_SOURCE:-${HOME}/.openclaw/credentials/whatsapp/default}"
+SRC="${WA_AUTH_SOURCE:-}"
 DST="${STACK_DIR}/state/wa-auth/default"
+
+if [[ -z "${SRC}" ]]; then
+  echo "[local-mux-e2e] WA_AUTH_SOURCE is required." >&2
+  echo "[local-mux-e2e] Use a dedicated local test auth path (do not reuse production creds)." >&2
+  echo "[local-mux-e2e] Example: WA_AUTH_SOURCE=/path/to/local/wa-auth/default ./phala-deploy/local-mux-e2e/scripts/up.sh" >&2
+  exit 1
+fi
 
 if [[ ! -d "${SRC}" ]]; then
   echo "[local-mux-e2e] WhatsApp auth source not found: ${SRC}" >&2
-  echo "[local-mux-e2e] Set WA_AUTH_SOURCE to your bot auth directory and retry." >&2
+  echo "[local-mux-e2e] Set WA_AUTH_SOURCE to your local test bot auth directory and retry." >&2
   exit 1
 fi
 

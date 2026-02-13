@@ -17,6 +17,12 @@ This stack mirrors the production shape on one machine:
   - mux DB/logs are in local Docker volume (`mux_data`).
   - WhatsApp auth is copied to `phala-deploy/local-mux-e2e/state/wa-auth/default` as a test snapshot.
 
+## Credential guardrail (required)
+
+- Do not reuse production WhatsApp auth/session files for local e2e testing.
+- Keep a dedicated local test session and point `WA_AUTH_SOURCE` to that test-only path.
+- If local auth gets corrupted, relink locally and refresh the local snapshot. Do not copy production creds into local test state.
+
 ## Prerequisites
 
 - Docker (Compose v2)
@@ -26,8 +32,7 @@ This stack mirrors the production shape on one machine:
   - `TELEGRAM_BOT_TOKEN`
   - `DISCORD_BOT_TOKEN`
 - A valid WhatsApp auth dir at:
-  - default: `~/.openclaw/credentials/whatsapp/default`
-  - override: `WA_AUTH_SOURCE=<path>`
+  - required override: `WA_AUTH_SOURCE=<path-to-local-test-auth>`
 
 ## Bring Up
 
@@ -38,10 +43,10 @@ This stack mirrors the production shape on one machine:
 What `up.sh` does:
 
 1. Copies WhatsApp auth snapshot into local state.
-2. Pulls secrets from `rv` into a temp env file.
-3. Runs `docker compose up -d --build`.
+2. Injects secrets with `rv-exec` for compose interpolation.
+3. Runs `docker compose up -d --build --remove-orphans`.
 
-Optional overrides: create `phala-deploy/local-mux-e2e/.env.local` from `.env.example`.
+`WA_AUTH_SOURCE` is required. Set it inline or in `phala-deploy/local-mux-e2e/.env.local` (from `.env.example`).
 
 ## Bootstrap One Tenant
 
@@ -65,6 +70,13 @@ What bootstrap does:
 3. Calls mux admin API `POST /v1/admin/tenants/bootstrap` with inbound target:
    - `http://openclaw:18789/v1/mux/inbound`
 4. Stores tenant info in `phala-deploy/local-mux-e2e/state/tenant.env`.
+
+Listener defaults in local e2e:
+
+- Telegram inbound starts automatically when `TELEGRAM_BOT_TOKEN` is present.
+- Discord inbound starts automatically when `DISCORD_BOT_TOKEN` is present.
+- WhatsApp inbound starts automatically when `state/wa-auth/default/creds.json` exists.
+- Force behavior with `MUX_*_INBOUND_ENABLED=true|false` in `.env.local` if needed.
 
 ## Pairing UX Test
 
@@ -106,11 +118,13 @@ Follow logs:
 Stop only:
 
 ```bash
-./phala-deploy/local-mux-e2e/scripts/down.sh
+rv-exec MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN -- \
+  bash -lc './phala-deploy/local-mux-e2e/scripts/down.sh'
 ```
 
 Stop and wipe local test state:
 
 ```bash
-./phala-deploy/local-mux-e2e/scripts/down.sh --wipe
+rv-exec MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN -- \
+  bash -lc './phala-deploy/local-mux-e2e/scripts/down.sh --wipe'
 ```

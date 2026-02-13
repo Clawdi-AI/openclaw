@@ -5,8 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 COMPOSE_FILE="${STACK_DIR}/docker-compose.yml"
 
-"${SCRIPT_DIR}/prepare-whatsapp-auth.sh"
-
 if ! command -v docker >/dev/null 2>&1; then
   echo "[local-mux-e2e] docker is required." >&2
   exit 1
@@ -24,6 +22,8 @@ if [[ -f "${STACK_DIR}/.env.local" ]]; then
   source "${STACK_DIR}/.env.local"
   set +a
 fi
+
+"${SCRIPT_DIR}/prepare-whatsapp-auth.sh"
 
 rv-exec MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN REDPILL_API_KEY \
   -- docker compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans

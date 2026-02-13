@@ -5,6 +5,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import WebSocket from "ws";
 import {
   buildWhatsAppInboundEnvelope,
   buildDiscordInboundEnvelope,
@@ -189,6 +190,18 @@ type WebListenerCloseReason = {
 type WebMonitorListener = ActiveWebListener & {
   close: () => Promise<void>;
   onClose: Promise<WebListenerCloseReason>;
+};
+
+type WhatsAppRuntimeHealth = {
+  listenerActive: boolean;
+  loopStartedAtMs: number | null;
+  lastListenerStartAtMs: number | null;
+  lastListenerCloseAtMs: number | null;
+  lastListenerCloseStatus: number | null;
+  lastListenerClosedLoggedOut: boolean | null;
+  lastListenerErrorAtMs: number | null;
+  lastListenerError: string | null;
+  lastInboundSeenAtMs: number | null;
 };
 
 type WebRuntimeModules = {
@@ -475,6 +488,16 @@ const discordInboundMediaMaxBytes = Number(
   process.env.MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
 const discordPendingGcEnabled = process.env.MUX_DISCORD_PENDING_GC_ENABLED === "true";
+const discordGatewayDmEnabled = process.env.MUX_DISCORD_GATEWAY_DM_ENABLED !== "false";
+const discordGatewayDmIntents = Number(
+  process.env.MUX_DISCORD_GATEWAY_DM_INTENTS || 36_864, // DirectMessages + MessageContent
+);
+const discordGatewayReconnectInitialMs = Number(
+  process.env.MUX_DISCORD_GATEWAY_RECONNECT_INITIAL_MS || 1_000,
+);
+const discordGatewayReconnectMaxMs = Number(
+  process.env.MUX_DISCORD_GATEWAY_RECONNECT_MAX_MS || 30_000,
+);
 const whatsappInboundEnabled = resolveInboundEnabled(
   "MUX_WHATSAPP_INBOUND_ENABLED",
   fs.existsSync(path.join(whatsappAuthDir, "creds.json")),
@@ -907,6 +930,17 @@ const discordChannelGuildCacheTtlMs = 30_000;
 const discordDmChannelCache = new Map<string, { channelId: string; expiresAtMs: number }>();
 const discordDmChannelCacheTtlMs = 10 * 60_000;
 let activeWhatsAppListener: ActiveWebListener | null = null;
+const whatsappRuntimeHealth: WhatsAppRuntimeHealth = {
+  listenerActive: false,
+  loopStartedAtMs: null,
+  lastListenerStartAtMs: null,
+  lastListenerCloseAtMs: null,
+  lastListenerCloseStatus: null,
+  lastListenerClosedLoggedOut: null,
+  lastListenerErrorAtMs: null,
+  lastListenerError: null,
+  lastInboundSeenAtMs: null,
+};
 
 function hashApiKey(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -1370,6 +1404,110 @@ function resolveInboundEnabled(envName: string, defaultEnabled: boolean): boolea
   throw new Error(`${envName} must be 'true' or 'false'`);
 }
 
+function getWhatsAppCredentialHealth() {
+  const authDir = whatsappAuthDir;
+  const credsPath = path.join(authDir, "creds.json");
+  const authDirExists = fs.existsSync(authDir);
+  const credsPresent = fs.existsSync(credsPath);
+  const fileCounts = {
+    session: 0,
+    senderKey: 0,
+    preKey: 0,
+    deviceList: 0,
+    lidMapping: 0,
+  };
+  let scanError: string | null = null;
+
+  if (authDirExists) {
+    try {
+      for (const entry of fs.readdirSync(authDir)) {
+        if (entry.startsWith("session-")) {
+          fileCounts.session += 1;
+          continue;
+        }
+        if (entry.startsWith("sender-key-")) {
+          fileCounts.senderKey += 1;
+          continue;
+        }
+        if (entry.startsWith("pre-key-")) {
+          fileCounts.preKey += 1;
+          continue;
+        }
+        if (entry.startsWith("device-list-")) {
+          fileCounts.deviceList += 1;
+          continue;
+        }
+        if (entry.startsWith("lid-mapping-")) {
+          fileCounts.lidMapping += 1;
+        }
+      }
+    } catch (error) {
+      scanError = String(error);
+    }
+  }
+
+  let credsStat: { present: boolean; sizeBytes?: number; mtimeMs?: number } = {
+    present: credsPresent,
+  };
+  let credsMeId: string | null = null;
+  if (credsPresent) {
+    try {
+      const stat = fs.statSync(credsPath);
+      credsStat = {
+        present: true,
+        sizeBytes: stat.size,
+        mtimeMs: stat.mtimeMs,
+      };
+      const parsedCreds = JSON.parse(fs.readFileSync(credsPath, "utf8")) as {
+        me?: { id?: unknown };
+      };
+      if (typeof parsedCreds.me?.id === "string" && parsedCreds.me.id.trim() !== "") {
+        credsMeId = parsedCreds.me.id.trim();
+      }
+    } catch {
+      credsStat = { present: true };
+    }
+  }
+
+  let status = "disabled";
+  if (whatsappInboundEnabled) {
+    if (!authDirExists || !credsPresent) {
+      status = "missing_credentials";
+    } else if (whatsappRuntimeHealth.listenerActive) {
+      status = "listening";
+    } else if (whatsappRuntimeHealth.lastListenerErrorAtMs) {
+      status = "listener_error";
+    } else {
+      status = "starting_or_idle";
+    }
+  }
+
+  return {
+    status,
+    inboundEnabled: whatsappInboundEnabled,
+    accountId: whatsappAccountId,
+    openclawAccountId: openclawMuxAccountId,
+    authDir,
+    authDirExists,
+    credsPath,
+    creds: credsStat,
+    credsMeId,
+    fileCounts,
+    runtime: {
+      listenerActive: whatsappRuntimeHealth.listenerActive,
+      loopStartedAtMs: whatsappRuntimeHealth.loopStartedAtMs,
+      lastListenerStartAtMs: whatsappRuntimeHealth.lastListenerStartAtMs,
+      lastListenerCloseAtMs: whatsappRuntimeHealth.lastListenerCloseAtMs,
+      lastListenerCloseStatus: whatsappRuntimeHealth.lastListenerCloseStatus,
+      lastListenerClosedLoggedOut: whatsappRuntimeHealth.lastListenerClosedLoggedOut,
+      lastListenerErrorAtMs: whatsappRuntimeHealth.lastListenerErrorAtMs,
+      lastListenerError: whatsappRuntimeHealth.lastListenerError,
+      lastInboundSeenAtMs: whatsappRuntimeHealth.lastInboundSeenAtMs,
+    },
+    ...(scanError ? { scanError } : {}),
+  };
+}
+
 function readUnsignedNumericString(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     return String(Math.trunc(value));
@@ -1489,6 +1627,42 @@ async function discordRequest(params: {
   });
   const result = parseDiscordJsonBody(await response.text());
   return { response, result };
+}
+
+function parseDiscordGatewayPayload(raw: WebSocket.RawData): Record<string, unknown> | null {
+  let text: string | null = null;
+  if (typeof raw === "string") {
+    text = raw;
+  } else if (Buffer.isBuffer(raw)) {
+    text = raw.toString("utf8");
+  } else if (Array.isArray(raw)) {
+    text = Buffer.concat(raw).toString("utf8");
+  } else if (raw instanceof ArrayBuffer) {
+    text = Buffer.from(raw).toString("utf8");
+  }
+  if (!text) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return asRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchDiscordGatewayUrl(): Promise<string> {
+  const { response, result } = await discordRequest({
+    method: "GET",
+    path: "/gateway/bot",
+  });
+  if (!response.ok) {
+    throw new Error(`discord gateway discovery failed (${response.status})`);
+  }
+  const rawUrl = readNonEmptyString(result.url) ?? "wss://gateway.discord.gg";
+  const base = rawUrl.replace(/\/+$/, "");
+  const separator = base.includes("?") ? "&" : "?";
+  return `${base}${separator}v=10&encoding=json`;
 }
 
 async function resolveDiscordDmChannelId(userId: string): Promise<string> {
@@ -2530,6 +2704,10 @@ function parseDiscordRouteKey(routeKey: string): DiscordBoundRoute | null {
   };
 }
 
+function buildDiscordDmRouteKey(userId: string): string {
+  return `discord:default:dm:user:${userId}`;
+}
+
 function buildWhatsAppRouteKey(chatJid: string, accountId = "default"): string {
   return `whatsapp:${accountId}:chat:${chatJid}`;
 }
@@ -3243,6 +3421,121 @@ async function sendDiscordPairingNotice(params: { channelId: string; text: strin
   if (!response.ok) {
     throw new Error(`discord pairing notice failed (${response.status})`);
   }
+}
+
+async function forwardDiscordMessageToTenant(params: {
+  tenantId: string;
+  bindingId: string;
+  routeKey: string;
+  route: DiscordBoundRoute;
+  channelId: string;
+  message: Record<string, unknown>;
+  messageId: string;
+  fromId: string;
+  body: string;
+}): Promise<"forwarded" | "ignored" | "deferred"> {
+  const target = resolveTenantInboundTarget(params.tenantId);
+  if (!target) {
+    log({
+      type: "discord_inbound_drop_no_target",
+      tenantId: params.tenantId,
+      bindingId: params.bindingId,
+      routeKey: params.routeKey,
+    });
+    return "deferred";
+  }
+
+  const inboundMedia = await extractDiscordInboundMedia({
+    message: params.message,
+    messageId: params.messageId,
+  });
+  if (!params.body && inboundMedia.attachments.length === 0) {
+    return "ignored";
+  }
+
+  const existingRoute = stmtSelectSessionKeyByBinding.get(
+    params.tenantId,
+    "discord",
+    params.bindingId,
+  ) as { session_key?: unknown } | undefined;
+  const sessionKey =
+    (typeof existingRoute?.session_key === "string" && existingRoute.session_key.trim()) ||
+    deriveDiscordSessionKey({ route: params.route, channelId: params.channelId });
+
+  stmtUpsertSessionRoute.run(
+    params.tenantId,
+    "discord",
+    sessionKey,
+    params.bindingId,
+    JSON.stringify({ routeKey: params.routeKey, channelId: params.channelId }),
+    Date.now(),
+  );
+
+  const timestampMs = (() => {
+    const timestampRaw =
+      typeof params.message.timestamp === "string" ? Date.parse(params.message.timestamp) : NaN;
+    return Number.isFinite(timestampRaw) ? Math.trunc(timestampRaw) : Date.now();
+  })();
+
+  const payload = buildDiscordInboundEnvelope({
+    messageId: params.messageId,
+    sessionKey,
+    accountId: openclawMuxAccountId,
+    rawBody: params.body,
+    fromId: params.fromId,
+    channelId: params.channelId,
+    guildId: params.route.kind === "guild" ? params.route.guildId : null,
+    routeKey: params.routeKey,
+    chatType: params.route.kind === "dm" ? "direct" : "group",
+    timestampMs,
+    threadId: params.route.kind === "guild" ? params.route.threadId : undefined,
+    rawMessage: params.message,
+    media: inboundMedia.media,
+    attachments: inboundMedia.attachments,
+  });
+
+  let response: Response;
+  try {
+    response = await fetch(target.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(target.timeoutMs),
+    });
+  } catch (error) {
+    log({
+      type: "discord_inbound_retry_deferred",
+      tenantId: params.tenantId,
+      bindingId: params.bindingId,
+      messageId: params.messageId,
+      error: String(error),
+    });
+    return "deferred";
+  }
+  if (!response.ok) {
+    const bodyText = await response.text();
+    log({
+      type: "discord_inbound_retry_deferred",
+      tenantId: params.tenantId,
+      bindingId: params.bindingId,
+      messageId: params.messageId,
+      error: `openclaw inbound failed (${response.status}): ${bodyText || "no body"}`,
+    });
+    return "deferred";
+  }
+
+  log({
+    type: "discord_inbound_forwarded",
+    tenantId: params.tenantId,
+    bindingId: params.bindingId,
+    channelId: params.channelId,
+    sessionKey,
+    messageId: params.messageId,
+  });
+  return "forwarded";
 }
 
 function listPairingsForTenant(tenant: TenantIdentity) {
@@ -4064,6 +4357,71 @@ async function handleDiscordBotControlCommand(params: {
   return { routeReset: true, pending: false };
 }
 
+async function handleDiscordBotControlCommandUnbound(params: {
+  command: BotControlCommand;
+  channelId: string;
+  routeKey: string;
+}): Promise<void> {
+  if (params.command.kind === "help") {
+    const notice = renderBotHelpNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return;
+  }
+  if (params.command.kind === "status") {
+    const notice = renderBotStatusNotice({
+      channel: "discord",
+      paired: false,
+      routeKey: params.routeKey,
+      sessionKey: null,
+    });
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return;
+  }
+  if (params.command.kind === "unpair") {
+    const notice = renderBotNotPairedNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return;
+  }
+  if (!params.command.token) {
+    const notice = renderBotSwitchUsageNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return;
+  }
+  const tokenRow = peekActivePairingToken(params.command.token, "discord");
+  if (!tokenRow || readNonEmptyString(tokenRow.route_key) !== params.routeKey) {
+    const notice = renderPairingInvalidNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return;
+  }
+  const claimed = claimDiscordPairingTokenForRoute({
+    token: params.command.token,
+    routeKey: params.routeKey,
+    channelId: params.channelId,
+  });
+  const notice = claimed
+    ? renderPairingSuccessNotice("discord")
+    : renderPairingInvalidNotice("discord");
+  await sendDiscordPairingNotice({
+    channelId: params.channelId,
+    text: notice.text,
+  });
+}
+
 async function handleWhatsAppBotControlCommand(params: {
   command: BotControlCommand;
   chatJid: string;
@@ -4654,115 +5012,20 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
       continue;
     }
 
-    const target = resolveTenantInboundTarget(params.tenant_id);
-    if (!target) {
-      log({
-        type: "discord_inbound_drop_no_target",
-        tenantId: params.tenant_id,
-        bindingId: params.binding_id,
-        routeKey: params.route_key,
-      });
-      log({
-        type: "discord_inbound_retry_deferred",
-        tenantId: params.tenant_id,
-        bindingId: params.binding_id,
-        messageId,
-        reason: "missing_inbound_target",
-      });
-      break;
-    }
-
-    const inboundMedia = await extractDiscordInboundMedia({
-      message,
-      messageId,
-    });
-    if (!body && inboundMedia.attachments.length === 0) {
-      lastAckedMessageId = messageId;
-      continue;
-    }
-
-    const existingRoute = stmtSelectSessionKeyByBinding.get(
-      params.tenant_id,
-      "discord",
-      params.binding_id,
-    ) as { session_key?: unknown } | undefined;
-    const sessionKey =
-      (typeof existingRoute?.session_key === "string" && existingRoute.session_key.trim()) ||
-      deriveDiscordSessionKey({ route, channelId });
-
-    stmtUpsertSessionRoute.run(
-      params.tenant_id,
-      "discord",
-      sessionKey,
-      params.binding_id,
-      JSON.stringify({ routeKey: params.route_key, channelId }),
-      Date.now(),
-    );
-
-    const timestampMs = (() => {
-      const timestampRaw =
-        typeof message.timestamp === "string" ? Date.parse(message.timestamp) : NaN;
-      return Number.isFinite(timestampRaw) ? Math.trunc(timestampRaw) : Date.now();
-    })();
-
-    const payload = buildDiscordInboundEnvelope({
-      messageId,
-      sessionKey,
-      accountId: openclawMuxAccountId,
-      rawBody: body,
-      fromId,
-      channelId,
-      guildId: route.kind === "guild" ? route.guildId : null,
-      routeKey: params.route_key,
-      chatType: route.kind === "dm" ? "direct" : "group",
-      timestampMs,
-      threadId: route.kind === "guild" ? route.threadId : undefined,
-      rawMessage: message,
-      media: inboundMedia.media,
-      attachments: inboundMedia.attachments,
-    });
-
-    let response: Response;
-    try {
-      response = await fetch(target.url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${target.token}`,
-          "Content-Type": "application/json; charset=utf-8",
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(target.timeoutMs),
-      });
-    } catch (error) {
-      log({
-        type: "discord_inbound_retry_deferred",
-        tenantId: params.tenant_id,
-        bindingId: params.binding_id,
-        messageId,
-        error: String(error),
-      });
-      break;
-    }
-    if (!response.ok) {
-      const bodyText = await response.text();
-      log({
-        type: "discord_inbound_retry_deferred",
-        tenantId: params.tenant_id,
-        bindingId: params.binding_id,
-        messageId,
-        error: `openclaw inbound failed (${response.status}): ${bodyText || "no body"}`,
-      });
-      break;
-    }
-
-    log({
-      type: "discord_inbound_forwarded",
+    const forwardStatus = await forwardDiscordMessageToTenant({
       tenantId: params.tenant_id,
       bindingId: params.binding_id,
+      routeKey: params.route_key,
+      route,
       channelId,
-      sessionKey,
+      message,
       messageId,
+      fromId,
+      body,
     });
+    if (forwardStatus === "deferred") {
+      break;
+    }
     lastAckedMessageId = messageId;
   }
 
@@ -4780,6 +5043,10 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
 async function runDiscordInboundPollPass() {
   const bindings = stmtListActiveDiscordBindings.all() as ActiveDiscordBindingRow[];
   for (const binding of bindings) {
+    const route = parseDiscordRouteKey(binding.route_key);
+    if (discordGatewayDmEnabled && route?.kind === "dm") {
+      continue;
+    }
     try {
       await forwardDiscordBindingInbound(binding);
     } catch (error) {
@@ -4824,6 +5091,346 @@ async function runDiscordInboundLoop() {
       });
     }
     await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
+  }
+}
+
+async function handleDiscordGatewayDmMessage(message: Record<string, unknown>) {
+  const messageId = readUnsignedNumericString(message.id);
+  const channelId = readUnsignedNumericString(message.channel_id);
+  const guildId = readUnsignedNumericString(message.guild_id);
+  const author = asRecord(message.author);
+  const fromId = readUnsignedNumericString(author?.id);
+  const isBot = author?.bot === true;
+  if (!messageId || !channelId || !fromId || isBot) {
+    return;
+  }
+  if (guildId) {
+    // Guild traffic stays on route-scoped polling for now.
+    return;
+  }
+
+  const routeKey = buildDiscordDmRouteKey(fromId);
+  const liveBinding = resolveLiveBindingByRouteKey("discord", routeKey);
+  const body = typeof message.content === "string" ? message.content : "";
+
+  const botControlCommand = parseBotControlCommand(body);
+  if (botControlCommand) {
+    try {
+      if (!liveBinding) {
+        await handleDiscordBotControlCommandUnbound({
+          command: botControlCommand,
+          channelId,
+          routeKey,
+        });
+      } else {
+        await handleDiscordBotControlCommand({
+          command: botControlCommand,
+          channelId,
+          routeKey,
+          tenantId: liveBinding.tenant_id,
+          bindingId: liveBinding.binding_id,
+          status: liveBinding.status === "pending" ? "pending" : "active",
+        });
+      }
+    } catch (error) {
+      log({
+        type: "discord_bot_control_error",
+        tenantId: liveBinding?.tenant_id,
+        bindingId: liveBinding?.binding_id,
+        routeKey,
+        messageId,
+        error: String(error),
+      });
+    }
+    return;
+  }
+
+  const pairingToken = extractPairingTokenFromDiscordMessage(message);
+  if (!liveBinding || liveBinding.status === "pending") {
+    if (!pairingToken) {
+      const shouldSendUnpairedNotice =
+        isDiscordCommandText(body) || hasDiscordMessageContent(message);
+      if (shouldSendUnpairedNotice) {
+        try {
+          const notice = renderUnpairedHintNotice("discord");
+          await sendDiscordPairingNotice({
+            channelId,
+            text: notice.text,
+          });
+        } catch (error) {
+          log({
+            type: "discord_unpaired_command_notice_error",
+            tenantId: liveBinding?.tenant_id,
+            bindingId: liveBinding?.binding_id,
+            messageId,
+            error: String(error),
+          });
+        }
+      }
+      return;
+    }
+
+    const tokenRow = peekActivePairingToken(pairingToken, "discord");
+    if (!tokenRow || readNonEmptyString(tokenRow.route_key) !== routeKey) {
+      try {
+        const notice = renderPairingInvalidNotice("discord");
+        await sendDiscordPairingNotice({
+          channelId,
+          text: notice.text,
+        });
+      } catch (error) {
+        log({
+          type: "discord_pairing_invalid_notice_error",
+          tenantId: liveBinding?.tenant_id,
+          bindingId: liveBinding?.binding_id,
+          messageId,
+          error: String(error),
+        });
+      }
+      log({
+        type: "discord_pairing_token_invalid",
+        tenantId: liveBinding?.tenant_id,
+        bindingId: liveBinding?.binding_id,
+        messageId,
+        channelId,
+      });
+      return;
+    }
+
+    const claimed = claimDiscordPairingTokenForRoute({
+      token: pairingToken,
+      routeKey,
+      channelId,
+    });
+    try {
+      const notice = claimed
+        ? renderPairingSuccessNotice("discord")
+        : renderPairingInvalidNotice("discord");
+      await sendDiscordPairingNotice({
+        channelId,
+        text: notice.text,
+      });
+    } catch (error) {
+      log({
+        type: "discord_pairing_notice_error",
+        tenantId: claimed?.tenantId ?? liveBinding?.tenant_id,
+        bindingId: claimed?.bindingId ?? liveBinding?.binding_id,
+        messageId,
+        error: String(error),
+      });
+    }
+    if (claimed) {
+      log({
+        type: "discord_pairing_token_claimed",
+        tenantId: claimed.tenantId,
+        bindingId: claimed.bindingId,
+        routeKey: claimed.routeKey,
+        sessionKey: claimed.sessionKey,
+        channelId,
+        messageId,
+      });
+    }
+    return;
+  }
+
+  if (pairingToken) {
+    log({
+      type: "discord_pairing_token_ignored_bound_route",
+      tenantId: liveBinding.tenant_id,
+      bindingId: liveBinding.binding_id,
+      routeKey,
+      messageId,
+    });
+    return;
+  }
+
+  await forwardDiscordMessageToTenant({
+    tenantId: liveBinding.tenant_id,
+    bindingId: liveBinding.binding_id,
+    routeKey,
+    route: { kind: "dm", userId: fromId },
+    channelId,
+    message,
+    messageId,
+    fromId,
+    body,
+  });
+}
+
+async function runDiscordGatewayDmSession(): Promise<void> {
+  const gatewayUrl = await fetchDiscordGatewayUrl();
+  const token = requireDiscordBotToken();
+  const intents =
+    Number.isFinite(discordGatewayDmIntents) && discordGatewayDmIntents > 0
+      ? Math.trunc(discordGatewayDmIntents)
+      : 36_864;
+
+  await new Promise<void>((resolve) => {
+    let seq: number | null = null;
+    let heartbeatTimer: NodeJS.Timeout | null = null;
+    let settled = false;
+    const ws = new WebSocket(gatewayUrl);
+
+    const clearHeartbeat = () => {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    };
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearHeartbeat();
+      resolve();
+    };
+    const sendHeartbeat = () => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      try {
+        ws.send(JSON.stringify({ op: 1, d: seq }));
+      } catch (error) {
+        log({
+          type: "discord_gateway_dm_heartbeat_error",
+          error: String(error),
+        });
+      }
+    };
+
+    ws.on("open", () => {
+      log({
+        type: "discord_gateway_dm_open",
+        intents,
+      });
+    });
+
+    ws.on("message", (raw) => {
+      const frame = parseDiscordGatewayPayload(raw);
+      if (!frame) {
+        return;
+      }
+
+      const op = Number(frame.op);
+      if (Number.isFinite(Number(frame.s))) {
+        seq = Math.trunc(Number(frame.s));
+      }
+
+      if (op === 10) {
+        const hello = asRecord(frame.d);
+        const heartbeatIntervalMs = readPositiveInt(hello?.heartbeat_interval) ?? 45_000;
+        clearHeartbeat();
+        heartbeatTimer = setInterval(sendHeartbeat, heartbeatIntervalMs);
+        sendHeartbeat();
+        ws.send(
+          JSON.stringify({
+            op: 2,
+            d: {
+              token,
+              intents,
+              properties: {
+                os: process.platform,
+                browser: "openclaw-mux",
+                device: "openclaw-mux",
+              },
+            },
+          }),
+        );
+        return;
+      }
+
+      if (op === 1) {
+        sendHeartbeat();
+        return;
+      }
+
+      if (op === 7 || op === 9) {
+        ws.close(4_000, op === 7 ? "gateway_reconnect" : "gateway_invalid_session");
+        return;
+      }
+
+      if (op !== 0) {
+        return;
+      }
+
+      const eventType = typeof frame.t === "string" ? frame.t : "";
+      if (eventType === "READY") {
+        const ready = asRecord(frame.d);
+        log({
+          type: "discord_gateway_dm_ready",
+          sessionId: readNonEmptyString(ready?.session_id) ?? null,
+        });
+        return;
+      }
+      if (eventType !== "MESSAGE_CREATE") {
+        return;
+      }
+
+      const eventData = asRecord(frame.d);
+      if (!eventData) {
+        return;
+      }
+      void handleDiscordGatewayDmMessage(eventData).catch((error) => {
+        log({
+          type: "discord_gateway_dm_event_error",
+          error: String(error),
+        });
+      });
+    });
+
+    ws.on("error", (error) => {
+      log({
+        type: "discord_gateway_dm_socket_error",
+        error: String(error),
+      });
+    });
+
+    ws.on("close", (code, reason) => {
+      log({
+        type: "discord_gateway_dm_close",
+        code,
+        reason: reason.toString(),
+      });
+      finish();
+    });
+  });
+}
+
+async function runDiscordGatewayDmLoop() {
+  if (!discordInboundEnabled || !discordGatewayDmEnabled) {
+    return;
+  }
+
+  let running = true;
+  process.on("SIGINT", () => {
+    running = false;
+  });
+  process.on("SIGTERM", () => {
+    running = false;
+  });
+
+  const reconnectInitial = Math.max(100, Math.trunc(discordGatewayReconnectInitialMs));
+  const reconnectMax = Math.max(reconnectInitial, Math.trunc(discordGatewayReconnectMaxMs));
+  let reconnectMs = reconnectInitial;
+
+  while (running) {
+    const startedAt = Date.now();
+    try {
+      await runDiscordGatewayDmSession();
+    } catch (error) {
+      log({
+        type: "discord_gateway_dm_loop_error",
+        error: String(error),
+      });
+    }
+    if (!running) {
+      break;
+    }
+
+    const lifetimeMs = Date.now() - startedAt;
+    reconnectMs = lifetimeMs >= 60_000 ? reconnectInitial : Math.min(reconnectMs * 2, reconnectMax);
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, reconnectMs));
   }
 }
 
@@ -5144,13 +5751,16 @@ async function runWhatsAppInboundLoop() {
   }
 
   const { monitorWebInbox, setActiveWebListener } = await loadWebRuntimeModules();
+  whatsappRuntimeHealth.loopStartedAtMs = Date.now();
   let running = true;
   process.on("SIGINT", () => {
     running = false;
+    whatsappRuntimeHealth.listenerActive = false;
     void activeWhatsAppListener?.close?.();
   });
   process.on("SIGTERM", () => {
     running = false;
+    whatsappRuntimeHealth.listenerActive = false;
     void activeWhatsAppListener?.close?.();
   });
 
@@ -5159,6 +5769,7 @@ async function runWhatsAppInboundLoop() {
   while (running) {
     let listener: WebMonitorListener | null = null;
     try {
+      whatsappRuntimeHealth.lastListenerStartAtMs = Date.now();
       const monitored = await monitorWebInbox({
         verbose: false,
         accountId: whatsappAccountId,
@@ -5176,13 +5787,27 @@ async function runWhatsAppInboundLoop() {
           };
         },
         onMessage: async (message) => {
+          whatsappRuntimeHealth.lastInboundSeenAtMs = Date.now();
           enqueueWhatsAppInboundMessage(message);
         },
       });
       listener = monitored;
       activeWhatsAppListener = monitored;
+      whatsappRuntimeHealth.listenerActive = true;
+      whatsappRuntimeHealth.lastListenerError = null;
+      whatsappRuntimeHealth.lastListenerErrorAtMs = null;
       setActiveWebListener(whatsappAccountId, monitored);
       const closeReason = await monitored.onClose;
+      whatsappRuntimeHealth.lastListenerCloseAtMs = Date.now();
+      whatsappRuntimeHealth.lastListenerCloseStatus =
+        typeof closeReason.status === "number" && Number.isFinite(closeReason.status)
+          ? Math.trunc(closeReason.status)
+          : null;
+      whatsappRuntimeHealth.lastListenerClosedLoggedOut = Boolean(closeReason.isLoggedOut);
+      if (closeReason.error != null) {
+        whatsappRuntimeHealth.lastListenerErrorAtMs = Date.now();
+        whatsappRuntimeHealth.lastListenerError = String(closeReason.error);
+      }
       log({
         type: "whatsapp_inbound_listener_closed",
         status: closeReason.status,
@@ -5193,6 +5818,9 @@ async function runWhatsAppInboundLoop() {
         running = false;
       }
     } catch (error) {
+      whatsappRuntimeHealth.lastListenerErrorAtMs = Date.now();
+      whatsappRuntimeHealth.lastListenerError = String(error);
+      whatsappRuntimeHealth.listenerActive = false;
       log({
         type: "whatsapp_inbound_listener_error",
         error: String(error),
@@ -5209,6 +5837,7 @@ async function runWhatsAppInboundLoop() {
         }
       }
       activeWhatsAppListener = null;
+      whatsappRuntimeHealth.listenerActive = false;
       setActiveWebListener(whatsappAccountId, null);
     }
 
@@ -5304,6 +5933,19 @@ const server = http.createServer(async (req, res) => {
         inboundTimeoutMs: body.inboundTimeoutMs,
       });
       sendJson(res, result.statusCode, result.payload);
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/v1/admin/whatsapp/health") {
+      if (!muxAdminToken) {
+        sendJson(res, 404, { ok: false, error: "not found" });
+        return;
+      }
+      if (!isAdminAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      sendJson(res, 200, { ok: true, whatsapp: getWhatsAppCredentialHealth() });
       return;
     }
 
@@ -5922,9 +6564,15 @@ server.listen(port, host, () => {
       openclawAccountId: openclawMuxAccountId,
       pollIntervalMs: Math.max(200, Math.trunc(discordPollIntervalMs)),
       bootstrapLatest: discordBootstrapLatest,
+      gatewayDmEnabled: discordGatewayDmEnabled,
     });
     void runDiscordInboundLoop().catch((error) => {
       log({ type: "discord_inbound_loop_fatal", error: String(error) });
     });
+    if (discordGatewayDmEnabled) {
+      void runDiscordGatewayDmLoop().catch((error) => {
+        log({ type: "discord_gateway_dm_loop_fatal", error: String(error) });
+      });
+    }
   }
 });

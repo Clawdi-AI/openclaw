@@ -8,6 +8,10 @@ For local end-to-end testing of `mux-server + openclaw` with real channel creden
 
 - `phala-deploy/local-mux-e2e/README.md`
 
+Important guardrail:
+
+- Never reuse production WhatsApp auth/session files in the local mux e2e stack.
+
 ## Storage modes
 
 | Mode                 | State location                            | Persistence              | Best for              |
@@ -44,35 +48,26 @@ The master key derives all encryption passwords and the gateway auth token. Keep
 head -c 32 /dev/urandom | base64
 ```
 
-### 3. Create your secrets file
+### 3. Prepare deploy env vars (recommended: Redpill Vault)
+
+Generate a temporary deploy env file with `rv-exec`:
 
 ```sh
-cp phala-deploy/secrets/.env.example phala-deploy/secrets/.env
+cd phala-deploy
+rv-exec --dotenv /tmp/deploy.env \
+  MASTER_KEY REDPILL_API_KEY \
+  S3_BUCKET S3_ENDPOINT S3_PROVIDER S3_REGION \
+  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
+  -- bash -lc 'test -s /tmp/deploy.env && echo "deploy env ready: /tmp/deploy.env"'
 ```
 
-**S3 mode** — edit `phala-deploy/secrets/.env`:
+Notes:
 
-```env
-MASTER_KEY=<your-base64-master-key>
-REDPILL_API_KEY=<your-redpill-api-key>
-S3_BUCKET=<your-bucket-name>
-S3_ENDPOINT=<your-s3-endpoint-url>
-S3_PROVIDER=Cloudflare
-S3_REGION=auto
-AWS_ACCESS_KEY_ID=<your-access-key>
-AWS_SECRET_ACCESS_KEY=<your-secret-key>
-```
-
-**Local-only mode** — only two variables required:
-
-```env
-MASTER_KEY=<your-base64-master-key>
-REDPILL_API_KEY=<your-redpill-api-key>
-```
+- S3 mode needs all S3 variables above.
+- Local-only mode only needs `MASTER_KEY` and `REDPILL_API_KEY`.
+- Prefer this flow over plaintext `.env` files for production deploys.
 
 Get a Redpill API key at [redpill.ai](https://redpill.ai). This gives access to GPU TEE models (DeepSeek, Qwen, Llama, etc.) with end-to-end encrypted inference.
-
-This file is gitignored. Never commit it.
 
 ### 4. Docker image
 
@@ -99,13 +94,13 @@ cd phala-deploy
 phala deploy \
   -n my-openclaw \
   -c docker-compose.yml \
-  -e secrets/.env \
+  -e /tmp/deploy.env \
   -t tdx.medium \
   --dev-os \
   --wait
 ```
 
-The `-e secrets/.env` flag passes your secrets as encrypted environment variables. They are injected at runtime and never stored in plaintext.
+The `-e /tmp/deploy.env` flag passes your secrets as encrypted environment variables. They are injected at runtime and never stored in plaintext.
 
 The CLI will output your CVM ID and dashboard URL. Save these.
 
@@ -149,6 +144,28 @@ Docker daemon ready.
 3. **Connect Telegram** — once your agent is set up, send a message in the dashboard chat asking it to connect to your Telegram bot. Provide your Telegram bot token (from [@BotFather](https://t.me/BotFather)) and the agent will set up the connection and pair itself with the bot.
 
 After that, your agent is live on Telegram and you can chat with it there.
+
+## Mux + OpenClaw Rollout Checklist
+
+Use this when rolling out shared mux bots plus tenant OpenClaw instances.
+
+1. Deploy mux-server as its own CVM with persistent storage for:
+   - mux SQLite/log path (`/data`)
+   - WhatsApp auth snapshot path (`/wa-auth/default`)
+2. Inject mux runtime secrets from `rv`:
+   - `MUX_ADMIN_TOKEN`, `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`
+3. For each tenant OpenClaw instance:
+   - set `gateway.http.endpoints.mux.baseUrl`
+   - set `gateway.http.endpoints.mux.token=<tenantApiKey>`
+   - enable channel account `mux` for `telegram`, `discord`, `whatsapp`
+4. Bootstrap tenant in mux:
+   - `POST /v1/admin/tenants/bootstrap` with `tenantId`, `apiKey`, `inboundUrl`
+5. Validate with live checks:
+   - pair chat using token (`/v1/pairings/token`)
+   - send `/help` via mux channel
+   - verify OpenClaw version and health via `./phala-deploy/cvm-exec`
+
+Control-plane contract details live in `mux-server/INTEGRATION_PLAN.md`.
 
 ## How S3 storage works
 
@@ -304,7 +321,7 @@ If your CVM is destroyed (S3 mode only):
 | `Dockerfile`         | CVM image (Ubuntu 24.04 + Node 22 + rclone + Docker-in-Docker) |
 | `entrypoint.sh`      | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway  |
 | `docker-compose.yml` | Compose file for `phala deploy`                                |
-| `secrets/.env`       | Your credentials (gitignored)                                  |
+| `secrets/.env`       | Legacy local env-file workflow (prefer `rv-exec --dotenv`)     |
 | `cvm-ssh`            | Interactive SSH into the container                             |
 | `cvm-exec`           | Run a command in the container                                 |
 | `cvm-scp`            | Copy files to/from the container                               |

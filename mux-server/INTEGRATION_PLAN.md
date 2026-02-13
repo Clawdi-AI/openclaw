@@ -47,6 +47,9 @@ Set at deploy time:
   - `gateway.http.endpoints.mux.enabled=true`
   - `gateway.http.endpoints.mux.baseUrl=<muxUrl>`
   - `gateway.http.endpoints.mux.token=<tenantApiKey>`
+- source of truth rule:
+  - use only `gateway.http.endpoints.mux.{baseUrl,token}` for mux transport auth/routing
+  - do not rely on per-channel mux `apiKey` or `baseUrl` fields
 - dual mode account layout (direct + mux) for each channel:
   - `channels.<app>.accounts.default.enabled=true` (direct/non-mux traffic)
   - `channels.<app>.accounts.mux.enabled=false` (do not direct-poll mux account)

@@ -93,16 +93,16 @@ node --import tsx mux-server/src/server.ts
 - `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events (recommended: `mux`).
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
 - `MUX_DISCORD_API_BASE_URL` (default `https://discord.com/api/v10`): Discord API base URL.
-- `MUX_TELEGRAM_INBOUND_ENABLED` (default `false`): enable Telegram inbound polling and forwarding.
+- `MUX_TELEGRAM_INBOUND_ENABLED` (default `auto`): enable Telegram inbound polling and forwarding. Auto mode enables when `TELEGRAM_BOT_TOKEN` is present.
 - `MUX_TELEGRAM_POLL_TIMEOUT_SEC` (default `25`): Telegram long-poll timeout.
 - `MUX_TELEGRAM_POLL_RETRY_MS` (default `1000`): backoff after poll errors.
 - `MUX_TELEGRAM_BOOTSTRAP_LATEST` (default `true`): when enabled, skips historical backlog on cold start.
 - `MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size fetched from Telegram for inbound image attachments.
-- `MUX_DISCORD_INBOUND_ENABLED` (default `false`): enable Discord inbound polling and forwarding.
+- `MUX_DISCORD_INBOUND_ENABLED` (default `auto`): enable Discord inbound polling and forwarding. Auto mode enables when `DISCORD_BOT_TOKEN` is present.
 - `MUX_DISCORD_POLL_INTERVAL_MS` (default `2000`): Discord poll interval.
 - `MUX_DISCORD_BOOTSTRAP_LATEST` (default `true`): when enabled, skips historical backlog on cold start.
 - `MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size fetched from Discord attachment URLs for inbound image attachments.
-- `MUX_WHATSAPP_INBOUND_ENABLED` (default `false`): enable WhatsApp inbound monitoring and forwarding.
+- `MUX_WHATSAPP_INBOUND_ENABLED` (default `auto`): enable WhatsApp inbound monitoring and forwarding. Auto mode enables when `<MUX_WHATSAPP_AUTH_DIR>/creds.json` exists.
 - `MUX_WHATSAPP_ACCOUNT_ID` (default `default`): WhatsApp account id to monitor.
 - `MUX_WHATSAPP_AUTH_DIR` (optional): WhatsApp auth directory; defaults to OpenClaw's default web auth dir.
 - `MUX_WHATSAPP_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size read from saved WhatsApp inbound media files for image attachments.
@@ -133,6 +133,7 @@ Notes:
 
 - Shared-key mode is the only supported model.
 - mux always uses tenant `apiKey` as inbound auth token when forwarding to OpenClaw.
+- For channel inbound enable flags, set explicit `true` or `false` to override auto-detection.
 
 ### Dedicated OpenClaw Mux Account
 
@@ -470,6 +471,52 @@ Behavior:
 
 - Upserts tenant auth + inbound forwarding target in one call.
 - Shared-key mode is mandatory for this endpoint.
+- Requires `MUX_ADMIN_TOKEN` to be configured.
+
+### `GET /v1/admin/whatsapp/health`
+
+Headers:
+
+- `Authorization: Bearer <mux_admin_token>`
+
+Response `200`:
+
+```json
+{
+  "ok": true,
+  "whatsapp": {
+    "status": "listening",
+    "inboundEnabled": true,
+    "accountId": "default",
+    "authDir": "/root/.openclaw/credentials/whatsapp/default",
+    "authDirExists": true,
+    "credsPath": "/root/.openclaw/credentials/whatsapp/default/creds.json",
+    "creds": {
+      "present": true,
+      "sizeBytes": 1886,
+      "mtimeMs": 1770930000000
+    },
+    "fileCounts": {
+      "session": 1,
+      "senderKey": 0,
+      "preKey": 812,
+      "deviceList": 3,
+      "lidMapping": 4
+    },
+    "runtime": {
+      "listenerActive": true,
+      "lastListenerStartAtMs": 1770931000000,
+      "lastListenerErrorAtMs": null,
+      "lastInboundSeenAtMs": 1770931100000
+    }
+  }
+}
+```
+
+Behavior:
+
+- Reports whether WhatsApp credentials are present and readable.
+- Reports runtime listener state from the live mux process.
 - Requires `MUX_ADMIN_TOKEN` to be configured.
 
 ## Reliability Notes

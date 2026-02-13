@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -331,6 +331,14 @@ async function bootstrapTenant(params: {
   });
 }
 
+async function getAdminWhatsAppHealth(params: { port: number; adminToken: string }) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/admin/whatsapp/health`, {
+    headers: {
+      Authorization: `Bearer ${params.adminToken}`,
+    },
+  });
+}
+
 describe("mux server", () => {
   test("health endpoint responds", async () => {
     const server = await startServer();
@@ -477,6 +485,66 @@ describe("mux server", () => {
       inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
       inboundTimeoutMs: 12_000,
     });
+  });
+
+  test("admin whatsapp health endpoint requires admin auth", async () => {
+    const server = await startServer({
+      extraEnv: {
+        MUX_ADMIN_TOKEN: "admin-secret",
+      },
+    });
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/admin/whatsapp/health`);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ ok: false, error: "unauthorized" });
+  });
+
+  test("admin whatsapp health endpoint reports credential presence", async () => {
+    const authDir = mkdtempSync(resolve(tmpdir(), "mux-wa-auth-"));
+    writeFileSync(
+      resolve(authDir, "creds.json"),
+      JSON.stringify({ me: { id: "16693773518:1@s.whatsapp.net" } }),
+      "utf8",
+    );
+    writeFileSync(resolve(authDir, "session-117901482786828_1.0.json"), "{}", "utf8");
+    writeFileSync(resolve(authDir, "pre-key-1.json"), "{}", "utf8");
+
+    try {
+      const server = await startServer({
+        extraEnv: {
+          MUX_ADMIN_TOKEN: "admin-secret",
+          MUX_WHATSAPP_AUTH_DIR: authDir,
+          MUX_WHATSAPP_INBOUND_ENABLED: "false",
+        },
+      });
+
+      const response = await getAdminWhatsAppHealth({
+        port: server.port,
+        adminToken: "admin-secret",
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: true,
+        whatsapp: {
+          status: "disabled",
+          inboundEnabled: false,
+          authDir,
+          authDirExists: true,
+          credsPath: resolve(authDir, "creds.json"),
+          creds: {
+            present: true,
+          },
+          fileCounts: {
+            session: 1,
+            preKey: 1,
+          },
+          runtime: {
+            listenerActive: false,
+          },
+        },
+      });
+    } finally {
+      rmSync(authDir, { recursive: true, force: true });
+    }
   });
 
   test("tenant inbound target update uses tenant api key for inbound auth", async () => {
