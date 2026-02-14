@@ -18,6 +18,7 @@ import {
   readOutboundRaw,
   readOutboundText,
 } from "./mux-envelope.js";
+import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
 
 type SendResult = {
   statusCode: number;
@@ -41,6 +42,7 @@ type TenantIdentity = {
   id: string;
   name: string;
   authToken: string;
+  authKind: "api-key" | "runtime-jwt";
 };
 
 type PairingCodeSeed = {
@@ -153,8 +155,8 @@ type WhatsAppBoundRoute = {
 
 type TenantInboundTarget = {
   url: string;
-  token: string;
   timeoutMs: number;
+  openclawId: string;
 };
 
 type WebInboundMessage = {
@@ -454,6 +456,7 @@ const host = process.env.MUX_HOST || "127.0.0.1";
 const port = Number(process.env.MUX_PORT || 18891);
 const TELEGRAM_GENERAL_TOPIC_ID = 1;
 const muxAdminToken = readNonEmptyString(process.env.MUX_ADMIN_TOKEN);
+const muxRegisterKey = readNonEmptyString(process.env.MUX_REGISTER_KEY);
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 const discordBotToken = process.env.DISCORD_BOT_TOKEN;
 const logPath =
@@ -488,6 +491,8 @@ const discordInboundMediaMaxBytes = Number(
   process.env.MUX_DISCORD_INBOUND_MEDIA_MAX_BYTES || 5_000_000,
 );
 const discordPendingGcEnabled = process.env.MUX_DISCORD_PENDING_GC_ENABLED === "true";
+// TODO(phala): simplify to gateway-only Discord DM ingestion and remove
+// MUX_DISCORD_GATEWAY_DM_ENABLED plus DM polling fallback.
 const discordGatewayDmEnabled = process.env.MUX_DISCORD_GATEWAY_DM_ENABLED !== "false";
 const discordGatewayGuildEnabled = process.env.MUX_DISCORD_GATEWAY_GUILD_ENABLED !== "false";
 const discordGatewayDefaultIntents = discordGatewayGuildEnabled
@@ -532,6 +537,11 @@ const requestBodyMaxBytes = (() => {
   }
   return Math.trunc(parsed);
 })();
+const runtimeJwtAudienceMux = "mux-server";
+const runtimeJwtAudienceOpenClaw = "openclaw-mux-inbound";
+const runtimeTokenTtlSec = 86_400; // 1 day
+const inboundTokenTtlSec = 5 * 60; // short-lived, per-delivery
+const runtimeJwtSigner = createRuntimeJwtSigner();
 
 let tenantSeeds: TenantSeed[] = [];
 try {
@@ -562,6 +572,36 @@ const stmtSelectTenantByHash = db.prepare(`
   FROM tenants
   WHERE api_key_hash = ? AND status = 'active'
   LIMIT 1
+`);
+
+const stmtSelectTenantById = db.prepare(`
+  SELECT id, name
+  FROM tenants
+  WHERE id = ? AND status = 'active'
+  LIMIT 1
+`);
+
+const stmtUpsertTenantByRegister = db.prepare(`
+  INSERT INTO tenants (
+    id,
+    name,
+    api_key_hash,
+    status,
+    inbound_url,
+    inbound_token,
+    inbound_timeout_ms,
+    created_at_ms,
+    updated_at_ms
+  )
+  VALUES (?, ?, ?, 'active', ?, NULL, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    name = excluded.name,
+    api_key_hash = excluded.api_key_hash,
+    status = 'active',
+    inbound_url = excluded.inbound_url,
+    inbound_token = NULL,
+    inbound_timeout_ms = excluded.inbound_timeout_ms,
+    updated_at_ms = excluded.updated_at_ms
 `);
 
 const stmtSelectTenantInboundTargetById = db.prepare(`
@@ -606,8 +646,6 @@ const stmtCountActiveTenantInboundTargets = db.prepare(`
   WHERE status = 'active'
     AND inbound_url IS NOT NULL
     AND TRIM(inbound_url) <> ''
-    AND inbound_token IS NOT NULL
-    AND TRIM(inbound_token) <> ''
 `);
 
 const stmtDeleteExpiredIdempotency = db.prepare(`
@@ -962,10 +1000,62 @@ function resolveBearerToken(authHeader: unknown): string | null {
   return match?.[1]?.trim() || null;
 }
 
-function resolveTenantIdentity(req: IncomingMessage): TenantIdentity | null {
+function resolveOpenClawIdHeader(req: IncomingMessage): string | null {
+  const raw = req.headers["x-openclaw-id"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return readNonEmptyString(value);
+}
+
+async function verifyRuntimeJwtForMuxApi(token: string): Promise<TenantIdentity | null> {
+  const verified = await runtimeJwtSigner.verify({
+    token,
+    audience: runtimeJwtAudienceMux,
+  });
+  if (!verified.ok) {
+    return null;
+  }
+  const payload = verified.payload;
+  const sub = readNonEmptyString(payload.sub);
+  if (!sub) {
+    return null;
+  }
+  const scopeAllowsRuntime =
+    hasScope(payload.scope, "mux:runtime") ||
+    hasScope(payload.scope, "mux:outbound") ||
+    hasScope(payload.scope, "mux:pairings") ||
+    hasScope(payload.scope, "mux:control");
+  if (!scopeAllowsRuntime) {
+    return null;
+  }
+  const row = stmtSelectTenantById.get(sub) as { id?: unknown; name?: unknown } | undefined;
+  if (!row) {
+    return null;
+  }
+  const id = typeof row.id === "string" ? row.id : "";
+  if (!id) {
+    return null;
+  }
+  const name = typeof row.name === "string" && row.name.trim() ? row.name : id;
+  return {
+    id,
+    name,
+    authKind: "runtime-jwt",
+    authToken: token,
+  };
+}
+
+async function resolveTenantIdentity(req: IncomingMessage): Promise<TenantIdentity | null> {
   const token = resolveBearerToken(req.headers.authorization);
   if (!token) {
     return null;
+  }
+  const runtimeIdentity = await verifyRuntimeJwtForMuxApi(token);
+  if (runtimeIdentity) {
+    const headerOpenClawId = resolveOpenClawIdHeader(req);
+    if (!headerOpenClawId || headerOpenClawId !== runtimeIdentity.id) {
+      return null;
+    }
+    return runtimeIdentity;
   }
   const row = stmtSelectTenantByHash.get(hashApiKey(token)) as
     | { id?: unknown; name?: unknown }
@@ -978,7 +1068,7 @@ function resolveTenantIdentity(req: IncomingMessage): TenantIdentity | null {
     return null;
   }
   const name = typeof row.name === "string" && row.name.trim() ? row.name : id;
-  return { id, name, authToken: token };
+  return { id, name, authKind: "api-key", authToken: token };
 }
 
 function isAdminAuthorized(req: IncomingMessage): boolean {
@@ -989,21 +1079,31 @@ function isAdminAuthorized(req: IncomingMessage): boolean {
   return Boolean(token && token === muxAdminToken);
 }
 
+function isRegisterAuthorized(req: IncomingMessage): boolean {
+  if (!muxRegisterKey) {
+    return false;
+  }
+  const token = resolveBearerToken(req.headers.authorization);
+  return Boolean(token && token === muxRegisterKey);
+}
+
 function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | null {
   const row = stmtSelectTenantInboundTargetById.get(tenantId) as
     | {
         inbound_url?: unknown;
-        inbound_token?: unknown;
         inbound_timeout_ms?: unknown;
       }
     | undefined;
   const url = readNonEmptyString(row?.inbound_url);
-  const token = readNonEmptyString(row?.inbound_token);
-  if (!url || !token) {
+  if (!url) {
     return null;
   }
   const timeoutMs = readPositiveInt(row?.inbound_timeout_ms) ?? 15_000;
-  return { url, token, timeoutMs };
+  return {
+    url,
+    timeoutMs,
+    openclawId: tenantId,
+  };
 }
 
 function resolveLiveBindingByRouteKey(
@@ -1044,6 +1144,37 @@ function countActiveTenantInboundTargets(): number {
     return 0;
   }
   return Math.trunc(count);
+}
+
+async function mintRuntimeJwt(params: {
+  openclawId: string;
+  scope: string;
+  audiences: string[];
+  ttlSec?: number;
+  nowMs?: number;
+}): Promise<string> {
+  return await runtimeJwtSigner.mint({
+    subject: params.openclawId,
+    audiences: params.audiences,
+    scope: params.scope,
+    ttlSec: Math.max(1, Math.trunc(params.ttlSec ?? runtimeTokenTtlSec)),
+    nowMs: params.nowMs,
+  });
+}
+
+async function buildInboundAuthHeaders(
+  target: TenantInboundTarget,
+): Promise<Record<string, string>> {
+  const runtimeJwt = await mintRuntimeJwt({
+    openclawId: target.openclawId,
+    scope: "mux:inbound",
+    audiences: [runtimeJwtAudienceOpenClaw],
+    ttlSec: inboundTokenTtlSec,
+  });
+  return {
+    Authorization: `Bearer ${runtimeJwt}`,
+    "X-OpenClaw-Id": target.openclawId,
+  };
 }
 
 function resolveTenantSeeds(): TenantSeed[] {
@@ -3890,16 +4021,20 @@ async function forwardDiscordMessageToTenant(params: {
     media: inboundMedia.media,
     attachments: inboundMedia.attachments,
   });
+  const payloadWithIdentity = {
+    ...payload,
+    openclawId: params.tenantId,
+  };
 
   let response: Response;
   try {
     response = await fetch(target.url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${target.token}`,
+        ...(await buildInboundAuthHeaders(target)),
         "Content-Type": "application/json; charset=utf-8",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(payloadWithIdentity),
       signal: AbortSignal.timeout(target.timeoutMs),
     });
   } catch (error) {
@@ -3963,6 +4098,62 @@ function getInboundTargetForTenant(tenant: TenantIdentity) {
   };
 }
 
+async function registerOpenClawInstance(input: {
+  openclawId?: unknown;
+  inboundUrl?: unknown;
+  inboundTimeoutMs?: unknown;
+}): Promise<{
+  statusCode: number;
+  payload: Record<string, unknown>;
+}> {
+  const openclawId = readNonEmptyString(input.openclawId);
+  const inboundUrl = readNonEmptyString(input.inboundUrl);
+  if (!openclawId || !inboundUrl) {
+    return {
+      statusCode: 400,
+      payload: { ok: false, error: "openclawId and inboundUrl are required" },
+    };
+  }
+  const inboundTimeoutMs = readPositiveInt(input.inboundTimeoutMs) ?? 15_000;
+  const now = Date.now();
+  const syntheticApiKey = `instance:${openclawId}`;
+  try {
+    stmtUpsertTenantByRegister.run(
+      openclawId,
+      openclawId,
+      hashApiKey(syntheticApiKey),
+      inboundUrl,
+      inboundTimeoutMs,
+      now,
+      now,
+    );
+  } catch (error) {
+    if (String(error).includes("UNIQUE constraint failed: tenants.api_key_hash")) {
+      return {
+        statusCode: 409,
+        payload: { ok: false, error: "instance id conflict" },
+      };
+    }
+    throw error;
+  }
+  writeAuditLog(openclawId, "instance_registered", { inboundUrl, inboundTimeoutMs }, now);
+  const runtimeToken = await mintRuntimeJwt({
+    openclawId,
+    scope: "mux:runtime mux:outbound mux:pairings mux:control",
+    audiences: [runtimeJwtAudienceMux],
+  });
+  return {
+    statusCode: 200,
+    payload: {
+      ok: true,
+      openclawId,
+      runtimeToken,
+      tokenType: "Bearer",
+      expiresAtMs: now + runtimeTokenTtlSec * 1_000,
+    },
+  };
+}
+
 function setInboundTargetForTenant(
   tenant: TenantIdentity,
   input: { inboundUrl?: unknown; inboundTimeoutMs?: unknown },
@@ -3978,7 +4169,7 @@ function setInboundTargetForTenant(
   const now = Date.now();
   const update = stmtUpdateTenantInboundTargetById.run(
     inboundUrl,
-    tenant.authToken,
+    null,
     inboundTimeoutMs,
     now,
     tenant.id,
@@ -4025,7 +4216,7 @@ function bootstrapTenantByAdmin(input: {
       name,
       hashApiKey(apiKey),
       inboundUrl,
-      apiKey,
+      null,
       inboundTimeoutMs,
       now,
       now,
@@ -4059,7 +4250,6 @@ function bootstrapTenantByAdmin(input: {
       name,
       inboundUrl,
       inboundTimeoutMs,
-      sharedTenantKey: true,
     },
   };
 }
@@ -4525,14 +4715,18 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     rawMessage: callbackMessage,
     rawUpdate: params.update,
   });
+  const payloadWithIdentity = {
+    ...payload,
+    openclawId: binding.tenantId,
+  };
 
   const response = await fetch(target.url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${target.token}`,
+      ...(await buildInboundAuthHeaders(target)),
       "Content-Type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payloadWithIdentity),
     signal: AbortSignal.timeout(target.timeoutMs),
   });
   if (!response.ok) {
@@ -5147,14 +5341,18 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     media: inboundMedia.media,
     attachments: inboundMedia.attachments,
   });
+  const payloadWithIdentity = {
+    ...payload,
+    openclawId: binding.tenantId,
+  };
 
   const response = await fetch(target.url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${target.token}`,
+      ...(await buildInboundAuthHeaders(target)),
       "Content-Type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payloadWithIdentity),
     signal: AbortSignal.timeout(target.timeoutMs),
   });
 
@@ -6157,14 +6355,18 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     media: inboundMedia.media,
     attachments: inboundMedia.attachments,
   });
+  const payloadWithIdentity = {
+    ...payload,
+    openclawId: binding.tenantId,
+  };
 
   const response = await fetch(target.url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${target.token}`,
+      ...(await buildInboundAuthHeaders(target)),
       "Content-Type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payloadWithIdentity),
     signal: AbortSignal.timeout(target.timeoutMs),
   });
   if (!response.ok) {
@@ -6329,7 +6531,8 @@ async function runTelegramInboundLoop() {
         try {
           await forwardTelegramUpdateToTenant(update);
           storeTelegramOffset(updateId);
-          log({ type: "telegram_inbound_ack_committed", updateId });
+          // Avoid blocking the tight polling loop on sync IO (tests depend on quick follow-up polls).
+          queueMicrotask(() => log({ type: "telegram_inbound_ack_committed", updateId }));
         } catch (error) {
           log({
             type: "telegram_inbound_retry_deferred",
@@ -6355,6 +6558,30 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === "/health") {
       sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/.well-known/jwks.json") {
+      sendJson(res, 200, runtimeJwtSigner.jwks());
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/v1/instances/register") {
+      if (!muxRegisterKey) {
+        sendJson(res, 404, { ok: false, error: "not found" });
+        return;
+      }
+      if (!isRegisterAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      const body = await readBody<Record<string, unknown>>(req);
+      const result = await registerOpenClawInstance({
+        openclawId: body.openclawId,
+        inboundUrl: body.inboundUrl,
+        inboundTimeoutMs: body.inboundTimeoutMs,
+      });
+      sendJson(res, result.statusCode, result.payload);
       return;
     }
 
@@ -6392,7 +6619,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const tenant = resolveTenantIdentity(req);
+    const tenant = await resolveTenantIdentity(req);
     if (!tenant) {
       sendJson(res, 401, { ok: false, error: "unauthorized" });
       return;
@@ -6468,6 +6695,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody<Record<string, unknown>>(req);
       const channel = normalizeChannel(body.channel);
       const sessionKey = readNonEmptyString(body.sessionKey);
+      const payloadOpenClawId = readNonEmptyString(body.openclawId);
       if (!channel) {
         sendJson(res, 400, { ok: false, error: "channel required" });
         return;
@@ -6475,6 +6703,12 @@ const server = http.createServer(async (req, res) => {
       if (!sessionKey) {
         sendJson(res, 400, { ok: false, error: "sessionKey required" });
         return;
+      }
+      if (tenant.authKind === "runtime-jwt") {
+        if (!payloadOpenClawId || payloadOpenClawId !== tenant.id) {
+          sendJson(res, 401, { ok: false, error: "openclawId mismatch" });
+          return;
+        }
       }
       const typingResult = await runOutboundAction({
         tenant,
@@ -6567,6 +6801,19 @@ const server = http.createServer(async (req, res) => {
       const mediaUrls = collectOutboundMediaUrls(payload);
       const requestedThreadId = readPositiveInt(payload.threadId);
       const requestedDiscordThreadId = readUnsignedNumericString(payload.threadId);
+      const payloadOpenClawId = readNonEmptyString(payload.openclawId);
+
+      if (tenant.authKind === "runtime-jwt") {
+        if (!payloadOpenClawId || payloadOpenClawId !== tenant.id) {
+          return {
+            statusCode: 401,
+            bodyText: JSON.stringify({
+              ok: false,
+              error: "openclawId mismatch",
+            }),
+          };
+        }
+      }
 
       if (!channel) {
         return {

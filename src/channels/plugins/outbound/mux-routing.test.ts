@@ -1,15 +1,29 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
 import { discordOutbound } from "./discord.js";
-import { sendTypingViaMux } from "./mux.js";
+import { __resetMuxRuntimeAuthCacheForTest, sendTypingViaMux } from "./mux.js";
 import { telegramOutbound } from "./telegram.js";
 import { whatsappOutbound } from "./whatsapp.js";
 
+vi.mock("../../../infra/device-identity.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../infra/device-identity.js")>();
+  return {
+    ...actual,
+    loadOrCreateDeviceIdentity: () => ({
+      deviceId: "openclaw-instance-1",
+      publicKeyPem: "test",
+      privateKeyPem: "test",
+    }),
+  };
+});
+
 const originalFetch = globalThis.fetch;
-const TENANT_TOKEN = "tenant-key";
+const REGISTER_KEY = "register-shared-key";
+const RUNTIME_TOKEN = "runtime-token-1";
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  __resetMuxRuntimeAuthCacheForTest();
   vi.restoreAllMocks();
 });
 
@@ -27,7 +41,7 @@ function gatewayMuxConfig(): Pick<OpenClawConfig, "gateway"> {
         endpoints: {
           mux: {
             baseUrl: "http://mux.local",
-            token: TENANT_TOKEN,
+            registerKey: REGISTER_KEY,
           },
         },
       },
@@ -42,9 +56,35 @@ function parseJsonRequestBody(init: RequestInit): Record<string, unknown> {
   return JSON.parse(init.body) as Record<string, unknown>;
 }
 
+function resolveFetchUrl(input: string | URL | Request): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.toString();
+  }
+  return input.url;
+}
+
 describe("mux outbound routing", () => {
   it("routes telegram outbound through mux when enabled", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-tg-1", chatId: "tg-chat-1" }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        expect(init?.headers).toEqual(
+          expect.objectContaining({ Authorization: `Bearer ${REGISTER_KEY}` }),
+        );
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ messageId: "mx-tg-1", chatId: "tg-chat-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const sendTelegram = vi.fn();
@@ -68,17 +108,24 @@ describe("mux outbound routing", () => {
     });
 
     expect(sendTelegram).not.toHaveBeenCalled();
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
       channel: "telegram",
       messageId: "mx-tg-1",
       chatId: "tg-chat-1",
     });
 
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
+    const sendCall = fetchSpy.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
     expect(init.headers).toEqual(
-      expect.objectContaining({ Authorization: `Bearer ${TENANT_TOKEN}` }),
+      expect.objectContaining({
+        Authorization: `Bearer ${RUNTIME_TOKEN}`,
+        "X-OpenClaw-Id": "openclaw-instance-1",
+      }),
     );
     expect(parseJsonRequestBody(init)).toMatchObject({
       channel: "telegram",
@@ -89,9 +136,20 @@ describe("mux outbound routing", () => {
   });
 
   it("routes discord outbound through mux when enabled", async () => {
-    const fetchSpy = vi.fn(async () =>
-      jsonResponse({ messageId: "mx-discord-1", channelId: "dc-channel-1" }),
-    );
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ messageId: "mx-discord-1", channelId: "dc-channel-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const sendDiscord = vi.fn();
@@ -115,15 +173,19 @@ describe("mux outbound routing", () => {
     });
 
     expect(sendDiscord).not.toHaveBeenCalled();
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
       channel: "discord",
       messageId: "mx-discord-1",
       channelId: "dc-channel-1",
     });
 
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
+    const sendCall = fetchSpy.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
     expect(parseJsonRequestBody(init)).toMatchObject({
       channel: "discord",
       sessionKey: "sess-discord",
@@ -139,7 +201,20 @@ describe("mux outbound routing", () => {
   });
 
   it("routes whatsapp outbound through mux when enabled", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-wa-1", toJid: "jid-1" }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ messageId: "mx-wa-1", toJid: "jid-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const sendWhatsApp = vi.fn();
@@ -163,11 +238,15 @@ describe("mux outbound routing", () => {
     });
 
     expect(sendWhatsApp).not.toHaveBeenCalled();
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ channel: "whatsapp", messageId: "mx-wa-1", toJid: "jid-1" });
 
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
+    const sendCall = fetchSpy.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
     expect(parseJsonRequestBody(init)).toMatchObject({
       channel: "whatsapp",
       sessionKey: "sess-wa",
@@ -183,7 +262,20 @@ describe("mux outbound routing", () => {
   });
 
   it("routes telegram outbound through mux from default account config", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-tg-acct-1" }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ messageId: "mx-tg-acct-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
@@ -208,11 +300,24 @@ describe("mux outbound routing", () => {
       sessionKey: "sess-tg",
     });
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
   it("routes discord outbound through mux from default account config", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-discord-acct-1" }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ messageId: "mx-discord-acct-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
@@ -237,11 +342,24 @@ describe("mux outbound routing", () => {
       sessionKey: "sess-discord",
     });
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
   it("routes whatsapp outbound through mux from default account config", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ messageId: "mx-wa-acct-1" }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ messageId: "mx-wa-acct-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
@@ -266,11 +384,24 @@ describe("mux outbound routing", () => {
       sessionKey: "sess-wa",
     });
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
   it("routes typing through mux when enabled", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ ok: true }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ ok: true });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
@@ -290,12 +421,13 @@ describe("mux outbound routing", () => {
       sessionKey: "sess-tg",
     });
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
-    expect(init.headers).toEqual(
-      expect.objectContaining({ Authorization: `Bearer ${TENANT_TOKEN}` }),
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const sendCall = fetchSpy.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
     );
+    expect(sendCall).toBeDefined();
+    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
     expect(parseJsonRequestBody(init)).toMatchObject({
       op: "action",
       action: "typing",
@@ -304,7 +436,7 @@ describe("mux outbound routing", () => {
     });
   });
 
-  it("requires gateway mux token when channel mux is enabled", async () => {
+  it("requires gateway mux registerKey when channel mux is enabled", async () => {
     const cfg = {
       gateway: {
         http: {
@@ -331,7 +463,7 @@ describe("mux outbound routing", () => {
         text: "hello",
         sessionKey: "sess-tg",
       }),
-    ).rejects.toThrow(/gateway\.http\.endpoints\.mux\.token is required/i);
+    ).rejects.toThrow(/gateway\.http\.endpoints\.mux\.registerKey.*required/i);
   });
 
   it("requires gateway mux baseUrl when channel mux is enabled", async () => {
@@ -340,7 +472,7 @@ describe("mux outbound routing", () => {
         http: {
           endpoints: {
             mux: {
-              token: TENANT_TOKEN,
+              registerKey: REGISTER_KEY,
             },
           },
         },
@@ -365,7 +497,20 @@ describe("mux outbound routing", () => {
   });
 
   it("rejects telegram mux success payload missing messageId", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ chatId: "tg-chat-1" }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ chatId: "tg-chat-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
@@ -390,7 +535,20 @@ describe("mux outbound routing", () => {
   });
 
   it("rejects discord mux success payload missing messageId", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ channelId: "dc-channel-1" }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ channelId: "dc-channel-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {
@@ -415,7 +573,20 @@ describe("mux outbound routing", () => {
   });
 
   it("rejects whatsapp mux success payload missing messageId", async () => {
-    const fetchSpy = vi.fn(async () => jsonResponse({ toJid: "jid-1" }));
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ toJid: "jid-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const cfg = {

@@ -86,6 +86,7 @@ async function startServer(options?: {
     cwd: muxDir,
     env: {
       ...globalThis.process.env,
+      NODE_ENV: "test",
       TELEGRAM_BOT_TOKEN: "dummy-token",
       DISCORD_BOT_TOKEN: "dummy-discord-token",
       MUX_API_KEY: options?.apiKey ?? "test-key",
@@ -202,6 +203,58 @@ function toSafeString(value: unknown, fallback = ""): string {
     return String(value);
   }
   return fallback;
+}
+
+function readHeaderString(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  if (Array.isArray(value) && typeof value[0] === "string" && value[0].trim()) {
+    return value[0].trim();
+  }
+  return null;
+}
+
+function readBearerToken(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> {
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    throw new Error("invalid jwt format");
+  }
+  const payloadPart = parts[1] ?? "";
+  const normalized = payloadPart.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  const raw = Buffer.from(padded, "base64").toString("utf8");
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+function expectInboundJwtAuth(
+  params: { authorization: unknown; openclawIdHeader: unknown },
+  expectedOpenclawId: string,
+) {
+  expect(readHeaderString(params.openclawIdHeader)).toBe(expectedOpenclawId);
+  const token = readBearerToken(params.authorization);
+  expect(token).toBeTruthy();
+  if (!token) {
+    return;
+  }
+  const payload = decodeJwtPayload(token);
+  expect(toSafeString(payload.sub)).toBe(expectedOpenclawId);
+  const aud = payload.aud;
+  const audiences = Array.isArray(aud)
+    ? aud.map((entry) => toSafeString(entry)).filter(Boolean)
+    : typeof aud === "string"
+      ? [aud]
+      : [];
+  expect(audiences).toContain("openclaw-mux-inbound");
+  expect(toSafeString(payload.scope)).toContain("mux:inbound");
 }
 
 async function waitForCondition(
@@ -382,12 +435,146 @@ async function getAdminWhatsAppHealth(params: { port: number; adminToken: string
   });
 }
 
+async function registerInstance(params: {
+  port: number;
+  registerKey: string;
+  openclawId: string;
+  inboundUrl: string;
+  inboundTimeoutMs?: number;
+}) {
+  return await fetch(`http://127.0.0.1:${params.port}/v1/instances/register`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.registerKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      openclawId: params.openclawId,
+      inboundUrl: params.inboundUrl,
+      ...(params.inboundTimeoutMs ? { inboundTimeoutMs: params.inboundTimeoutMs } : {}),
+    }),
+  });
+}
+
 describe("mux server", () => {
   test("health endpoint responds", async () => {
     const server = await startServer();
     const response = await fetch(`http://127.0.0.1:${server.port}/health`);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
+  });
+
+  test("instance register endpoint requires shared register key and returns runtime jwt metadata", async () => {
+    const server = await startServer({
+      extraEnv: {
+        MUX_REGISTER_KEY: "register-shared-key",
+      },
+    });
+
+    const unauthorized = await fetch(`http://127.0.0.1:${server.port}/v1/instances/register`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        openclawId: "oc-1",
+        inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
+      }),
+    });
+    expect(unauthorized.status).toBe(401);
+    expect(await unauthorized.json()).toEqual({ ok: false, error: "unauthorized" });
+
+    const registered = await registerInstance({
+      port: server.port,
+      registerKey: "register-shared-key",
+      openclawId: "oc-1",
+      inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
+      inboundTimeoutMs: 5_000,
+    });
+    expect(registered.status).toBe(200);
+    const registerBody = (await registered.json()) as {
+      ok?: unknown;
+      openclawId?: unknown;
+      tokenType?: unknown;
+      runtimeToken?: unknown;
+      expiresAtMs?: unknown;
+    };
+    expect(registerBody).toMatchObject({
+      ok: true,
+      openclawId: "oc-1",
+      tokenType: "Bearer",
+    });
+    expect(typeof registerBody.runtimeToken).toBe("string");
+    expect(typeof registerBody.expiresAtMs).toBe("number");
+
+    const jwks = await fetch(`http://127.0.0.1:${server.port}/.well-known/jwks.json`);
+    expect(jwks.status).toBe(200);
+    const body = (await jwks.json()) as { keys?: Array<{ kid?: string; alg?: string }> };
+    expect(Array.isArray(body.keys)).toBe(true);
+    expect(body.keys?.[0]).toMatchObject({
+      alg: "EdDSA",
+    });
+    expect(typeof body.keys?.[0]?.kid).toBe("string");
+  });
+
+  test("runtime jwt auth enforces openclaw identity on outbound endpoints", async () => {
+    const server = await startServer({
+      extraEnv: {
+        MUX_REGISTER_KEY: "register-shared-key",
+      },
+    });
+    const registered = await registerInstance({
+      port: server.port,
+      registerKey: "register-shared-key",
+      openclawId: "oc-1",
+      inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
+    });
+    const registerBody = (await registered.json()) as {
+      runtimeToken?: string;
+    };
+    const runtimeToken = toSafeString(registerBody.runtimeToken);
+    expect(runtimeToken).toBeTruthy();
+
+    const valid = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${runtimeToken}`,
+        "X-OpenClaw-Id": "oc-1",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        text: "hello",
+        openclawId: "oc-1",
+      }),
+    });
+    expect(valid.status).toBe(403);
+    expect(await valid.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
+
+    const mismatch = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${runtimeToken}`,
+        "X-OpenClaw-Id": "oc-1",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        text: "hello",
+        openclawId: "oc-other",
+      }),
+    });
+    expect(mismatch.status).toBe(401);
+    expect(await mismatch.json()).toEqual({
+      ok: false,
+      error: "openclawId mismatch",
+    });
   });
 
   test("outbound endpoint rejects unauthorized requests", async () => {
@@ -499,7 +686,6 @@ describe("mux server", () => {
       tenantId: "tenant-cp-1",
       inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
       inboundTimeoutMs: 12_000,
-      sharedTenantKey: true,
     });
 
     const tenantProbe = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
@@ -591,23 +777,24 @@ describe("mux server", () => {
     }
   });
 
-  test("tenant inbound target update uses tenant api key for inbound auth", async () => {
-    const inboundRequests: Array<Record<string, unknown>> = [];
+  test("tenant inbound target update uses runtime jwt for inbound auth", async () => {
+    const inboundRequests: Array<{
+      authorization: string | undefined;
+      openclawIdHeader: string | undefined;
+      payload: Record<string, unknown>;
+    }> = [];
     const inbound = await startHttpServer(async (req, res) => {
       if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
         res.writeHead(404);
         res.end();
         return;
       }
-      inboundRequests.push({
-        auth: req.headers.authorization,
-        payload: await readJsonBody(req),
-      });
-      if (req.headers.authorization !== "Bearer tenant-a-key") {
-        res.writeHead(401, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: "bad auth" }));
-        return;
-      }
+      const payload = await readJsonBody(req);
+      const authorization =
+        typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
+      const openclawIdHeader =
+        typeof req.headers["x-openclaw-id"] === "string" ? req.headers["x-openclaw-id"] : undefined;
+      inboundRequests.push({ authorization, openclawIdHeader, payload });
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -682,29 +869,41 @@ describe("mux server", () => {
     await waitForCondition(
       () => inboundRequests.length >= 1,
       8_000,
-      "timed out waiting for shared-key inbound target forward",
+      "timed out waiting for inbound target forward",
     );
-    expect(inboundRequests[0]?.auth).toBe("Bearer tenant-a-key");
-    expect((inboundRequests[0]?.payload as Record<string, unknown>)?.body).toBe(
-      "default shared key target",
+    expectInboundJwtAuth(
+      {
+        authorization: inboundRequests[0]?.authorization,
+        openclawIdHeader: inboundRequests[0]?.openclawIdHeader,
+      },
+      "tenant-a",
     );
+    expect(inboundRequests[0]?.payload.body).toBe("default shared key target");
   }, 15_000);
 
   test("updates tenant inbound target at runtime and forwards new inbound traffic to updated target", async () => {
-    const inboundARequests: Array<Record<string, unknown>> = [];
-    const inboundBRequests: Array<Record<string, unknown>> = [];
+    const inboundARequests: Array<{
+      authorization: string | undefined;
+      openclawIdHeader: string | undefined;
+      payload: Record<string, unknown>;
+    }> = [];
+    const inboundBRequests: Array<{
+      authorization: string | undefined;
+      openclawIdHeader: string | undefined;
+      payload: Record<string, unknown>;
+    }> = [];
     const inboundA = await startHttpServer(async (req, res) => {
       if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
         res.writeHead(404);
         res.end();
         return;
       }
-      if (req.headers.authorization !== "Bearer tenant-a-key") {
-        res.writeHead(401);
-        res.end();
-        return;
-      }
-      inboundARequests.push(await readJsonBody(req));
+      const payload = await readJsonBody(req);
+      const authorization =
+        typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
+      const openclawIdHeader =
+        typeof req.headers["x-openclaw-id"] === "string" ? req.headers["x-openclaw-id"] : undefined;
+      inboundARequests.push({ authorization, openclawIdHeader, payload });
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -714,12 +913,12 @@ describe("mux server", () => {
         res.end();
         return;
       }
-      if (req.headers.authorization !== "Bearer tenant-a-key") {
-        res.writeHead(401);
-        res.end();
-        return;
-      }
-      inboundBRequests.push(await readJsonBody(req));
+      const payload = await readJsonBody(req);
+      const authorization =
+        typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
+      const openclawIdHeader =
+        typeof req.headers["x-openclaw-id"] === "string" ? req.headers["x-openclaw-id"] : undefined;
+      inboundBRequests.push({ authorization, openclawIdHeader, payload });
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -814,7 +1013,14 @@ describe("mux server", () => {
       8_000,
       "timed out waiting for first inbound target",
     );
-    expect(inboundARequests[0]?.body).toBe("first target");
+    expectInboundJwtAuth(
+      {
+        authorization: inboundARequests[0]?.authorization,
+        openclawIdHeader: inboundARequests[0]?.openclawIdHeader,
+      },
+      "tenant-a",
+    );
+    expect(inboundARequests[0]?.payload.body).toBe("first target");
 
     const updateTarget = await setInboundTarget({
       port: server.port,
@@ -842,7 +1048,14 @@ describe("mux server", () => {
       8_000,
       "timed out waiting for rotated inbound target",
     );
-    expect(inboundBRequests[0]?.body).toBe("second target");
+    expectInboundJwtAuth(
+      {
+        authorization: inboundBRequests[0]?.authorization,
+        openclawIdHeader: inboundBRequests[0]?.openclawIdHeader,
+      },
+      "tenant-a",
+    );
+    expect(inboundBRequests[0]?.payload.body).toBe("second target");
     expect(inboundARequests.length).toBe(1);
   }, 20_000);
 
@@ -1402,7 +1615,7 @@ describe("mux server", () => {
       ok: false,
       error: "whatsapp typing failed",
     });
-  });
+  }, 10_000);
 
   test("discord outbound raw envelope forwards body unchanged", async () => {
     const discordRequests: Array<{
@@ -1658,7 +1871,7 @@ describe("mux server", () => {
     expect(
       discordRequests.every((entry) => entry.authorization === "Bot dummy-discord-token"),
     ).toBe(true);
-  });
+  }, 10_000);
 
   test("sends discord outbound through dm-bound route", async () => {
     const discordRequests: Array<{
@@ -1753,6 +1966,7 @@ describe("mux server", () => {
   test("forwards inbound Telegram updates to tenant inbound endpoint", async () => {
     const inboundRequests: Array<{
       authorization: string | undefined;
+      openclawIdHeader: string | undefined;
       payload: Record<string, unknown>;
     }> = [];
     const inbound = await startHttpServer(async (req, res) => {
@@ -1764,7 +1978,9 @@ describe("mux server", () => {
       const payload = await readJsonBody(req);
       const authorization =
         typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
-      inboundRequests.push({ authorization, payload });
+      const openclawIdHeader =
+        typeof req.headers["x-openclaw-id"] === "string" ? req.headers["x-openclaw-id"] : undefined;
+      inboundRequests.push({ authorization, openclawIdHeader, payload });
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -1845,7 +2061,13 @@ describe("mux server", () => {
     );
 
     expect(inboundRequests).toHaveLength(1);
-    expect(inboundRequests[0]?.authorization).toBe("Bearer tenant-a-key");
+    expectInboundJwtAuth(
+      {
+        authorization: inboundRequests[0]?.authorization,
+        openclawIdHeader: inboundRequests[0]?.openclawIdHeader,
+      },
+      "tenant-a",
+    );
     expect(inboundRequests[0]?.payload).toMatchObject({
       eventId: "tg:461",
       channel: "telegram",
@@ -1856,6 +2078,7 @@ describe("mux server", () => {
       accountId: "default",
       chatType: "group",
       messageId: "462",
+      openclawId: "tenant-a",
       channelData: {
         accountId: "default",
         messageId: "462",

@@ -4,10 +4,9 @@ This stack mirrors the production shape on one machine:
 
 - `openclaw` container (same `phala-deploy/Dockerfile` path used for CVM image)
 - `mux-server` container (Telegram + Discord + WhatsApp inbound/outbound)
-- one tenant key shared across:
-  - OpenClaw `gateway.http.endpoints.mux.token`
-  - OpenClaw outbound auth to mux
-  - mux inbound auth back to OpenClaw
+- one shared register key (`MUX_REGISTER_KEY`) used only for `POST /v1/instances/register`
+- per-instance runtime JWT (mux -> OpenClaw) used for runtime mux APIs (pairings/outbound/etc)
+- per-delivery inbound JWT (mux -> OpenClaw) used for inbound delivery to OpenClaw
 
 ## Why this is safe for testing
 
@@ -26,13 +25,14 @@ This stack mirrors the production shape on one machine:
 ## Prerequisites
 
 - Docker (Compose v2)
-- `curl`, `jq`, `openssl`
+- `curl`, `jq`
 - `rv-exec` configured with:
-  - `MUX_ADMIN_TOKEN`
   - `TELEGRAM_BOT_TOKEN`
   - `DISCORD_BOT_TOKEN`
 - Optional: a valid WhatsApp auth dir if you want to test WhatsApp:
   - `WA_AUTH_SOURCE=<path-to-local-test-auth>`
+- Optional override:
+  - `MUX_REGISTER_KEY` (defaults to `local-mux-e2e-register-key`)
 
 ## Bring Up
 
@@ -45,31 +45,9 @@ What `up.sh` does:
 1. Optionally copies WhatsApp auth snapshot into local state (if `WA_AUTH_SOURCE` is set).
 2. Injects secrets with `rv-exec` for compose interpolation.
 3. Runs `docker compose up -d --build --remove-orphans`.
+4. Patches the OpenClaw config in-container to enable mux and restarts OpenClaw.
 
 To enable WhatsApp inbound, set `WA_AUTH_SOURCE` inline or in `phala-deploy/local-mux-e2e/.env.local` (from `.env.example`).
-
-## Bootstrap One Tenant
-
-```bash
-./phala-deploy/local-mux-e2e/scripts/bootstrap-tenant.sh
-```
-
-Optional args:
-
-```bash
-./phala-deploy/local-mux-e2e/scripts/bootstrap-tenant.sh <tenant-id> <tenant-api-key>
-```
-
-What bootstrap does:
-
-1. Updates OpenClaw config in-container:
-   - `gateway.http.endpoints.mux.baseUrl=http://mux-server:18891`
-   - `gateway.http.endpoints.mux.token=<tenant-api-key>`
-   - enables mux account routing for `telegram`, `discord`, `whatsapp`
-2. Restarts OpenClaw gateway.
-3. Calls mux admin API `POST /v1/admin/tenants/bootstrap` with inbound target:
-   - `http://openclaw:18789/v1/mux/inbound`
-4. Stores tenant info in `phala-deploy/local-mux-e2e/state/tenant.env`.
 
 Listener defaults in local e2e:
 
@@ -86,6 +64,12 @@ Generate one-time pairing token:
 ./phala-deploy/local-mux-e2e/scripts/pair-token.sh discord
 ./phala-deploy/local-mux-e2e/scripts/pair-token.sh whatsapp
 ```
+
+What `pair-token.sh` does:
+
+1. Reads `openclawId` from the OpenClaw container device identity.
+2. Calls `POST /v1/instances/register` to mint a runtime JWT.
+3. Calls `POST /v1/pairings/token` using that runtime JWT.
 
 Then redeem token in channel:
 
@@ -117,13 +101,13 @@ Follow logs:
 Stop only:
 
 ```bash
-rv-exec MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN -- \
+rv-exec TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN -- \
   bash -lc './phala-deploy/local-mux-e2e/scripts/down.sh'
 ```
 
 Stop and wipe local test state:
 
 ```bash
-rv-exec MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN -- \
+rv-exec TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN -- \
   bash -lc './phala-deploy/local-mux-e2e/scripts/down.sh --wipe'
 ```

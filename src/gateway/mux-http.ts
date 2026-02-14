@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { MsgContext } from "../auto-reply/templating.js";
+import type { OpenClawConfig } from "../config/config.js";
 import type { ChatImageContent } from "./chat-attachments.js";
 import { dispatchInboundMessage } from "../auto-reply/dispatch.js";
 import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
@@ -16,7 +17,11 @@ import {
   toMuxInboundPayload,
   type MuxInboundPayload,
 } from "../channels/plugins/mux-envelope.js";
-import { sendTypingViaMux } from "../channels/plugins/outbound/mux.js";
+import {
+  resolveMuxOpenClawId,
+  sendTypingViaMux,
+  sendViaMux,
+} from "../channels/plugins/outbound/mux.js";
 import { loadConfig } from "../config/config.js";
 import { warn } from "../globals.js";
 import {
@@ -25,6 +30,7 @@ import {
 } from "../telegram/callback-actions.js";
 import { parseMessageWithAttachments } from "./chat-attachments.js";
 import { readJsonBody } from "./hooks.js";
+import { verifyMuxInboundJwt } from "./mux-jwt.js";
 
 const DEFAULT_MUX_MAX_BODY_BYTES = 10 * 1024 * 1024;
 
@@ -41,6 +47,54 @@ function resolveBearerToken(req: IncomingMessage): string | null {
   }
   const match = auth.match(/^Bearer\s+(.+)$/i);
   return match?.[1]?.trim() || null;
+}
+
+function resolveOpenClawIdHeader(req: IncomingMessage): string | null {
+  const raw = req.headers["x-openclaw-id"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return readMuxNonEmptyString(value) ?? null;
+}
+
+async function authorizeMuxInboundRequest(params: {
+  req: IncomingMessage;
+  cfg: OpenClawConfig;
+}): Promise<
+  | { ok: true; openclawId: string }
+  | { ok: false; statusCode: number; error: string; code?: string; details?: string }
+> {
+  const endpointCfg = params.cfg.gateway?.http?.endpoints?.mux;
+  const providedToken = resolveBearerToken(params.req);
+  if (!providedToken) {
+    return { ok: false, statusCode: 401, error: "unauthorized", code: "MISSING_BEARER" };
+  }
+
+  const baseUrl = normalizeMuxBaseUrl(endpointCfg?.baseUrl);
+  if (!baseUrl) {
+    return { ok: false, statusCode: 500, error: "mux baseUrl is not configured" };
+  }
+
+  const openclawId = resolveMuxOpenClawId(params.cfg);
+  const headerOpenClawId = resolveOpenClawIdHeader(params.req);
+  if (!headerOpenClawId || headerOpenClawId !== openclawId) {
+    return { ok: false, statusCode: 401, error: "unauthorized", code: "OPENCLAW_ID_MISMATCH" };
+  }
+
+  const verified = await verifyMuxInboundJwt({
+    token: providedToken,
+    openclawId,
+    baseUrl,
+  });
+  if (!verified.ok) {
+    return {
+      ok: false,
+      statusCode: 401,
+      error: "unauthorized",
+      code: "JWT_INVALID",
+      details: verified.error,
+    };
+  }
+
+  return { ok: true, openclawId };
 }
 
 function resolveTelegramCallbackPayload(params: {
@@ -96,8 +150,7 @@ function resolveTelegramCallbackPayload(params: {
 }
 
 async function sendTelegramEditViaMux(params: {
-  baseUrl: string;
-  token: string;
+  cfg: OpenClawConfig;
   sessionKey: string;
   accountId?: string;
   messageId: number;
@@ -109,28 +162,15 @@ async function sendTelegramEditViaMux(params: {
     text: params.text,
     buttons: params.buttons,
   });
-  const response = await fetch(`${params.baseUrl}/v1/mux/outbound/send`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.token}`,
-      "Content-Type": "application/json; charset=utf-8",
+  await sendViaMux({
+    cfg: params.cfg,
+    channel: "telegram",
+    sessionKey: params.sessionKey,
+    accountId: params.accountId,
+    raw: {
+      telegram: telegramEdit,
     },
-    body: JSON.stringify({
-      channel: "telegram",
-      sessionKey: params.sessionKey,
-      accountId: params.accountId,
-      raw: {
-        telegram: telegramEdit,
-      },
-    }),
   });
-  if (response.ok) {
-    return;
-  }
-  const detail = await response.text();
-  throw new Error(
-    `mux outbound edit failed (${response.status}): ${detail || response.statusText}`,
-  );
 }
 
 async function parseInboundImages(params: {
@@ -177,10 +217,14 @@ export async function handleMuxInboundHttpRequest(
     return true;
   }
 
-  const expectedToken = readMuxNonEmptyString(endpointCfg.token);
-  const providedToken = resolveBearerToken(req);
-  if (!expectedToken || !providedToken || expectedToken !== providedToken) {
-    sendJson(res, 401, { ok: false, error: "unauthorized" });
+  const authorization = await authorizeMuxInboundRequest({ req, cfg });
+  if (!authorization.ok) {
+    sendJson(res, authorization.statusCode, {
+      ok: false,
+      error: authorization.error,
+      ...(authorization.code ? { code: authorization.code } : {}),
+      ...(authorization.details ? { details: authorization.details } : {}),
+    });
     return true;
   }
 
@@ -204,6 +248,11 @@ export async function handleMuxInboundHttpRequest(
   const rawMessage = typeof payload.body === "string" ? payload.body : "";
   const attachments = normalizeMuxInboundAttachments(payload.attachments);
   const channelData = asMuxRecord(payload.channelData);
+  const payloadOpenClawId = readMuxNonEmptyString(payload.openclawId);
+  if (!payloadOpenClawId || payloadOpenClawId !== authorization.openclawId) {
+    sendJson(res, 401, { ok: false, error: "unauthorized", code: "PAYLOAD_OPENCLAW_ID_MISMATCH" });
+    return true;
+  }
 
   if (!channel) {
     sendJson(res, 400, { ok: false, error: "channel required" });
@@ -244,15 +293,8 @@ export async function handleMuxInboundHttpRequest(
         return true;
       }
       if (callbackAction.kind === "edit") {
-        const muxBaseUrl = normalizeMuxBaseUrl(endpointCfg.baseUrl);
-        if (!muxBaseUrl || !expectedToken) {
-          throw new Error(
-            "gateway.http.endpoints.mux.baseUrl and gateway.http.endpoints.mux.token are required",
-          );
-        }
         await sendTelegramEditViaMux({
-          baseUrl: muxBaseUrl,
-          token: expectedToken,
+          cfg,
           sessionKey,
           accountId: callbackPayload.accountId,
           messageId: callbackPayload.callbackMessageId,

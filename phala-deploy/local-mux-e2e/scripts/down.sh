@@ -8,7 +8,6 @@ COMPOSE_FILE="${STACK_DIR}/docker-compose.yml"
 if [[ "${1:-}" == "--wipe" ]]; then
   docker compose -f "${COMPOSE_FILE}" down -v --remove-orphans
   rm -rf "${STACK_DIR}/state/wa-auth/default"
-  rm -f "${STACK_DIR}/state/tenant.env"
   echo "[local-mux-e2e] stack stopped and local test state wiped"
   exit 0
 fi

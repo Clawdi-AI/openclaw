@@ -20,7 +20,6 @@ services:
       MUX_TELEGRAM_BOOTSTRAP_LATEST: "true"
       MUX_DISCORD_INBOUND_ENABLED: "true"
       MUX_DISCORD_BOOTSTRAP_LATEST: "true"
-      MUX_DISCORD_GATEWAY_DM_ENABLED: "true"
       MUX_WHATSAPP_INBOUND_ENABLED: "true"
       MUX_WHATSAPP_ACCOUNT_ID: "default"
       MUX_WHATSAPP_AUTH_DIR: "/root/.openclaw/credentials/whatsapp/default"

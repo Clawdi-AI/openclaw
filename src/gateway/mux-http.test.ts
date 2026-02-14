@@ -1,6 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { SignJWT } from "jose";
+import { generateKeyPairSync } from "node:crypto";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { __resetMuxJwksCacheForTest } from "./mux-jwt.js";
+
+const OPENCLAW_ID = "openclaw-rt-1";
 
 const mocks = vi.hoisted(() => ({
   loadConfig: vi.fn(),
@@ -44,6 +49,19 @@ vi.mock("../channels/plugins/outbound/mux.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../infra/device-identity.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../infra/device-identity.js")>();
+  return {
+    ...actual,
+    loadOrCreateDeviceIdentity: () => ({
+      deviceId: "openclaw-rt-1",
+      publicKeyPem: "test",
+      privateKeyPem: "test",
+    }),
+  };
+});
+
+const { __resetMuxRuntimeAuthCacheForTest } = await import("../channels/plugins/outbound/mux.js");
 const { handleMuxInboundHttpRequest } = await import("./mux-http.js");
 
 const ONE_PIXEL_PNG_BASE64 =
@@ -98,6 +116,8 @@ afterEach(() => {
   mocks.dispatchInboundMessage.mockClear();
   mocks.resolveTelegramCallbackAction.mockReset();
   mocks.sendTypingViaMux.mockReset();
+  __resetMuxJwksCacheForTest();
+  __resetMuxRuntimeAuthCacheForTest();
   vi.unstubAllGlobals();
 });
 
@@ -112,16 +132,93 @@ function parseJsonRequestBody(init: RequestInit): Record<string, unknown> {
   return JSON.parse(init.body) as Record<string, unknown>;
 }
 
+function resolveFetchUrl(input: string | URL | Request): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.toString();
+  }
+  return input.url;
+}
+
+function createJwtFixture() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const kid = "kid-test-1";
+  const rawJwk = publicKey.export({ format: "jwk" }) as JsonWebKey & {
+    kty?: string;
+    crv?: string;
+    x?: string;
+  };
+  const jwk = {
+    ...rawJwk,
+    kid,
+    use: "sig",
+    alg: "EdDSA",
+  };
+  const mintToken = async (params: {
+    issuer: string;
+    subject: string;
+    audience: string;
+    scope: string;
+    ttlSec?: number;
+  }) => {
+    const nowSec = Math.trunc(Date.now() / 1000);
+    return await new SignJWT({ scope: params.scope })
+      .setProtectedHeader({ alg: "EdDSA", typ: "JWT", kid })
+      .setIssuer(params.issuer)
+      .setSubject(params.subject)
+      .setAudience(params.audience)
+      .setIssuedAt(nowSec)
+      .setNotBefore(nowSec)
+      .setExpirationTime(nowSec + Math.max(1, params.ttlSec ?? 3600))
+      .sign(privateKey);
+  };
+  return {
+    jwks: { keys: [jwk] },
+    mintToken,
+  };
+}
+
 describe("handleMuxInboundHttpRequest", () => {
   test("authenticates and dispatches inbound payload", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
     mocks.loadConfig.mockReturnValue({
       gateway: {
         http: {
           endpoints: {
             mux: {
               enabled: true,
-              token: "mux-secret",
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
             },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
           },
         },
       },
@@ -134,16 +231,23 @@ describe("handleMuxInboundHttpRequest", () => {
     const noAuthRes = createResponse();
     expect(await handleMuxInboundHttpRequest(noAuthReq, noAuthRes)).toBe(true);
     expect(noAuthRes.statusCode).toBe(401);
+    expect(JSON.parse(noAuthRes.bodyText)).toEqual({
+      ok: false,
+      error: "unauthorized",
+      code: "MISSING_BEARER",
+    });
 
     const missingChannelReq = createRequest({
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer mux-secret",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
       },
       body: {
         sessionKey: "main",
         to: "telegram:123",
         body: "hello",
+        openclawId: OPENCLAW_ID,
       },
     });
     const missingChannelRes = createResponse();
@@ -153,7 +257,8 @@ describe("handleMuxInboundHttpRequest", () => {
     const okReq = createRequest({
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer mux-secret",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
       },
       body: {
         channel: "telegram",
@@ -162,6 +267,7 @@ describe("handleMuxInboundHttpRequest", () => {
         from: "telegram:user",
         body: "hello mux",
         messageId: "mux-msg-1",
+        openclawId: OPENCLAW_ID,
       },
     });
     const okRes = createResponse();
@@ -205,14 +311,167 @@ describe("handleMuxInboundHttpRequest", () => {
     expect(call?.replyOptions?.images).toBeUndefined();
   });
 
-  test("passes through channelData without transport mutation", async () => {
+  test("accepts mux inbound jwt auth and reuses cached jwks", async () => {
+    const jwtFixture = createJwtFixture();
+    let jwksFetchCount = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        jwksFetchCount += 1;
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
     mocks.loadConfig.mockReturnValue({
       gateway: {
         http: {
           endpoints: {
             mux: {
               enabled: true,
-              token: "mux-secret",
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound mux:runtime",
+    });
+
+    const makeRequest = () =>
+      createRequest({
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+          "x-openclaw-id": OPENCLAW_ID,
+        },
+        body: {
+          channel: "telegram",
+          sessionKey: "main",
+          to: "telegram:123",
+          from: "telegram:user",
+          body: "hello jwt",
+          messageId: `mux-msg-${Date.now()}`,
+          openclawId: OPENCLAW_ID,
+        },
+      });
+
+    const firstRes = createResponse();
+    expect(await handleMuxInboundHttpRequest(makeRequest(), firstRes)).toBe(true);
+    expect(firstRes.statusCode).toBe(202);
+
+    const secondRes = createResponse();
+    expect(await handleMuxInboundHttpRequest(makeRequest(), secondRes)).toBe(true);
+    expect(secondRes.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    expect(mocks.dispatchInboundMessage).toHaveBeenCalledTimes(2);
+    expect(jwksFetchCount).toBe(1);
+  });
+
+  test("rejects runtime jwt request when payload openclawId does not match", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify(jwtFixture.jwks), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+    });
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "main",
+        to: "telegram:123",
+        body: "hello",
+        openclawId: "someone-else",
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(401);
+    expect(JSON.parse(res.bodyText)).toEqual({
+      ok: false,
+      error: "unauthorized",
+      code: "PAYLOAD_OPENCLAW_ID_MISMATCH",
+    });
+  });
+
+  test("passes through channelData without transport mutation", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
             },
           },
         },
@@ -222,7 +481,8 @@ describe("handleMuxInboundHttpRequest", () => {
     const req = createRequest({
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer mux-secret",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
       },
       body: {
         channel: "discord",
@@ -240,6 +500,7 @@ describe("handleMuxInboundHttpRequest", () => {
             },
           },
         },
+        openclawId: OPENCLAW_ID,
       },
     });
     const res = createResponse();
@@ -272,13 +533,33 @@ describe("handleMuxInboundHttpRequest", () => {
   test.each(["discord", "whatsapp"] as const)(
     "sends mux typing action for %s replies",
     async (channel) => {
+      const jwtFixture = createJwtFixture();
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const url = resolveFetchUrl(input);
+        if (url === "http://mux.local/.well-known/jwks.json") {
+          return new Response(JSON.stringify(jwtFixture.jwks), {
+            status: 200,
+            headers: { "Content-Type": "application/json; charset=utf-8" },
+          });
+        }
+        throw new Error(`unexpected fetch url ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const token = await jwtFixture.mintToken({
+        issuer: "http://mux.local",
+        subject: OPENCLAW_ID,
+        audience: "openclaw-mux-inbound",
+        scope: "mux:inbound",
+      });
+
       mocks.loadConfig.mockReturnValue({
         gateway: {
           http: {
             endpoints: {
               mux: {
                 enabled: true,
-                token: "mux-secret",
+                baseUrl: "http://mux.local",
               },
             },
           },
@@ -295,7 +576,8 @@ describe("handleMuxInboundHttpRequest", () => {
       const req = createRequest({
         headers: {
           "content-type": "application/json",
-          authorization: "Bearer mux-secret",
+          authorization: `Bearer ${token}`,
+          "x-openclaw-id": OPENCLAW_ID,
         },
         body: {
           channel,
@@ -305,6 +587,7 @@ describe("handleMuxInboundHttpRequest", () => {
           from: `${channel}:user:42`,
           body: "hello",
           messageId: `${channel}-msg-1`,
+          openclawId: OPENCLAW_ID,
         },
       });
       const res = createResponse();
@@ -322,13 +605,33 @@ describe("handleMuxInboundHttpRequest", () => {
   );
 
   test("parses image attachments into replyOptions.images", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
     mocks.loadConfig.mockReturnValue({
       gateway: {
         http: {
           endpoints: {
             mux: {
               enabled: true,
-              token: "mux-secret",
+              baseUrl: "http://mux.local",
             },
           },
         },
@@ -338,7 +641,8 @@ describe("handleMuxInboundHttpRequest", () => {
     const req = createRequest({
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer mux-secret",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
       },
       body: {
         channel: "telegram",
@@ -346,6 +650,7 @@ describe("handleMuxInboundHttpRequest", () => {
         to: "telegram:123",
         body: "see image",
         messageId: "mux-img-1",
+        openclawId: OPENCLAW_ID,
         attachments: [
           {
             type: "image",
@@ -381,13 +686,33 @@ describe("handleMuxInboundHttpRequest", () => {
   });
 
   test("acks immediately without waiting for slow dispatch completion", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
     mocks.loadConfig.mockReturnValue({
       gateway: {
         http: {
           endpoints: {
             mux: {
               enabled: true,
-              token: "mux-secret",
+              baseUrl: "http://mux.local",
             },
           },
         },
@@ -404,7 +729,8 @@ describe("handleMuxInboundHttpRequest", () => {
     const req = createRequest({
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer mux-secret",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
       },
       body: {
         channel: "telegram",
@@ -412,6 +738,7 @@ describe("handleMuxInboundHttpRequest", () => {
         to: "telegram:123",
         body: "slow path",
         messageId: "mux-slow-1",
+        openclawId: OPENCLAW_ID,
       },
     });
     const res = createResponse();
@@ -426,15 +753,31 @@ describe("handleMuxInboundHttpRequest", () => {
   });
 
   test("handles telegram callback edit actions via mux raw outbound", async () => {
+    const jwtFixture = createJwtFixture();
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
     mocks.loadConfig.mockReturnValue({
       gateway: {
         http: {
           endpoints: {
             mux: {
               enabled: true,
-              token: "mux-secret",
               baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
             },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
           },
         },
       },
@@ -444,18 +787,39 @@ describe("handleMuxInboundHttpRequest", () => {
       text: "page two",
       buttons: [[{ text: "Prev", callback_data: "commands_page_1:main" }]],
     });
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      text: async () => "",
-    }));
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      if (url === "http://mux.local/v1/instances/register") {
+        return new Response(
+          JSON.stringify({
+            runtimeToken: "rt-token-1",
+            expiresAtMs: Date.now() + 86_400_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } },
+        );
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return new Response(JSON.stringify({ messageId: "mx-edit-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      void init;
+      throw new Error(`unexpected fetch url ${url}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const req = createRequest({
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer mux-secret",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
       },
       body: {
         eventId: "tgcb:470",
@@ -475,12 +839,13 @@ describe("handleMuxInboundHttpRequest", () => {
             callbackMessageId: "777",
           },
         },
+        openclawId: OPENCLAW_ID,
       },
     });
     const res = createResponse();
 
     expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
-    expect(res.statusCode).toBe(202);
+    expect(res.statusCode, res.bodyText).toBe(202);
     expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
     expect(mocks.resolveTelegramCallbackAction).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -488,9 +853,13 @@ describe("handleMuxInboundHttpRequest", () => {
         chatId: "-100555",
       }),
     );
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://mux.local/v1/mux/outbound/send");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const sendCall = fetchMock.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
     const body = parseJsonRequestBody(init);
     expect(body).toMatchObject({
       channel: "telegram",
@@ -512,13 +881,32 @@ describe("handleMuxInboundHttpRequest", () => {
   });
 
   test("forwards telegram callback actions as synthetic command text", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
     mocks.loadConfig.mockReturnValue({
       gateway: {
         http: {
           endpoints: {
             mux: {
               enabled: true,
-              token: "mux-secret",
               baseUrl: "http://mux.local",
             },
           },
@@ -533,7 +921,8 @@ describe("handleMuxInboundHttpRequest", () => {
     const req = createRequest({
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer mux-secret",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
       },
       body: {
         eventId: "tgcb:471",
@@ -554,6 +943,7 @@ describe("handleMuxInboundHttpRequest", () => {
             callbackMessageId: "778",
           },
         },
+        openclawId: OPENCLAW_ID,
       },
     });
     const res = createResponse();

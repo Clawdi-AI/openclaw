@@ -261,8 +261,16 @@ export type GatewayHttpMuxConfig = {
   enabled?: boolean;
   /** Base URL for outbound mux sends (for example, http://mux.local:8080). */
   baseUrl?: string;
-  /** Shared bearer token required for mux inbound requests. */
-  token?: string;
+  /**
+   * Shared registration key used by OpenClaw instances to register with mux and
+   * obtain runtime JWT credentials.
+   */
+  registerKey?: string;
+  /**
+   * Public URL that mux should call for inbound delivery (for example,
+   * https://openclaw.example.com/v1/mux/inbound).
+   */
+  inboundUrl?: string;
   /** Max inbound payload bytes. Default: 10MB. */
   maxBodyBytes?: number;
 };

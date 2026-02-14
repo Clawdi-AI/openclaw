@@ -115,16 +115,16 @@ if [[ "$NO_BUILD" -eq 0 ]]; then
   fi
   run pnpm --dir "$ROOT_DIR" ui:build
 
-  PACK_OUT=""
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    printf '%q ' npm --prefix "$ROOT_DIR" pack
+    printf '%q ' npm --prefix "$ROOT_DIR" pack --pack-destination "$SCRIPT_DIR"
     printf '\n'
-    log "dry-run: skipping tarball move"
+    log "dry-run: skipping tarball creation"
   else
-    PACK_OUT="$(npm --prefix "$ROOT_DIR" pack)"
+    PACK_OUT="$(npm --prefix "$ROOT_DIR" pack --pack-destination "$SCRIPT_DIR")"
     TGZ_NAME="$(printf '%s\n' "$PACK_OUT" | tail -n 1 | tr -d '[:space:]')"
     [[ -n "$TGZ_NAME" ]] || die "failed to resolve npm pack output"
-    mv -f "$ROOT_DIR/$TGZ_NAME" "$SCRIPT_DIR/openclaw.tgz"
+    rm -f "$SCRIPT_DIR/openclaw.tgz"
+    mv -f "$SCRIPT_DIR/$TGZ_NAME" "$SCRIPT_DIR/openclaw.tgz"
     log "updated tarball: $SCRIPT_DIR/openclaw.tgz"
   fi
 fi

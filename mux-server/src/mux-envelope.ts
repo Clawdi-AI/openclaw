@@ -18,6 +18,7 @@ export type MuxPayload = {
   channelData?: unknown;
   poll?: unknown;
   raw?: unknown;
+  openclawId?: unknown;
 };
 
 export type MuxInboundAttachment = {
@@ -45,6 +46,7 @@ export type MuxInboundPayload = {
   threadId?: unknown;
   channelData?: unknown;
   attachments?: unknown;
+  openclawId?: unknown;
 };
 
 export type MuxInboundEnvelope = {
@@ -66,6 +68,7 @@ export type MuxInboundEnvelope = {
   threadId?: number | string;
   channelData: Record<string, unknown>;
   attachments?: MuxInboundAttachment[];
+  openclawId?: string;
 };
 
 export type MuxOutboundOperation = {
