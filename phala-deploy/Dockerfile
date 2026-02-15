@@ -1,3 +1,17 @@
+# --- Stage 1: Build gogcli (Google API CLI with env-var credential injection) ---
+FROM golang:1.25-bookworm AS gogcli-builder
+ARG GOGCLI_REPO=https://github.com/Leechael/gogcli.git
+ARG GOGCLI_BRANCH=feat/env-token-injection
+RUN git clone --depth 1 --branch "$GOGCLI_BRANCH" "$GOGCLI_REPO" /src/gogcli
+WORKDIR /src/gogcli
+RUN CGO_ENABLED=0 go build \
+      -ldflags "-s -w \
+        -X github.com/steipete/gogcli/internal/cmd.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev) \
+        -X github.com/steipete/gogcli/internal/cmd.commit=$(git rev-parse --short=12 HEAD) \
+        -X github.com/steipete/gogcli/internal/cmd.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      -o /out/gog-bin ./cmd/gog
+
+# --- Stage 2: Runtime image ---
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -69,6 +83,11 @@ RUN curl -fsSL "https://github.com/rclone/rclone/releases/download/v${RCLONE_VER
 RUN apt-get update && \
     apt-get install -y --no-install-recommends fuse3 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# gogcli: static binary + credential-sourcing wrapper
+COPY --from=gogcli-builder /out/gog-bin /usr/local/bin/gog-bin
+COPY phala-deploy/gogcli/gog-wrapper.sh /usr/local/bin/gog
+RUN chmod +x /usr/local/bin/gog /usr/local/bin/gog-bin
 
 COPY phala-deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
