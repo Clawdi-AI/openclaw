@@ -13,8 +13,11 @@ Do not run both services in one CVM.
    - OpenClaw CVM uses `phala-deploy/docker-compose.yml`
    - mux CVM uses `phala-deploy/mux-server-compose.yml`
 2. Keep images digest-pinned in compose.
-3. `MUX_API_KEY` must match OpenClaw `gateway.http.endpoints.mux.token`.
-4. After mux DB reset/new DB bootstrap, sync mux inbound target again.
+3. `MUX_REGISTER_KEY` must match OpenClaw `gateway.http.endpoints.mux.registerKey`.
+4. OpenClaw must have `gateway.http.endpoints.mux.inboundUrl` set to a public URL reachable by mux.
+5. OpenClaw device identity is stable when `MASTER_KEY` is stable:
+   - `openclawId` is the device `deviceId` from `/root/.openclaw/identity/device.json`
+   - when `MASTER_KEY` is set, OpenClaw derives the device keypair deterministically, so deleting `device.json` is recoverable after restart
 
 ## One-time local setup
 
@@ -60,7 +63,8 @@ Create mux deploy env (example):
 
 ```bash
 cat >/tmp/mux-phala-deploy.env <<'EOF'
-MUX_API_KEY=replace-with-shared-mux-api-key
+MUX_REGISTER_KEY=replace-with-shared-register-key
+MUX_ADMIN_TOKEN=replace-with-mux-admin-token
 TELEGRAM_BOT_TOKEN=replace-with-telegram-token
 DISCORD_BOT_TOKEN=replace-with-discord-token
 EOF
@@ -85,23 +89,15 @@ Deploy without `rv-exec`:
   --wait
 ```
 
-Set mux inbound target without `rv-exec` (manual API call):
+Generate pairing token without `rv-exec`:
 
 ```bash
-export MUX_API_KEY=replace-with-shared-mux-api-key
-MUX_BASE="https://<mux-app-id>-18891.<gateway-domain>"
-OPENCLAW_INBOUND="https://<openclaw-app-id>-18789.<gateway-domain>/v1/mux/inbound"
+export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
+export PHALA_MUX_CVM_ID=<mux-cvm-uuid>
+export PHALA_OPENCLAW_CVM_ID=<openclaw-cvm-uuid>
+export CVM_SSH_HOST=<openclaw-app-id>-1022.<gateway-domain>
 
-payload="$(printf '{"inboundUrl":"%s","inboundTimeoutMs":15000}' "$OPENCLAW_INBOUND")"
-curl -fsS -X POST "$MUX_BASE/v1/tenant/inbound-target" \
-  -H "Authorization: Bearer $MUX_API_KEY" \
-  -H "Content-Type: application/json" \
-  --data "$payload"
-echo
-
-curl -fsS -H "Authorization: Bearer $MUX_API_KEY" \
-  "$MUX_BASE/v1/tenant/inbound-target"
-echo
+./phala-deploy/mux-pair-token.sh telegram agent:main:main
 ```
 
 ## Standard update flow
@@ -149,22 +145,7 @@ Or both in sequence:
 ./phala-deploy/cvm-rollout-targets.sh all --wait
 ```
 
-### 4. Set inbound target wiring (required after mux deploy/reset)
-
-```bash
-./phala-deploy/set-inbound-target.sh
-```
-
-The script auto-derives:
-
-- mux base URL: `https://<mux-app-id>-18891.<gateway>`
-- OpenClaw inbound URL: `https://<openclaw-app-id>-18789.<gateway>/v1/mux/inbound`
-
-It then sets `POST /v1/tenant/inbound-target` using `rv-exec MUX_API_KEY`.
-By default it reads CVM IDs from `PHALA_MUX_CVM_IDS` and `PHALA_OPENCLAW_CVM_IDS`.
-If either variable has multiple IDs, pass explicit `--mux-cvm-id` / `--openclaw-cvm-id`.
-
-### 5. Verify runtime
+### 4. Verify runtime
 
 OpenClaw CVM:
 
@@ -190,42 +171,29 @@ Transient behavior note:
   2. Retry `./phala-deploy/cvm-exec 'openclaw --version'` after a short wait.
   3. Only escalate to debugging if repeated retries still fail.
 
-### 6. Pairing smoke check
+### 5. Pairing smoke check
 
 Pairing token generation is target-driven:
 
 - use OpenClaw session target (`sessionKey`) to choose where the conversation lands
 - do not use inbound sender identity to select OpenClaw target
-- Discord currently requires `routeKey` at issuance time to bind the DM user route safely
 
-Issue pairing token:
-
-```bash
-rv-exec MUX_API_KEY -- bash -lc '
-  MUX_BASE="https://<mux-app-id>-18891.<gateway-domain>"
-  curl -sS -X POST "$MUX_BASE/v1/pairings/token" \
-    -H "Authorization: Bearer $MUX_API_KEY" \
-    -H "Content-Type: application/json" \
-    --data "{\"channel\":\"telegram\",\"sessionKey\":\"agent:main:main\",\"ttlSec\":900}"
-  echo
-'
-```
-
-Check active bindings:
+Issue pairing token (admin token):
 
 ```bash
-rv-exec MUX_API_KEY -- bash -lc '
-  MUX_BASE="https://<mux-app-id>-18891.<gateway-domain>"
-  curl -sS -H "Authorization: Bearer $MUX_API_KEY" "$MUX_BASE/v1/pairings"
-  echo
-'
+export PHALA_MUX_CVM_ID=<mux-cvm-uuid>
+export PHALA_OPENCLAW_CVM_ID=<openclaw-cvm-uuid>
+export CVM_SSH_HOST=<openclaw-app-id>-1022.<gateway-domain>
+
+rv-exec MUX_ADMIN_TOKEN -- \
+  bash -lc './phala-deploy/mux-pair-token.sh telegram agent:main:main'
 ```
 
 ## Fast fixes for known failures
 
-### mux crash loop on startup: missing bot token
+### Telegram/Discord inbound not working
 
-Cause: `MUX_TELEGRAM_INBOUND_ENABLED=true` or `MUX_DISCORD_INBOUND_ENABLED=true` with missing token.
+Cause: missing `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` in mux deploy env.
 
 Fix:
 
@@ -235,13 +203,17 @@ Fix:
 
 ### mux healthy but no messages forwarded to OpenClaw
 
-Cause: tenant inbound target missing in mux DB.
+Cause: either no pairing binding yet, or the OpenClaw instance has not registered a reachable `inboundUrl`.
 
 Fix:
 
-```bash
-./phala-deploy/set-inbound-target.sh
-```
+1. Verify OpenClaw mux config (OpenClaw CVM):
+   - `gateway.http.endpoints.mux.baseUrl`
+   - `gateway.http.endpoints.mux.registerKey`
+   - `gateway.http.endpoints.mux.inboundUrl` (must be public/reachable by mux)
+2. Generate a fresh pairing token and pair again:
+   - `./phala-deploy/mux-pair-token.sh telegram agent:main:main`
+3. Check mux logs for `instance_registered` and `*_inbound_forwarded` / `*_inbound_retry_deferred`.
 
 ### mux startup error: `UNIQUE constraint failed: tenants.api_key_hash`
 
@@ -254,13 +226,11 @@ Fix:
    - `docker volume rm -f mux_data || true`
 2. Re-run mux rollout:
    - `./phala-deploy/cvm-rollout-targets.sh mux --wait`
-3. Re-sync inbound target:
-   - `./phala-deploy/set-inbound-target.sh`
 
 ## Related files
 
 - `phala-deploy/cvm-rollout-targets.sh`
 - `phala-deploy/cvm-rollout.sh`
 - `phala-deploy/cvm-rollout-targets.env.example`
-- `phala-deploy/set-inbound-target.sh`
+- `phala-deploy/mux-pair-token.sh`
 - `phala-deploy/mux-server-compose.yml`

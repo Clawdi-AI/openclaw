@@ -40,8 +40,8 @@ services:
       MUX_LOG_PATH: /data/mux-server.log
       # Shared register key used by OpenClaw instances to obtain runtime JWT auth.
       MUX_REGISTER_KEY: ${MUX_REGISTER_KEY:-local-mux-e2e-register-key}
-      # Optional: enable admin-only endpoints (bootstrap, health).
-      MUX_ADMIN_TOKEN: ${MUX_ADMIN_TOKEN:-}
+      # Local-only admin token for control-plane endpoints (for example pairing token issuance).
+      MUX_ADMIN_TOKEN: ${MUX_ADMIN_TOKEN:-local-mux-e2e-admin-token}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       MUX_WHATSAPP_ACCOUNT_ID: default

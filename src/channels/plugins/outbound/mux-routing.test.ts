@@ -42,6 +42,7 @@ function gatewayMuxConfig(): Pick<OpenClawConfig, "gateway"> {
           mux: {
             baseUrl: "http://mux.local",
             registerKey: REGISTER_KEY,
+            inboundUrl: "http://openclaw.local/v1/mux/inbound",
           },
         },
       },

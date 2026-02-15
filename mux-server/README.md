@@ -5,12 +5,12 @@ This directory contains a standalone TypeScript mux server for staged rollout an
 ## Scope
 
 - Implements `GET /health`
+- Implements `GET /.well-known/jwks.json`
+- Implements `POST /v1/instances/register`
+- Implements `POST /v1/admin/pairings/token`
 - Implements `GET /v1/pairings`
 - Implements `POST /v1/pairings/claim`
 - Implements `POST /v1/pairings/unbind`
-- Implements `GET /v1/tenant/inbound-target`
-- Implements `POST /v1/tenant/inbound-target`
-- Implements `POST /v1/admin/tenants/bootstrap` (optional admin plane)
 - Implements `POST /v1/mux/outbound/send`
 - Implements Telegram inbound polling + forwarding to OpenClaw `POST /v1/mux/inbound`
 - Implements Discord inbound polling + forwarding to OpenClaw `POST /v1/mux/inbound`
@@ -41,13 +41,14 @@ This repo now has 3 mux-related pieces:
 1. `src/gateway/mux-http.ts`
 
 - OpenClaw inbound adapter (`POST /v1/mux/inbound`)
-- Validates mux bearer token from OpenClaw config
+- Validates mux-issued inbound JWT using JWKS (`GET /.well-known/jwks.json`)
 - Normalizes inbound payload into OpenClaw message context
 
 2. `src/channels/plugins/outbound/mux.ts`
 
 - OpenClaw outbound client
-- Calls external mux server at `/v1/mux/outbound/send`
+- Calls `POST /v1/instances/register` to mint a runtime JWT
+- Uses that runtime JWT for `/v1/mux/outbound/send`
 
 3. `mux-server/src/server.ts`
 
@@ -57,7 +58,10 @@ This repo now has 3 mux-related pieces:
 
 In short: OpenClaw inbound/outbound adapters are in `src/`; the standalone mux service is here.
 
-For production wiring with control plane + per-tenant OpenClaw instances, see `mux-server/INTEGRATION_PLAN.md`.
+For production wiring, see:
+
+- `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`
+- `phala-deploy/UPDATE_RUNBOOK.md`
 
 ## Run
 
@@ -71,7 +75,7 @@ Direct:
 
 ```bash
 TELEGRAM_BOT_TOKEN="<bot-token>" \
-MUX_API_KEY="outbound-secret" \
+MUX_REGISTER_KEY="<shared-register-key>" \
 node --import tsx mux-server/src/server.ts
 ```
 
@@ -79,16 +83,18 @@ node --import tsx mux-server/src/server.ts
 
 - `TELEGRAM_BOT_TOKEN` (required): Telegram bot token.
 - `DISCORD_BOT_TOKEN` (required for Discord transport): Discord bot token.
-- `MUX_API_KEY` (default `outbound-secret`): single-tenant fallback key used when `MUX_TENANTS_JSON` is unset.
-- `MUX_TENANTS_JSON` (optional): JSON array for multi-tenant auth seed.
-- `MUX_ADMIN_TOKEN` (optional): enables admin bootstrap endpoint (`POST /v1/admin/tenants/bootstrap`).
+- `MUX_REGISTER_KEY` (optional): enables instance-centric runtime auth via `POST /v1/instances/register`.
+- `MUX_JWT_PRIVATE_KEY` (optional): Ed25519 private key PEM for stable JWT signing across restarts.
+- `MUX_API_KEY` (optional, legacy): seeds a single API-key tenant (`tenant-default`).
+- `MUX_TENANTS_JSON` (optional, legacy): JSON array for multi-tenant API-key auth seed.
+- `MUX_ADMIN_TOKEN` (optional): enables admin-only endpoints (for example `POST /v1/admin/pairings/token`, `GET /v1/admin/whatsapp/health`).
 - `MUX_HOST` (default `127.0.0.1`)
 - `MUX_PORT` (default `18891`)
 - `MUX_LOG_PATH` (default `./mux-server/logs/mux-server.log`)
 - `MUX_DB_PATH` (default `./mux-server/data/mux-server.sqlite`)
 - `MUX_IDEMPOTENCY_TTL_MS` (default `600000`)
 - `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
-- `MUX_OPENCLAW_INBOUND_URL` (optional, default tenant only): OpenClaw mux inbound URL.
+- `MUX_OPENCLAW_INBOUND_URL` (optional, legacy default tenant only): OpenClaw mux inbound URL.
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
 - `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events (recommended: `mux`).
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
@@ -133,8 +139,10 @@ node --import tsx mux-server/src/server.ts
 
 Notes:
 
-- Shared-key mode is the only supported model.
-- mux always uses tenant `apiKey` as inbound auth token when forwarding to OpenClaw.
+- Instance-centric runtime auth is the recommended model:
+  - OpenClaw registers itself via `POST /v1/instances/register` (shared `MUX_REGISTER_KEY`).
+  - OpenClaw uses the returned runtime JWT for mux APIs (`/v1/pairings/*`, `/v1/mux/outbound/send`).
+  - mux uses a separate short-lived inbound JWT for mux -> OpenClaw delivery; OpenClaw validates via JWKS.
 - Inbound listeners are auto-enabled by capability:
 - Telegram when `TELEGRAM_BOT_TOKEN` is set.
 - Discord when `DISCORD_BOT_TOKEN` is set.
@@ -159,7 +167,8 @@ Example:
         "mux": {
           "enabled": true,
           "baseUrl": "https://mux.example.com",
-          "token": "tenant-api-key"
+          "registerKey": "mux-register-shared-key",
+          "inboundUrl": "https://openclaw-host.example.com/v1/mux/inbound"
         }
       }
     }
@@ -317,16 +326,19 @@ Notes:
 
 - `sessionKey` is optional. If omitted, a binding is still created and mux will derive canonical session keys from inbound context.
 
-### `POST /v1/pairings/token`
+### `POST /v1/admin/pairings/token`
 
 Headers:
 
-- `Authorization: Bearer <tenant_api_key>`
+- `Authorization: Bearer <mux_admin_token>`
 
 Body (recommended):
 
 ```json
 {
+  "openclawId": "<openclawId>",
+  "inboundUrl": "https://<openclaw>/v1/mux/inbound",
+  "inboundTimeoutMs": 15000,
   "channel": "telegram",
   "ttlSec": 900
 }
@@ -336,51 +348,18 @@ Body (advanced: override derived sessionKey):
 
 ```json
 {
+  "openclawId": "<openclawId>",
   "channel": "telegram",
   "sessionKey": "agent:main:telegram:group:-100123",
   "ttlSec": 900
 }
 ```
 
-Discord body variant (recommended):
+Notes:
 
-```json
-{
-  "channel": "discord",
-  "ttlSec": 900
-}
-```
-
-Discord body variant (advanced: override derived sessionKey):
-
-```json
-{
-  "channel": "discord",
-  "sessionKey": "agent:main:discord:direct:4242",
-  "ttlSec": 900
-}
-```
-
-Discord token pairing is route-less: mux binds the first incoming Discord route that claims the token (requires Discord Gateway inbound enabled).
-
-WhatsApp body variant (recommended):
-
-```json
-{
-  "channel": "whatsapp",
-  "ttlSec": 900
-}
-```
-
-WhatsApp body variant (advanced: override derived sessionKey):
-
-```json
-{
-  "channel": "whatsapp",
-  "sessionKey": "agent:main:whatsapp:direct:+15550001111",
-  "ttlSec": 900
-}
-```
+- This is the recommended control-plane API for issuing one-time pairing tokens.
+- Requires `MUX_ADMIN_TOKEN` configured on mux-server.
+- If `inboundUrl` is provided, mux will upsert the OpenClaw inbound target for `openclawId` (useful after DB resets).
 
 Response `200`:
 
@@ -452,7 +431,7 @@ Problem:
 
 Proposal:
 
-- Keep `POST /v1/pairings/token` as a simple "mint a token" API.
+- Keep `POST /v1/admin/pairings/token` as a simple "mint a token" control-plane API.
 - Add a first-class `agentId` (or `agentHint`) parameter and treat it as the pairing target.
 - At claim time (incoming message containing token), derive the canonical session key from `(agentId, inbound route context)`:
   - Telegram topic: `agent:<agentId>:telegram:group:<chatId>:topic:<topicId>`
@@ -501,67 +480,46 @@ Response `200`:
 { "ok": true }
 ```
 
-### `GET /v1/tenant/inbound-target`
+### `POST /v1/instances/register`
 
 Headers:
 
-- `Authorization: Bearer <tenant_api_key>`
+- `Authorization: Bearer <mux_register_key>`
+
+Body:
+
+```json
+{
+  "openclawId": "oc_abcd1234...",
+  "inboundUrl": "https://openclaw-host.example.com/v1/mux/inbound",
+  "inboundTimeoutMs": 15000
+}
+```
 
 Response `200`:
 
 ```json
 {
   "ok": true,
-  "configured": true,
-  "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
-  "inboundTimeoutMs": 15000
-}
-```
-
-### `POST /v1/tenant/inbound-target`
-
-Headers:
-
-- `Authorization: Bearer <tenant_api_key>`
-
-Body:
-
-```json
-{
-  "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
-  "inboundTimeoutMs": 15000
+  "openclawId": "oc_abcd1234...",
+  "runtimeToken": "<jwt>",
+  "expiresAtMs": 1770900000000,
+  "tokenType": "Bearer"
 }
 ```
 
 Behavior:
 
-- Updates the tenant's forwarding target in SQLite immediately.
-- Shared-key mode is mandatory for this endpoint.
-- No mux restart required.
+- Upserts the instance by `openclawId` and updates its inbound target (`inboundUrl`).
+- Mints a scoped runtime JWT for mux APIs (`/v1/pairings/*`, `/v1/mux/outbound/send`).
 
-### `POST /v1/admin/tenants/bootstrap`
+### `GET /.well-known/jwks.json`
 
-Headers:
-
-- `Authorization: Bearer <mux_admin_token>`
-
-Body:
-
-```json
-{
-  "tenantId": "tenant-a",
-  "name": "Tenant A",
-  "apiKey": "tenant-a-key",
-  "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
-  "inboundTimeoutMs": 15000
-}
-```
+Auth: none.
 
 Behavior:
 
-- Upserts tenant auth + inbound forwarding target in one call.
-- Shared-key mode is mandatory for this endpoint.
-- Requires `MUX_ADMIN_TOKEN` to be configured.
+- Exposes mux JWT public keys so OpenClaw can verify mux-issued inbound JWTs.
 
 ### `GET /v1/admin/whatsapp/health`
 
@@ -693,7 +651,7 @@ sequenceDiagram
   participant OC as OpenClaw gateway (/v1/mux/inbound)
   participant AR as OpenClaw auto-reply
 
-  UI->>MUX: POST /v1/pairings/token (tenant auth)
+  UI->>MUX: POST /v1/admin/pairings/token (admin auth)
   MUX-->>UI: token + deepLink
   UI->>TG: open deeplink (/start <token>)
   MUX->>TG: getUpdates(offset=last_offset+1)
@@ -706,7 +664,7 @@ sequenceDiagram
   else Bound message
     DB-->>MUX: tenant + binding
     MUX->>DB: upsert session route (tenant, channel, sessionKey)
-    MUX->>OC: POST /v1/mux/inbound (Bearer tenant inbound token)
+    MUX->>OC: POST /v1/mux/inbound (Bearer inbound JWT)
     OC->>AR: dispatchInboundMessage(ctx)
     AR-->>OC: reply payload(s)
     OC->>MUX: outbound via channel mux adapter
@@ -717,9 +675,9 @@ sequenceDiagram
 
 Notes:
 
-- Forwarding target is tenant-specific (`inboundUrl` plus shared tenant key for inbound auth).
+- Forwarding target is per-OpenClaw instance (`openclawId` -> `inboundUrl`, updated on register).
 - Forwarding target is resolved dynamically from SQLite on each inbound forward.
-- Inbound auth is enforced by OpenClaw `gateway.http.endpoints.mux.token`.
+- Inbound auth uses a mux-issued JWT per delivery; OpenClaw validates via JWKS.
 - Telegram and Discord offsets are committed only after acked processing.
 - WhatsApp inbound is persisted in SQLite queue and retried with backoff until acked.
 
@@ -737,10 +695,8 @@ sequenceDiagram
   participant OC as OpenClaw gateway (/v1/mux/inbound)
   participant OUT as WA send (sendMessageWhatsApp)
 
-  UI->>OC: Request pairing link in dashboard chat
-  OC->>MUX: POST /v1/pairings/token
-  MUX-->>OC: token
-  OC-->>UI: pairing deep link
+  UI->>MUX: POST /v1/admin/pairings/token (admin auth)
+  MUX-->>UI: token + deepLink
   UI->>WA: User sends token in target chat
   WA->>WL: inbound event
   WL->>DB: enqueue snapshot (dedupe by account/chat/message id)
@@ -752,7 +708,7 @@ sequenceDiagram
     Q->>OUT: send pairing success notice
     Q->>DB: ack queue row (delete)
   else Bound normal message
-    Q->>OC: POST /v1/mux/inbound (tenant inbound token)
+    Q->>OC: POST /v1/mux/inbound (inbound JWT)
     alt OpenClaw accepted
       Q->>DB: ack queue row (delete)
       OC->>MUX: POST /v1/mux/outbound/send
@@ -799,7 +755,7 @@ Why this exists:
 Constraints for this future work:
 
 - mux remains a thin router (no tenant business logic)
-- auth remains tenant-key scoped
+- auth remains instance-scoped (openclawId + mux-issued runtime JWT)
 - no backward-compatibility layer is required before launch
 
 ## Tests
@@ -820,7 +776,9 @@ pnpm --dir mux-server smoke
 Optional live outbound check:
 
 ```bash
-MUX_API_KEY=outbound-secret \
+MUX_REGISTER_KEY=replace-with-shared-register-key \
+OPENCLAW_ID=replace-with-openclaw-id \
+OPENCLAW_INBOUND_URL=https://openclaw-host.example.com/v1/mux/inbound \
 MUX_SESSION_KEY='agent:main:telegram:group:-1003712260705:topic:2' \
 MUX_EXPECT_STATUS=200 \
 pnpm --dir mux-server smoke
@@ -829,13 +787,13 @@ pnpm --dir mux-server smoke
 Current test coverage (`mux-server/test/server.test.ts`):
 
 - health endpoint responds
+- instance register endpoint requires shared register key and returns runtime jwt metadata
+- jwks endpoint responds
 - outbound endpoint rejects unauthorized requests
 - multi-tenant auth via `MUX_TENANTS_JSON`
-- admin bootstrap tenant registration with shared-key defaults
-- tenant inbound target update defaults token to tenant key when omitted
 - pairing claim/list/unbind flow
 - duplicate pairing claim conflict handling
-- dynamic tenant inbound target update without restart
+- instance register updates inbound target and forwards to latest inbound url
 - outbound route resolution from `(tenant, channel, sessionKey)` mapping
 - Telegram inbound forwarding to tenant inbound endpoint
 - Telegram retry without offset advance on failed forward
