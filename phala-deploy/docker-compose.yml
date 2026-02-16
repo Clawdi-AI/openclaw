@@ -1,6 +1,6 @@
 services:
   openclaw:
-    image: h4x3rotab/openclaw-cvm@sha256:b8cc9cbd1363f03175480e6476ecf99fc9c7c67fbcdc977ce1c9924831ca198b
+    image: h4x3rotab/openclaw-cvm@sha256:864f17e46a7d19709ebc8252f82476e65b4d04c1be2edf021993118e6bc03cbb
     # For local builds, uncomment below and comment out image:
     # build:
     #   context: ..
@@ -31,6 +31,8 @@ services:
       # Override derived crypt passwords (optional — only if not using MASTER_KEY)
       RCLONE_CRYPT_PASSWORD: ${RCLONE_CRYPT_PASSWORD:-}
       RCLONE_CRYPT_PASSWORD2: ${RCLONE_CRYPT_PASSWORD2:-}
+      # Bootstrap config (base64-encoded openclaw.json, used on first boot only)
+      OPENCLAW_CONFIG_B64: ${OPENCLAW_CONFIG_B64:-}
       # Debug logging (set to 1 to enable)
       OPENCLAW_RAW_STREAM: ${OPENCLAW_RAW_STREAM:-}
       OPENCLAW_ANTHROPIC_PAYLOAD_LOG: ${OPENCLAW_ANTHROPIC_PAYLOAD_LOG:-}
