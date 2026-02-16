@@ -139,14 +139,21 @@ function resolveDefaultOpenClawId(): string {
   return cachedDefaultOpenClawId;
 }
 
+/** Replace Dstack placeholders with runtime env values (allowlist only). */
+function expandDstackVars(value: string): string {
+  return value
+    .replace(/\$\{DSTACK_APP_ID\}/g, process.env.DSTACK_APP_ID?.trim() ?? "")
+    .replace(/\$\{DSTACK_GATEWAY_DOMAIN\}/g, process.env.DSTACK_GATEWAY_DOMAIN?.trim() ?? "");
+}
+
 function resolveGatewayInboundUrl(cfg: OpenClawConfig): string {
-  const configured = readString(cfg.gateway?.http?.endpoints?.mux?.inboundUrl);
-  if (configured) {
-    return configured;
+  const raw = readString(cfg.gateway?.http?.endpoints?.mux?.inboundUrl);
+  if (!raw) {
+    throw new Error(
+      "gateway.http.endpoints.mux.inboundUrl is required (must be reachable by mux-server)",
+    );
   }
-  throw new Error(
-    "gateway.http.endpoints.mux.inboundUrl is required (must be reachable by mux-server)",
-  );
+  return expandDstackVars(raw);
 }
 
 export function resolveMuxOpenClawId(cfg: OpenClawConfig): string {
