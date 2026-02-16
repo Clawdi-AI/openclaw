@@ -145,29 +145,149 @@ Docker daemon ready.
 
 After that, your agent is live on Telegram and you can chat with it there.
 
-## Mux + OpenClaw Rollout Checklist
+## Connect to a mux-server
 
-Use this when rolling out shared mux bots plus tenant OpenClaw instances.
+If you have an existing mux-server CVM and want to connect a new OpenClaw instance to it, add the mux config to your deploy env via `OPENCLAW_CONFIG_B64`. The entrypoint decodes this on first boot and writes `openclaw.json`.
 
-1. Deploy mux-server as its own CVM with persistent storage for:
-   - mux SQLite/log path (`/data`)
-   - WhatsApp auth snapshot path (`/wa-auth/default`)
-2. Inject mux runtime secrets from `rv`:
-   - `MUX_REGISTER_KEY` (must match tenant OpenClaw `gateway.http.endpoints.mux.registerKey`)
-   - `MUX_ADMIN_TOKEN` (required for control-plane pairing token issuance)
-   - optional: `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `MUX_JWT_PRIVATE_KEY`
-3. For each tenant OpenClaw instance:
-   - set `gateway.http.endpoints.mux.baseUrl`
-   - set `gateway.http.endpoints.mux.registerKey`
-   - set `gateway.http.endpoints.mux.inboundUrl` (public URL reachable by mux)
-   - enable channel account `mux` for `telegram`, `discord`, `whatsapp`
-4. OpenClaw auto-registers itself with mux on boot (register key -> runtime JWT).
-5. Validate with live checks:
-   - pair chat using token (`/v1/admin/pairings/token`)
-   - send `/help` via mux channel
-   - verify OpenClaw version and health via `./phala-deploy/cvm-exec`
+### 1. Collect mux-server info
 
-Runtime JWT contract details live in `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`.
+You need three values from the mux-server deployment:
+
+| Value            | Where to find it                                                                                                                          |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mux base URL** | `https://<mux_app_id>-18891.<gateway>.phala.network`                                                                                      |
+| **Register key** | The `MUX_REGISTER_KEY` used when deploying the mux-server CVM                                                                             |
+| **Inbound URL**  | `https://<openclaw_app_id>-18789.<gateway>.phala.network/v1/mux/inbound` (your own OpenClaw CVM's public endpoint — fill in after step 3) |
+
+### 2. Required config changes
+
+The mux connection requires two things in `openclaw.json`:
+
+**a) Mux endpoint** — tells OpenClaw where the mux-server is and how to authenticate:
+
+```jsonc
+// gateway.http.endpoints.mux
+{
+  "enabled": true,
+  "baseUrl": "https://<mux_app_id>-18891.<gateway>.phala.network",
+  "registerKey": "<MUX_REGISTER_KEY>",
+  "inboundUrl": "https://<openclaw_app_id>-18789.<gateway>.phala.network/v1/mux/inbound",
+}
+```
+
+**b) Channel accounts** — enable the `mux` account for each channel you want routed through the mux-server:
+
+```jsonc
+// channels.<channel>.accounts.mux (repeat for telegram, discord, whatsapp)
+{
+  "enabled": true,
+  "mux": { "enabled": true, "timeoutMs": 30000 },
+}
+```
+
+Also enable each channel plugin: `plugins.entries.<channel>.enabled = true`.
+
+### 3. Generate `OPENCLAW_CONFIG_B64`
+
+For a fresh CVM, create the JSON and base64-encode it. Replace the three placeholders with your actual values:
+
+```sh
+OPENCLAW_CONFIG_B64=$(base64 -w0 <<'EOF'
+{
+  "gateway": {
+    "http": {
+      "endpoints": {
+        "mux": {
+          "enabled": true,
+          "baseUrl": "https://<mux_app_id>-18891.<gateway>.phala.network",
+          "registerKey": "<MUX_REGISTER_KEY>",
+          "inboundUrl": "https://<openclaw_app_id>-18789.<gateway>.phala.network/v1/mux/inbound"
+        }
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "accounts": { "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } } }
+    },
+    "discord": {
+      "accounts": { "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } } }
+    },
+    "whatsapp": {
+      "accounts": { "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } } }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "telegram": { "enabled": true },
+      "discord": { "enabled": true },
+      "whatsapp": { "enabled": true }
+    }
+  }
+}
+EOF
+)
+```
+
+### 4. Add to deploy env and deploy
+
+Append `OPENCLAW_CONFIG_B64` to your deploy env file, then deploy:
+
+```sh
+echo "OPENCLAW_CONFIG_B64=${OPENCLAW_CONFIG_B64}" >> /tmp/deploy.env
+
+phala deploy \
+  -n my-openclaw \
+  -c docker-compose.yml \
+  -e /tmp/deploy.env \
+  -t tdx.medium \
+  --dev-os
+```
+
+On first boot, the entrypoint writes `openclaw.json` from `OPENCLAW_CONFIG_B64`. On subsequent boots (with S3), the config is restored from storage and `OPENCLAW_CONFIG_B64` is ignored.
+
+### Modifying config on an existing CVM
+
+`OPENCLAW_CONFIG_B64` is only used on first boot (when no `openclaw.json` exists yet). To add or update mux config on a running CVM, SSH in and edit the JSON directly:
+
+```sh
+export CVM_SSH_HOST=<app_id>-1022.<gateway>.phala.network
+
+# Open an interactive shell
+./phala-deploy/cvm-ssh
+
+# Edit the config inside the CVM
+vi /root/.openclaw/openclaw.json
+
+# Restart the gateway to pick up changes (the supervisor loop restarts it automatically)
+pkill -f "openclaw gateway"
+```
+
+You need to add/update the same fields described in [step 2](#2-required-config-changes):
+
+1. Add or update `gateway.http.endpoints.mux` with `enabled`, `baseUrl`, `registerKey`, `inboundUrl`
+2. For each channel, add `accounts.mux` with `enabled: true` and `mux: { enabled: true, timeoutMs: 30000 }`
+3. Enable the channel plugin: `plugins.entries.<channel>.enabled = true`
+
+### 5. Pair channels
+
+Once the CVM is running, generate a pairing token to link a chat to your instance:
+
+```sh
+./phala-deploy/mux-pair-token.sh telegram
+```
+
+This calls `POST /v1/admin/pairings/token` on the mux-server. Send the returned token as a message in the Telegram bot to complete pairing.
+
+### How it works
+
+1. OpenClaw boots and reads `openclaw.json` with the mux config.
+2. It derives a stable device identity from `MASTER_KEY` (via HKDF).
+3. It calls `POST /v1/instances/register` on the mux-server with the `registerKey`.
+4. Mux-server issues a runtime JWT (24h TTL). OpenClaw caches and auto-refreshes it.
+5. Inbound messages (mux -> OpenClaw) are delivered to `inboundUrl`, authenticated via JWKS.
+
+Runtime JWT contract details: `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`.
 
 ## How S3 storage works
 
@@ -280,28 +400,28 @@ The entrypoint keeps SSH available even if the gateway crashes and restarts it w
 
 ## Updating
 
-Use the dedicated runbook:
+Two commands: build, then deploy.
 
-- `phala-deploy/UPDATE_RUNBOOK.md`
+```sh
+# Build and push both images (openclaw + mux-server)
+./phala-deploy/build.sh
 
-Minimal sequence:
+# Deploy to both CVMs, wait for health, run smoke tests
+./phala-deploy/deploy.sh
+```
 
-1. Build/pin images:
-   - `./phala-deploy/build-pin-image.sh`
-   - `./phala-deploy/build-pin-mux-image.sh` (if mux changed)
-2. Load rollout targets and deploy:
-   - `set -a; source phala-deploy/.env.rollout-targets; set +a`
-   - `./phala-deploy/cvm-rollout-targets.sh all --wait`
-3. Generate pairing token and run a quick smoke check:
-   - `./phala-deploy/mux-pair-token.sh telegram agent:main:main`
+`build.sh` accepts `--openclaw-only` or `--mux-only` to build one image. `deploy.sh` accepts `--dry-run`, `--test-only` (smoke tests without deploying), and `--skip-test`.
 
-The new image pulls in the background. The old container keeps running until the new one is ready.
+Both scripts read CVM IDs from `phala-deploy/.env.rollout-targets` (see `cvm-rollout-targets.env.example`).
 
-**Verification notes:**
+**Verification:** `deploy.sh` runs 5 smoke tests automatically (mux health, openclaw version, gateway reachability, mux config, mux registration). For manual checks:
 
-- `phala deploy` is the reliable rollout path. `phala cvms logs` can lag, so confirm with a live version check via `cvm-exec` (for example: `./phala-deploy/cvm-exec 'openclaw --version'`).
-- `rv-exec` with `CVM_SSH_HOST` is sufficient to verify the live container without exposing secrets.
-- Full runbook: `phala-deploy/UPDATE_RUNBOOK.md`.
+```sh
+./phala-deploy/cvm-exec 'openclaw --version'
+./phala-deploy/cvm-exec 'openclaw channels status --probe'
+```
+
+Full runbook with fallback procedures: `phala-deploy/UPDATE_RUNBOOK.md`.
 
 ## Disaster recovery
 
@@ -315,23 +435,24 @@ If your CVM is destroyed (S3 mode only):
 
 ## File reference
 
-| File                     | Purpose                                                               |
-| ------------------------ | --------------------------------------------------------------------- |
-| `Dockerfile`             | CVM image (Ubuntu 24.04 + Node 22 + rclone + Docker-in-Docker)        |
-| `entrypoint.sh`          | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway         |
-| `docker-compose.yml`     | Compose file for `phala deploy`                                       |
-| `mux-server-compose.yml` | Compose file for mux-server CVM deployment                            |
-| `build-pin-image.sh`     | Rebuild tarball + image, push, and pin compose image digest           |
-| `build-pin-mux-image.sh` | Rebuild mux image, push, and pin mux compose digest                   |
-| `cvm-rollout.sh`         | Standardized multi-CVM deploy flow with `rv-exec` env materialization |
-| `cvm-rollout-targets.sh` | Role-aware deploy wrapper with CVM role safety checks                 |
-| `mux-pair-token.sh`      | Mint mux pairing token for a tenant OpenClaw instance (admin API)     |
-| `UPDATE_RUNBOOK.md`      | Dedicated repeatable update runbook                                   |
-| `secrets/.env`           | Legacy local env-file workflow (prefer `rv-exec --dotenv`)            |
-| `cvm-ssh`                | Interactive SSH into the container                                    |
-| `cvm-exec`               | Run a command in the container                                        |
-| `cvm-scp`                | Copy files to/from the container                                      |
-| `S3_STORAGE.md`          | Detailed S3 encryption documentation                                  |
+| File                     | Purpose                                                           |
+| ------------------------ | ----------------------------------------------------------------- |
+| `Dockerfile`             | CVM image (Ubuntu 24.04 + Node 22 + rclone + Docker-in-Docker)    |
+| `entrypoint.sh`          | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway     |
+| `docker-compose.yml`     | Compose file for `phala deploy`                                   |
+| `mux-server-compose.yml` | Compose file for mux-server CVM deployment                        |
+| `build.sh`               | Build and push both images (wraps the two scripts below)          |
+| `build-pin-image.sh`     | Rebuild tarball + image, push, and pin compose image digest       |
+| `build-pin-mux-image.sh` | Rebuild mux image, push, and pin mux compose digest               |
+| `deploy.sh`              | Deploy both CVMs, wait for health, run smoke tests                |
+| `cvm-rollout.sh`         | Low-level deploy flow with `rv-exec` env materialization          |
+| `cvm-rollout-targets.sh` | Role-aware deploy wrapper with CVM role safety checks             |
+| `mux-pair-token.sh`      | Mint mux pairing token for a tenant OpenClaw instance (admin API) |
+| `UPDATE_RUNBOOK.md`      | Detailed update runbook with fallback procedures                  |
+| `cvm-ssh`                | Interactive SSH into the container                                |
+| `cvm-exec`               | Run a command in the container                                    |
+| `cvm-scp`                | Copy files to/from the container                                  |
+| `S3_STORAGE.md`          | Detailed S3 encryption documentation                              |
 
 ## CVM environment notes
 
