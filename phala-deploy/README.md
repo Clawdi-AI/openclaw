@@ -58,6 +58,8 @@ chmod 600 /tmp/deploy.env
 
 Local-only mode only needs `MASTER_KEY` and `REDPILL_API_KEY` — omit the S3 variables.
 
+If connecting to a mux-server, also add `OPENCLAW_CONFIG_B64` — see [Connect to a mux-server](#connect-to-a-mux-server).
+
 Get a Redpill API key at [redpill.ai](https://redpill.ai). This gives access to GPU TEE models (DeepSeek, Qwen, Llama, etc.) with end-to-end encrypted inference.
 
 > **Tip:** If you use [Redpill Vault](https://github.com/aspect-build/redpill-vault), you can generate the env file from vault secrets instead of writing them by hand:
