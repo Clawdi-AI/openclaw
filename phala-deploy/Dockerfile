@@ -77,8 +77,8 @@ RUN chmod +x /entrypoint.sh
 
 ENV NODE_ENV=production
 
-HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=3 \
-  CMD openclaw channels status --probe >/dev/null 2>&1 || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -sf http://localhost:18789/ >/dev/null || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
 

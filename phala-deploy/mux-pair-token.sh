@@ -65,9 +65,11 @@ log "Resolving endpoints..."
 MUX_BASE_URL="$(resolve_base_from_cvm "$MUX_CVM_ID" "18891")"
 OPENCLAW_INBOUND_URL="$(resolve_base_from_cvm "$OPENCLAW_CVM_ID" "18789")/v1/mux/inbound"
 
-GATEWAY_DOMAIN="$(phala cvms get "$OPENCLAW_CVM_ID" --json 2>/dev/null | jq -r '.gateway.base_domain // empty')"
-[[ -n "$GATEWAY_DOMAIN" ]] || die "failed to resolve gateway domain"
-CVM_SSH_HOST="${OPENCLAW_CVM_ID}-1022.${GATEWAY_DOMAIN}"
+OPENCLAW_JSON="$(phala cvms get "$OPENCLAW_CVM_ID" --json 2>/dev/null)"
+OPENCLAW_APP_ID="$(printf '%s' "$OPENCLAW_JSON" | jq -r '.app_id // empty')"
+GATEWAY_DOMAIN="$(printf '%s' "$OPENCLAW_JSON" | jq -r '.gateway.base_domain // empty')"
+[[ -n "$OPENCLAW_APP_ID" && -n "$GATEWAY_DOMAIN" ]] || die "failed to resolve gateway domain"
+CVM_SSH_HOST="${OPENCLAW_APP_ID}-1022.${GATEWAY_DOMAIN}"
 
 # ── resolve device ID ───────────────────────────────────────────────────────
 
