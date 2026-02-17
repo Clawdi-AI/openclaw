@@ -151,13 +151,14 @@ If you have an existing mux-server CVM and want to connect a new OpenClaw instan
 
 ### 1. Collect mux-server info
 
-You need three values from the mux-server deployment:
+You need two values from the mux-server deployment:
 
-| Value            | Where to find it                                                                                                                          |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **Mux base URL** | `https://<mux_app_id>-18891.<gateway>.phala.network`                                                                                      |
-| **Register key** | The `MUX_REGISTER_KEY` used when deploying the mux-server CVM                                                                             |
-| **Inbound URL**  | `https://<openclaw_app_id>-18789.<gateway>.phala.network/v1/mux/inbound` (your own OpenClaw CVM's public endpoint — fill in after step 3) |
+| Value            | Where to find it                                              |
+| ---------------- | ------------------------------------------------------------- |
+| **Mux base URL** | `https://<mux_app_id>-18891.<gateway>.phala.network`          |
+| **Register key** | The `MUX_REGISTER_KEY` used when deploying the mux-server CVM |
+
+The **inbound URL** (where mux-server delivers messages back to your OpenClaw) is derived automatically at runtime from `DSTACK_APP_ID` and `DSTACK_GATEWAY_DOMAIN` environment variables injected by the Phala platform. You don't need to know your app ID upfront.
 
 ### 2. Required config changes
 
@@ -171,9 +172,11 @@ The mux connection requires two things in `openclaw.json`:
   "enabled": true,
   "baseUrl": "https://<mux_app_id>-18891.<gateway>.phala.network",
   "registerKey": "<MUX_REGISTER_KEY>",
-  "inboundUrl": "https://<openclaw_app_id>-18789.<gateway>.phala.network/v1/mux/inbound",
+  "inboundUrl": "https://${DSTACK_APP_ID}-18789.${DSTACK_GATEWAY_DOMAIN}/v1/mux/inbound",
 }
 ```
+
+The `${DSTACK_APP_ID}` and `${DSTACK_GATEWAY_DOMAIN}` placeholders in `inboundUrl` are resolved by the config loader's env-substitution at boot time. These variables are forwarded into the container via `docker-compose.yml`.
 
 **b) Channel accounts** — enable the `mux` account for each channel you want routed through the mux-server:
 
@@ -189,45 +192,28 @@ Also enable each channel plugin: `plugins.entries.<channel>.enabled = true`.
 
 ### 3. Generate `OPENCLAW_CONFIG_B64`
 
-For a fresh CVM, create the JSON and base64-encode it. Replace the three placeholders with your actual values:
+Use `gen-cvm-config.sh` to generate a complete config. It derives the gateway auth token from `MASTER_KEY`, sets up mux registration, channels, and agent defaults:
 
 ```sh
-OPENCLAW_CONFIG_B64=$(base64 -w0 <<'EOF'
-{
-  "gateway": {
-    "http": {
-      "endpoints": {
-        "mux": {
-          "enabled": true,
-          "baseUrl": "https://<mux_app_id>-18891.<gateway>.phala.network",
-          "registerKey": "<MUX_REGISTER_KEY>",
-          "inboundUrl": "https://<openclaw_app_id>-18789.<gateway>.phala.network/v1/mux/inbound"
-        }
-      }
-    }
-  },
-  "channels": {
-    "telegram": {
-      "accounts": { "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } } }
-    },
-    "discord": {
-      "accounts": { "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } } }
-    },
-    "whatsapp": {
-      "accounts": { "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } } }
-    }
-  },
-  "plugins": {
-    "entries": {
-      "telegram": { "enabled": true },
-      "discord": { "enabled": true },
-      "whatsapp": { "enabled": true }
-    }
-  }
-}
-EOF
-)
+# With rv-exec (secrets from vault):
+OPENCLAW_CONFIG_B64=$(rv-exec --project openclaw \
+  MASTER_KEY MUX_REGISTER_KEY \
+  -- bash -c 'MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
+    ./phala-deploy/gen-cvm-config.sh')
+
+# Without rv-exec (secrets inline):
+OPENCLAW_CONFIG_B64=$(MASTER_KEY="<your-master-key>" \
+  MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
+  MUX_REGISTER_KEY="<your-register-key>" \
+  ./phala-deploy/gen-cvm-config.sh)
 ```
+
+Optional env vars for `gen-cvm-config.sh`:
+
+| Variable         | Default     | Description          |
+| ---------------- | ----------- | -------------------- |
+| `MODEL_BASE_URL` | _(omitted)_ | AI provider base URL |
+| `MODEL_API_KEY`  | _(omitted)_ | AI provider API key  |
 
 ### 4. Add to deploy env and deploy
 
@@ -266,6 +252,7 @@ pkill -f "openclaw gateway"
 You need to add/update the same fields described in [step 2](#2-required-config-changes):
 
 1. Add or update `gateway.http.endpoints.mux` with `enabled`, `baseUrl`, `registerKey`, `inboundUrl`
+   - For `inboundUrl`, use `https://${DSTACK_APP_ID}-18789.${DSTACK_GATEWAY_DOMAIN}/v1/mux/inbound` — the placeholders are resolved at boot time
 2. For each channel, add `accounts.mux` with `enabled: true` and `mux: { enabled: true, timeoutMs: 30000 }`
 3. Enable the channel plugin: `plugins.entries.<channel>.enabled = true`
 
@@ -437,7 +424,7 @@ If your CVM is destroyed (S3 mode only):
 
 | File                     | Purpose                                                           |
 | ------------------------ | ----------------------------------------------------------------- |
-| `Dockerfile`             | CVM image (Ubuntu 24.04 + Node 22 + rclone + Docker-in-Docker)    |
+| `Dockerfile`             | CVM image (Ubuntu 24.04 + Node 24 + rclone + Docker-in-Docker)    |
 | `entrypoint.sh`          | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway     |
 | `docker-compose.yml`     | Compose file for `phala deploy`                                   |
 | `mux-server-compose.yml` | Compose file for mux-server CVM deployment                        |
@@ -445,6 +432,7 @@ If your CVM is destroyed (S3 mode only):
 | `build-pin-image.sh`     | Rebuild tarball + image, push, and pin compose image digest       |
 | `build-pin-mux-image.sh` | Rebuild mux image, push, and pin mux compose digest               |
 | `deploy.sh`              | Deploy both CVMs, wait for health, run smoke tests                |
+| `gen-cvm-config.sh`      | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)   |
 | `cvm-rollout.sh`         | Low-level deploy flow with `rv-exec` env materialization          |
 | `cvm-rollout-targets.sh` | Role-aware deploy wrapper with CVM role safety checks             |
 | `mux-pair-token.sh`      | Mint mux pairing token for a tenant OpenClaw instance (admin API) |
@@ -456,7 +444,7 @@ If your CVM is destroyed (S3 mode only):
 
 ## CVM environment notes
 
-- The Ubuntu base image is minimal: install `unzip` (for bun), `tmux`, and use nodesource repo for Node 22 (default apt gives Node 12).
+- The Ubuntu base image is minimal: install `unzip` (for bun), `tmux`, and use nodesource repo for Node 24 (default apt gives Node 12).
 - Entrypoint starts SSH before dockerd — SSH is always available for debugging, even if dockerd fails.
 - Backgrounding over non-interactive SSH is unreliable; use tmux inside the CVM.
 - Docker uses static binaries from `download.docker.com/linux/static/stable/` (not `apt docker-ce`). Do **not** bind-mount Docker binaries from the CVM host (ELF interpreter mismatch: host `/lib/ld-linux-x86-64.so.2` vs container `/lib64/`).
