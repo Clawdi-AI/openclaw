@@ -2,16 +2,6 @@
 
 Run an OpenClaw gateway inside a Phala Confidential VM (CVM) with optional encrypted S3-backed storage.
 
-## Local Mux E2E (Control-Plane Dry Run)
-
-For local end-to-end testing of `mux-server + openclaw` with real channel credentials but isolated test state, use:
-
-- `phala-deploy/local-mux-e2e/README.md`
-
-Important guardrail:
-
-- Never reuse production WhatsApp auth/session files in the local mux e2e stack.
-
 ## Storage modes
 
 | Mode                 | State location                            | Persistence              | Best for              |
@@ -48,26 +38,37 @@ The master key derives all encryption passwords and the gateway auth token. Keep
 head -c 32 /dev/urandom | base64
 ```
 
-### 3. Prepare deploy env vars (recommended: Redpill Vault)
+### 3. Prepare deploy env file
 
-Generate a temporary deploy env file with `rv-exec`:
+Create a deploy env file with your secrets:
 
 ```sh
-cd phala-deploy
-rv-exec --dotenv /tmp/deploy.env \
-  MASTER_KEY REDPILL_API_KEY \
-  S3_BUCKET S3_ENDPOINT S3_PROVIDER S3_REGION \
-  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
-  -- bash -lc 'test -s /tmp/deploy.env && echo "deploy env ready: /tmp/deploy.env"'
+cat > /tmp/deploy.env <<'EOF'
+MASTER_KEY=<your-master-key>
+REDPILL_API_KEY=<your-redpill-api-key>
+S3_BUCKET=<your-bucket-name>
+S3_ENDPOINT=<your-s3-endpoint>
+S3_PROVIDER=Other
+S3_REGION=us-east-1
+AWS_ACCESS_KEY_ID=<your-access-key>
+AWS_SECRET_ACCESS_KEY=<your-secret-key>
+EOF
+chmod 600 /tmp/deploy.env
 ```
 
-Notes:
-
-- S3 mode needs all S3 variables above.
-- Local-only mode only needs `MASTER_KEY` and `REDPILL_API_KEY`.
-- Prefer this flow over plaintext `.env` files for production deploys.
+Local-only mode only needs `MASTER_KEY` and `REDPILL_API_KEY` — omit the S3 variables.
 
 Get a Redpill API key at [redpill.ai](https://redpill.ai). This gives access to GPU TEE models (DeepSeek, Qwen, Llama, etc.) with end-to-end encrypted inference.
+
+> **Tip:** If you use [Redpill Vault](https://github.com/aspect-build/redpill-vault), you can generate the env file from vault secrets instead of writing them by hand:
+>
+> ```sh
+> rv-exec --dotenv /tmp/deploy.env \
+>   MASTER_KEY REDPILL_API_KEY \
+>   S3_BUCKET S3_ENDPOINT S3_PROVIDER S3_REGION \
+>   AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
+>   -- bash -lc 'test -s /tmp/deploy.env && echo "deploy env ready"'
+> ```
 
 ### 4. Docker image
 
@@ -89,11 +90,9 @@ docker push your-dockerhub-user/openclaw-cvm:latest
 ### 5. Deploy to Phala Cloud
 
 ```sh
-cd phala-deploy
-
 phala deploy \
   -n my-openclaw \
-  -c docker-compose.yml \
+  -c phala-deploy/docker-compose.yml \
   -e /tmp/deploy.env \
   -t tdx.medium \
   --dev-os \
@@ -195,13 +194,6 @@ Also enable each channel plugin: `plugins.entries.<channel>.enabled = true`.
 Use `gen-cvm-config.sh` to generate a complete config. It derives the gateway auth token from `MASTER_KEY`, sets up mux registration, channels, and agent defaults:
 
 ```sh
-# With rv-exec (secrets from vault):
-OPENCLAW_CONFIG_B64=$(rv-exec --project openclaw \
-  MASTER_KEY MUX_REGISTER_KEY \
-  -- bash -c 'MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
-    ./phala-deploy/gen-cvm-config.sh')
-
-# Without rv-exec (secrets inline):
 OPENCLAW_CONFIG_B64=$(MASTER_KEY="<your-master-key>" \
   MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
   MUX_REGISTER_KEY="<your-register-key>" \
@@ -214,6 +206,15 @@ Optional env vars for `gen-cvm-config.sh`:
 | ---------------- | ----------- | -------------------- |
 | `MODEL_BASE_URL` | _(omitted)_ | AI provider base URL |
 | `MODEL_API_KEY`  | _(omitted)_ | AI provider API key  |
+
+> **Tip:** With Redpill Vault, pull secrets from the vault instead of passing them inline:
+>
+> ```sh
+> OPENCLAW_CONFIG_B64=$(rv-exec --project openclaw \
+>   MASTER_KEY MUX_REGISTER_KEY \
+>   -- bash -c 'MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
+>     ./phala-deploy/gen-cvm-config.sh')
+> ```
 
 ### 4. Add to deploy env and deploy
 
@@ -450,6 +451,12 @@ If your CVM is destroyed (S3 mode only):
 - Docker uses static binaries from `download.docker.com/linux/static/stable/` (not `apt docker-ce`). Do **not** bind-mount Docker binaries from the CVM host (ELF interpreter mismatch: host `/lib/ld-linux-x86-64.so.2` vs container `/lib64/`).
 - Dockerfile: `build-essential` is installed, used for `npm install`, then purged in the same `RUN` layer. Never split install and purge across layers.
 - Auto-update is disabled in bootstrap config (`update.checkOnStart=false`); updates happen via Docker image rebuilds.
+
+## Local Mux E2E
+
+For local end-to-end testing of `mux-server + openclaw` with real channel credentials but isolated test state, see `phala-deploy/local-mux-e2e/README.md`.
+
+Important guardrail: never reuse production WhatsApp auth/session files in the local mux e2e stack.
 
 ## Troubleshooting
 
