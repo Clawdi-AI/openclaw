@@ -23,7 +23,7 @@ TEST_ONLY=0
 HEALTH_TIMEOUT=120    # seconds to wait for healthy
 HEALTH_INTERVAL=10    # seconds between polls
 
-# ── defaults (overridable via .env.rollout-targets) ──────────────────────────
+# ── defaults ─────────────────────────────────────────────────────────────────
 
 OPENCLAW_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 OPENCLAW_DEPLOY_ENV_FILE="/tmp/openclaw-phala-deploy.env"
@@ -63,19 +63,11 @@ done
 # ── load config ──────────────────────────────────────────────────────────────
 
 ENV_FILE="${SCRIPT_DIR}/.env.rollout-targets"
-[[ -f "$ENV_FILE" ]] || die "config not found: ${ENV_FILE}\nCopy from cvm-rollout-targets.env.example and fill in CVM IDs."
+[[ -f "$ENV_FILE" ]] || die "config not found: ${ENV_FILE}\nCopy cvm-rollout-targets.env.example to .env.rollout-targets and fill in CVM IDs."
 set -a; source "$ENV_FILE"; set +a
 
 OPENCLAW_CVM_ID="${PHALA_OPENCLAW_CVM_IDS:?set PHALA_OPENCLAW_CVM_IDS in .env.rollout-targets}"
 MUX_CVM_ID="${PHALA_MUX_CVM_IDS:?set PHALA_MUX_CVM_IDS in .env.rollout-targets}"
-
-# override defaults from env file if present
-OPENCLAW_COMPOSE_FILE="${PHALA_OPENCLAW_COMPOSE_FILE:-$OPENCLAW_COMPOSE_FILE}"
-OPENCLAW_DEPLOY_ENV_FILE="${PHALA_OPENCLAW_DEPLOY_ENV_FILE:-$OPENCLAW_DEPLOY_ENV_FILE}"
-OPENCLAW_DEPLOY_SECRETS="${PHALA_OPENCLAW_DEPLOY_SECRETS:-$OPENCLAW_DEPLOY_SECRETS}"
-MUX_COMPOSE_FILE="${PHALA_MUX_COMPOSE_FILE:-$MUX_COMPOSE_FILE}"
-MUX_DEPLOY_ENV_FILE="${PHALA_MUX_DEPLOY_ENV_FILE:-$MUX_DEPLOY_ENV_FILE}"
-MUX_DEPLOY_SECRETS="${PHALA_MUX_DEPLOY_SECRETS:-$MUX_DEPLOY_SECRETS}"
 
 require_cmd phala
 require_cmd rv-exec
@@ -132,18 +124,27 @@ preflight_secrets() {
 
 deploy_role() {
   local role="$1" cvm_id="$2" compose_file="$3" env_file="$4" secrets="$5"
-
   log "Deploying ${role} (CVM: ${cvm_id})..."
 
-  local dry_run_flag=()
-  (( DRY_RUN )) && dry_run_flag=(--dry-run)
+  [[ -f "$compose_file" ]] || die "compose file not found: $compose_file"
 
-  "$SCRIPT_DIR/cvm-rollout.sh" rollout \
-    --cvm-ids "$cvm_id" \
-    --compose "$compose_file" \
-    --env-file "$env_file" \
-    --secrets "$secrets" \
-    "${dry_run_flag[@]+"${dry_run_flag[@]}"}"
+  # Render secrets from vault to env file
+  local rv_tmp="${env_file}.rvtmp"
+  local rv_cmd=(rv-exec --dotenv "$rv_tmp")
+  # shellcheck disable=SC2206
+  rv_cmd+=($secrets)
+  rv_cmd+=(-- bash -lc "cp '$rv_tmp' '$env_file' && chmod 600 '$env_file'")
+
+  if (( DRY_RUN )); then
+    log "[dry-run] ${rv_cmd[*]}"
+    log "[dry-run] phala deploy --cvm-id $cvm_id -c $compose_file -e $env_file"
+    return 0
+  fi
+
+  "${rv_cmd[@]}"
+  rm -f "$rv_tmp"
+
+  phala deploy --cvm-id "$cvm_id" -c "$compose_file" -e "$env_file"
 }
 
 # ── wait for health ──────────────────────────────────────────────────────────

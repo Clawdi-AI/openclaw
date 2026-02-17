@@ -38,12 +38,41 @@ The master key derives all encryption passwords and the gateway auth token. Keep
 head -c 32 /dev/urandom | base64
 ```
 
-### 3. Prepare deploy env file
+### 3. Generate `OPENCLAW_CONFIG_B64`
+
+Every CVM deployment needs a bootstrap config. Use `gen-cvm-config.sh` to generate it — it derives the gateway auth token from `MASTER_KEY`, sets up mux registration, channels, and agent defaults:
+
+```sh
+OPENCLAW_CONFIG_B64=$(MASTER_KEY="<your-master-key>" \
+  MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
+  MUX_REGISTER_KEY="<your-register-key>" \
+  ./phala-deploy/gen-cvm-config.sh)
+```
+
+You need the **mux base URL** and **register key** from the mux-server deployment. The **inbound URL** (where mux delivers messages back to your OpenClaw) is derived automatically at runtime from `DSTACK_APP_ID` and `DSTACK_GATEWAY_DOMAIN` env vars injected by the Phala platform — you don't need to know your app ID upfront.
+
+Optional env vars for `gen-cvm-config.sh`:
+
+| Variable         | Default     | Description          |
+| ---------------- | ----------- | -------------------- |
+| `MODEL_BASE_URL` | _(omitted)_ | AI provider base URL |
+| `MODEL_API_KEY`  | _(omitted)_ | AI provider API key  |
+
+> **Tip:** With [Redpill Vault](https://github.com/aspect-build/redpill-vault), pull secrets from the vault instead of passing them inline:
+>
+> ```sh
+> OPENCLAW_CONFIG_B64=$(rv-exec --project openclaw \
+>   MASTER_KEY MUX_REGISTER_KEY \
+>   -- bash -c 'MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
+>     ./phala-deploy/gen-cvm-config.sh')
+> ```
+
+### 4. Prepare deploy env file
 
 Create a deploy env file with your secrets:
 
 ```sh
-cat > /tmp/deploy.env <<'EOF'
+cat > /tmp/deploy.env <<EOF
 MASTER_KEY=<your-master-key>
 REDPILL_API_KEY=<your-redpill-api-key>
 S3_BUCKET=<your-bucket-name>
@@ -52,17 +81,16 @@ S3_PROVIDER=Other
 S3_REGION=us-east-1
 AWS_ACCESS_KEY_ID=<your-access-key>
 AWS_SECRET_ACCESS_KEY=<your-secret-key>
+OPENCLAW_CONFIG_B64=${OPENCLAW_CONFIG_B64}
 EOF
 chmod 600 /tmp/deploy.env
 ```
 
-Local-only mode only needs `MASTER_KEY` and `REDPILL_API_KEY` — omit the S3 variables.
-
-If connecting to a mux-server, also add `OPENCLAW_CONFIG_B64` — see [Connect to a mux-server](#connect-to-a-mux-server).
+Local-only mode only needs `MASTER_KEY`, `REDPILL_API_KEY`, and `OPENCLAW_CONFIG_B64` — omit the S3 variables.
 
 Get a Redpill API key at [redpill.ai](https://redpill.ai). This gives access to GPU TEE models (DeepSeek, Qwen, Llama, etc.) with end-to-end encrypted inference.
 
-> **Tip:** If you use [Redpill Vault](https://github.com/aspect-build/redpill-vault), you can generate the env file from vault secrets instead of writing them by hand:
+> **Tip:** With Redpill Vault, generate the env file from vault secrets:
 >
 > ```sh
 > rv-exec --dotenv /tmp/deploy.env \
@@ -70,9 +98,11 @@ Get a Redpill API key at [redpill.ai](https://redpill.ai). This gives access to 
 >   S3_BUCKET S3_ENDPOINT S3_PROVIDER S3_REGION \
 >   AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
 >   -- bash -lc 'test -s /tmp/deploy.env && echo "deploy env ready"'
+> # Then append OPENCLAW_CONFIG_B64 (generated in step 3)
+> echo "OPENCLAW_CONFIG_B64=${OPENCLAW_CONFIG_B64}" >> /tmp/deploy.env
 > ```
 
-### 4. Docker image
+### 5. Docker image
 
 A pre-built image is available on Docker Hub. The `docker-compose.yml` already pins the image by digest. No build step needed unless you want a custom image.
 
@@ -89,7 +119,7 @@ docker push your-dockerhub-user/openclaw-cvm:latest
 # Then update the image: line in docker-compose.yml
 ```
 
-### 5. Deploy to Phala Cloud
+### 6. Deploy to Phala Cloud
 
 ```sh
 phala deploy \
@@ -105,7 +135,7 @@ The `-e /tmp/deploy.env` flag passes your secrets as encrypted environment varia
 
 The CLI will output your CVM ID and dashboard URL. Save these.
 
-### 6. Verify
+### 7. Verify
 
 Check the container logs:
 
@@ -136,7 +166,7 @@ SSH daemon started.
 Docker daemon ready.
 ```
 
-### 7. What's next
+### 8. What's next
 
 1. **Open the dashboard** — go to `https://<app_id>-18789.<gateway>.phala.network?token=<your-gateway-token>` (see [Connecting to your gateway](#connecting-to-your-gateway) for how to construct this URL)
 
@@ -146,98 +176,35 @@ Docker daemon ready.
 
 After that, your agent is live on Telegram and you can chat with it there.
 
-## Connect to a mux-server
+## Mux registration
 
-If you have an existing mux-server CVM and want to connect a new OpenClaw instance to it, add the mux config to your deploy env via `OPENCLAW_CONFIG_B64`. The entrypoint decodes this on first boot and writes `openclaw.json`.
+Every OpenClaw CVM registers with a mux-server on boot. The bootstrap config (`OPENCLAW_CONFIG_B64`, generated in [step 3](#3-generate-openclaw_config_b64)) contains the mux endpoint, register key, and channel routing.
 
-### 1. Collect mux-server info
+### How it works
 
-You need two values from the mux-server deployment:
+1. OpenClaw boots and reads `openclaw.json` with the mux config.
+2. It derives a stable device identity from `MASTER_KEY` (via HKDF).
+3. It calls `POST /v1/instances/register` on the mux-server with the `registerKey`.
+4. Mux-server issues a runtime JWT (24h TTL). OpenClaw caches and auto-refreshes it.
+5. Inbound messages (mux -> OpenClaw) are delivered to `inboundUrl`, authenticated via JWKS.
 
-| Value            | Where to find it                                              |
-| ---------------- | ------------------------------------------------------------- |
-| **Mux base URL** | `https://<mux_app_id>-18891.<gateway>.phala.network`          |
-| **Register key** | The `MUX_REGISTER_KEY` used when deploying the mux-server CVM |
+The `inboundUrl` uses `${DSTACK_APP_ID}` and `${DSTACK_GATEWAY_DOMAIN}` placeholders, resolved by the config loader's env-substitution at boot time.
 
-The **inbound URL** (where mux-server delivers messages back to your OpenClaw) is derived automatically at runtime from `DSTACK_APP_ID` and `DSTACK_GATEWAY_DOMAIN` environment variables injected by the Phala platform. You don't need to know your app ID upfront.
+Runtime JWT contract details: `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`.
 
-### 2. Required config changes
+### Pair channels
 
-The mux connection requires two things in `openclaw.json`:
-
-**a) Mux endpoint** — tells OpenClaw where the mux-server is and how to authenticate:
-
-```jsonc
-// gateway.http.endpoints.mux
-{
-  "enabled": true,
-  "baseUrl": "https://<mux_app_id>-18891.<gateway>.phala.network",
-  "registerKey": "<MUX_REGISTER_KEY>",
-  "inboundUrl": "https://${DSTACK_APP_ID}-18789.${DSTACK_GATEWAY_DOMAIN}/v1/mux/inbound",
-}
-```
-
-The `${DSTACK_APP_ID}` and `${DSTACK_GATEWAY_DOMAIN}` placeholders in `inboundUrl` are resolved by the config loader's env-substitution at boot time. These variables are forwarded into the container via `docker-compose.yml`.
-
-**b) Channel accounts** — enable the `mux` account for each channel you want routed through the mux-server:
-
-```jsonc
-// channels.<channel>.accounts.mux (repeat for telegram, discord, whatsapp)
-{
-  "enabled": true,
-  "mux": { "enabled": true, "timeoutMs": 30000 },
-}
-```
-
-Also enable each channel plugin: `plugins.entries.<channel>.enabled = true`.
-
-### 3. Generate `OPENCLAW_CONFIG_B64`
-
-Use `gen-cvm-config.sh` to generate a complete config. It derives the gateway auth token from `MASTER_KEY`, sets up mux registration, channels, and agent defaults:
+Once the CVM is running, generate a pairing token to link a chat to your instance:
 
 ```sh
-OPENCLAW_CONFIG_B64=$(MASTER_KEY="<your-master-key>" \
-  MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
-  MUX_REGISTER_KEY="<your-register-key>" \
-  ./phala-deploy/gen-cvm-config.sh)
+./phala-deploy/mux-pair-token.sh telegram
 ```
 
-Optional env vars for `gen-cvm-config.sh`:
-
-| Variable         | Default     | Description          |
-| ---------------- | ----------- | -------------------- |
-| `MODEL_BASE_URL` | _(omitted)_ | AI provider base URL |
-| `MODEL_API_KEY`  | _(omitted)_ | AI provider API key  |
-
-> **Tip:** With Redpill Vault, pull secrets from the vault instead of passing them inline:
->
-> ```sh
-> OPENCLAW_CONFIG_B64=$(rv-exec --project openclaw \
->   MASTER_KEY MUX_REGISTER_KEY \
->   -- bash -c 'MUX_BASE_URL="https://<mux_app_id>-18891.<gateway>.phala.network" \
->     ./phala-deploy/gen-cvm-config.sh')
-> ```
-
-### 4. Add to deploy env and deploy
-
-Append `OPENCLAW_CONFIG_B64` to your deploy env file, then deploy:
-
-```sh
-echo "OPENCLAW_CONFIG_B64=${OPENCLAW_CONFIG_B64}" >> /tmp/deploy.env
-
-phala deploy \
-  -n my-openclaw \
-  -c docker-compose.yml \
-  -e /tmp/deploy.env \
-  -t tdx.medium \
-  --dev-os
-```
-
-On first boot, the entrypoint writes `openclaw.json` from `OPENCLAW_CONFIG_B64`. On subsequent boots (with S3), the config is restored from storage and `OPENCLAW_CONFIG_B64` is ignored.
+This calls `POST /v1/admin/pairings/token` on the mux-server. Send the returned token as a message in the Telegram bot to complete pairing.
 
 ### Modifying config on an existing CVM
 
-`OPENCLAW_CONFIG_B64` is only used on first boot (when no `openclaw.json` exists yet). To add or update mux config on a running CVM, SSH in and edit the JSON directly:
+`OPENCLAW_CONFIG_B64` is only used on first boot (when no `openclaw.json` exists yet). To update config on a running CVM, SSH in and edit the JSON directly:
 
 ```sh
 export CVM_SSH_HOST=<app_id>-1022.<gateway>.phala.network
@@ -252,32 +219,12 @@ vi /root/.openclaw/openclaw.json
 pkill -f "openclaw gateway"
 ```
 
-You need to add/update the same fields described in [step 2](#2-required-config-changes):
+Key config fields:
 
-1. Add or update `gateway.http.endpoints.mux` with `enabled`, `baseUrl`, `registerKey`, `inboundUrl`
+1. `gateway.http.endpoints.mux` — `enabled`, `baseUrl`, `registerKey`, `inboundUrl`
    - For `inboundUrl`, use `https://${DSTACK_APP_ID}-18789.${DSTACK_GATEWAY_DOMAIN}/v1/mux/inbound` — the placeholders are resolved at boot time
-2. For each channel, add `accounts.mux` with `enabled: true` and `mux: { enabled: true, timeoutMs: 30000 }`
-3. Enable the channel plugin: `plugins.entries.<channel>.enabled = true`
-
-### 5. Pair channels
-
-Once the CVM is running, generate a pairing token to link a chat to your instance:
-
-```sh
-./phala-deploy/mux-pair-token.sh telegram
-```
-
-This calls `POST /v1/admin/pairings/token` on the mux-server. Send the returned token as a message in the Telegram bot to complete pairing.
-
-### How it works
-
-1. OpenClaw boots and reads `openclaw.json` with the mux config.
-2. It derives a stable device identity from `MASTER_KEY` (via HKDF).
-3. It calls `POST /v1/instances/register` on the mux-server with the `registerKey`.
-4. Mux-server issues a runtime JWT (24h TTL). OpenClaw caches and auto-refreshes it.
-5. Inbound messages (mux -> OpenClaw) are delivered to `inboundUrl`, authenticated via JWKS.
-
-Runtime JWT contract details: `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`.
+2. `channels.<channel>.accounts.mux` — `enabled: true` and `mux: { enabled: true, timeoutMs: 30000 }`
+3. `plugins.entries.<channel>.enabled` — `true` for each channel
 
 ## How S3 storage works
 
@@ -436,8 +383,6 @@ If your CVM is destroyed (S3 mode only):
 | `build-pin-mux-image.sh` | Rebuild mux image, push, and pin mux compose digest               |
 | `deploy.sh`              | Deploy both CVMs, wait for health, run smoke tests                |
 | `gen-cvm-config.sh`      | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)   |
-| `cvm-rollout.sh`         | Low-level deploy flow with `rv-exec` env materialization          |
-| `cvm-rollout-targets.sh` | Role-aware deploy wrapper with CVM role safety checks             |
 | `mux-pair-token.sh`      | Mint mux pairing token for a tenant OpenClaw instance (admin API) |
 | `UPDATE_RUNBOOK.md`      | Detailed update runbook with fallback procedures                  |
 | `cvm-ssh`                | Interactive SSH into the container                                |
