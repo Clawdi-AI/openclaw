@@ -67,6 +67,10 @@ RUN apt-get update && \
 RUN echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /root/.bashrc && \
     echo 'export PATH="/root/.bun/bin:$PATH"' >> /root/.bashrc
 
+# Layer 7: mcporter (MCP client CLI, used by composio skill)
+RUN npm install -g mcporter && \
+    rm -rf /root/.npm /tmp/*
+
 # gogcli: static binary + credential-sourcing wrapper
 COPY --from=gogcli-builder /out/gog-bin /usr/local/bin/gog-bin
 COPY phala-deploy/gogcli/gog-wrapper.sh /usr/local/bin/gog
