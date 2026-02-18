@@ -257,6 +257,9 @@ fi
 rm -f /var/run/docker.pid /var/run/containerd/containerd.pid
 
 # Start Docker daemon in background (best-effort, not critical for gateway)
+# TODO: This blocking wait adds ~20s to startup. The gateway HTTP/WS server
+# doesn't need Docker — only tool execution does. Move the wait into a
+# background task and let the gateway start immediately.
 dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs &
 DOCKERD_PID=$!
 
