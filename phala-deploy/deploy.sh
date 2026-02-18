@@ -120,6 +120,25 @@ preflight_secrets() {
   ok "All vault secrets present"
 }
 
+# ── generate openclaw config ─────────────────────────────────────────────────
+
+generate_openclaw_config() {
+  local env_file="$1"
+  log "Generating OPENCLAW_CONFIG_B64..."
+
+  if (( DRY_RUN )); then
+    log "[dry-run] rv-exec MASTER_KEY MUX_REGISTER_KEY -- gen-cvm-config.sh >> $env_file"
+    return 0
+  fi
+
+  rv-exec MASTER_KEY MUX_REGISTER_KEY -- bash -lc '
+    export MUX_BASE_URL="'"$MUX_BASE_URL"'"
+    cfg=$("'"$SCRIPT_DIR"'/gen-cvm-config.sh")
+    echo "OPENCLAW_CONFIG_B64=${cfg}" >> "'"$env_file"'"
+  '
+  ok "OPENCLAW_CONFIG_B64 appended to $env_file"
+}
+
 # ── deploy ───────────────────────────────────────────────────────────────────
 
 deploy_role() {
@@ -137,12 +156,17 @@ deploy_role() {
 
   if (( DRY_RUN )); then
     log "[dry-run] ${rv_cmd[*]}"
+    [[ "$role" == "openclaw" ]] && generate_openclaw_config "$env_file"
     log "[dry-run] phala deploy --cvm-id $cvm_id -c $compose_file -e $env_file"
     return 0
   fi
 
   "${rv_cmd[@]}"
   rm -f "$rv_tmp"
+
+  if [[ "$role" == "openclaw" ]]; then
+    generate_openclaw_config "$env_file"
+  fi
 
   phala deploy --cvm-id "$cvm_id" -c "$compose_file" -e "$env_file"
 }
