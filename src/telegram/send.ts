@@ -6,15 +6,9 @@ import type {
 } from "@grammyjs/types";
 import { type ApiClientOptions, Bot, HttpError, InputFile } from "grammy";
 import {
-  buildTelegramRawCreateForumTopic,
-  buildTelegramRawDeleteMessage,
-  buildTelegramRawEditMessageText,
   buildTelegramRawSend,
   buildTelegramRawSendMedia,
-  buildTelegramRawSendPoll,
-  buildTelegramRawSetMessageReaction,
 } from "../channels/plugins/mux-envelope.js";
-import { sendViaMux } from "../channels/plugins/outbound/mux.js";
 import { loadConfig } from "../config/config.js";
 import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
 import { logVerbose } from "../globals.js";
@@ -40,16 +34,23 @@ import { isRecoverableTelegramNetworkError } from "./network-errors.js";
 import { makeProxyFetch } from "./proxy.js";
 import { recordSentMessage } from "./sent-message-cache.js";
 import { parseTelegramTarget, stripTelegramInternalPrefixes } from "./targets.js";
+import {
+  createForumTopicTelegramViaMux as muxCreateForumTopic,
+  deleteMessageTelegramViaMux as muxDeleteMessage,
+  editMessageTelegramViaMux as muxEditMessage,
+  isTelegramMuxTransport,
+  reactMessageTelegramViaMux as muxReactMessage,
+  resolveTelegramTransport,
+  sendPollTelegramViaMux as muxSendPoll,
+  sendStickerTelegramViaMux as muxSendSticker,
+  sendTelegramMuxRaw,
+  type MuxTransportOpts as TelegramMuxTransportOpts,
+} from "./transport.js";
 import { resolveTelegramVoiceSend } from "./voice.js";
 
 type TelegramApi = Bot["api"];
 type TelegramApiOverride = Partial<TelegramApi>;
-
-export type MuxTransportOpts = {
-  cfg: ReturnType<typeof loadConfig>;
-  sessionKey: string;
-  accountId?: string;
-};
+export type MuxTransportOpts = TelegramMuxTransportOpts;
 
 type TelegramSendOpts = {
   token?: string;
@@ -464,11 +465,14 @@ async function sendMessageTelegramViaMux(
   text: string,
   opts: TelegramSendOpts & { mux: MuxTransportOpts },
 ): Promise<TelegramSendResult> {
-  const cfg = opts.mux.cfg;
+  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
+  if (!isTelegramMuxTransport(transport)) {
+    throw new Error("sendMessageTelegramViaMux requires mux transport");
+  }
+  const cfg = transport.cfg;
   const target = parseTelegramTarget(to);
   const chatId = normalizeChatId(target.chatId);
   const mediaUrl = opts.mediaUrl?.trim();
-  const accountId = opts.mux.accountId ?? opts.accountId;
 
   const threadParams = buildTelegramThreadReplyParams({
     targetMessageThreadId: target.messageThreadId,
@@ -481,7 +485,7 @@ async function sendMessageTelegramViaMux(
   const replyToMessageId = (threadParams.reply_to_message_id as number | undefined) ?? undefined;
 
   const textMode = opts.textMode ?? "markdown";
-  const resolvedAccountId = opts.accountId ?? accountId;
+  const resolvedAccountId = transport.accountId ?? opts.accountId;
   const tableMode = resolveMarkdownTableMode({
     cfg,
     channel: "telegram",
@@ -490,12 +494,9 @@ async function sendMessageTelegramViaMux(
   const renderHtmlText = (value: string) => renderTelegramHtmlText(value, { textMode, tableMode });
 
   const muxSend = async (raw: Record<string, unknown>) => {
-    return await sendViaMux({
-      cfg,
-      channel: "telegram",
-      sessionKey: opts.mux.sessionKey,
-      accountId,
-      raw: { telegram: raw },
+    return await sendTelegramMuxRaw({
+      transport,
+      raw,
     });
   };
 
@@ -595,12 +596,9 @@ export async function sendMessageTelegram(
   text: string,
   opts: TelegramSendOpts = {},
 ): Promise<TelegramSendResult> {
-  if (opts.mux) {
-    return sendMessageTelegramViaMux(
-      to,
-      text,
-      opts as TelegramSendOpts & { mux: MuxTransportOpts },
-    );
+  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
+  if (isTelegramMuxTransport(transport)) {
+    return sendMessageTelegramViaMux(to, text, { ...opts, mux: transport });
   }
 
   const { cfg, account, api } = resolveTelegramApiContext(opts);
@@ -892,19 +890,15 @@ export async function reactMessageTelegram(
   emoji: string,
   opts: TelegramReactionOpts = {},
 ): Promise<{ ok: true } | { ok: false; warning: string }> {
-  if (opts.mux) {
+  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
+  if (isTelegramMuxTransport(transport)) {
     const messageId = normalizeMessageId(messageIdInput);
-    const raw = buildTelegramRawSetMessageReaction({
+    const trimmedEmoji = emoji.trim();
+    await muxReactMessage({
+      transport,
       messageId,
-      emoji: emoji.trim(),
+      emoji: trimmedEmoji,
       remove: opts.remove,
-    });
-    await sendViaMux({
-      cfg: opts.mux.cfg,
-      channel: "telegram",
-      sessionKey: opts.mux.sessionKey,
-      accountId: opts.mux.accountId ?? opts.accountId,
-      raw: { telegram: raw },
     });
     return { ok: true };
   }
@@ -957,17 +951,10 @@ export async function deleteMessageTelegram(
   messageIdInput: string | number,
   opts: TelegramDeleteOpts = {},
 ): Promise<{ ok: true }> {
-  if (opts.mux) {
+  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
+  if (isTelegramMuxTransport(transport)) {
     const messageId = normalizeMessageId(messageIdInput);
-    const raw = buildTelegramRawDeleteMessage({ messageId });
-    await sendViaMux({
-      cfg: opts.mux.cfg,
-      channel: "telegram",
-      sessionKey: opts.mux.sessionKey,
-      accountId: opts.mux.accountId ?? opts.accountId,
-      raw: { telegram: raw },
-    });
-    return { ok: true };
+    return await muxDeleteMessage({ transport, messageId });
   }
 
   const { cfg, account, api } = resolveTelegramApiContext(opts);
@@ -1008,28 +995,21 @@ export async function editMessageTelegram(
   text: string,
   opts: TelegramEditOpts = {},
 ): Promise<{ ok: true; messageId: string; chatId: string }> {
-  if (opts.mux) {
+  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
+  if (isTelegramMuxTransport(transport)) {
     const chatId = normalizeChatId(String(chatIdInput));
     const messageId = normalizeMessageId(messageIdInput);
-    const muxCfg = opts.mux.cfg;
     const textMode = opts.textMode ?? "markdown";
     const tableMode = resolveMarkdownTableMode({
-      cfg: muxCfg,
+      cfg: transport.cfg,
       channel: "telegram",
       accountId: opts.accountId,
     });
     const htmlText = renderTelegramHtmlText(text, { textMode, tableMode });
-    const raw = buildTelegramRawEditMessageText({
+    await muxEditMessage({
+      transport,
       messageId,
       text: htmlText,
-      parseMode: "HTML",
-    });
-    await sendViaMux({
-      cfg: muxCfg,
-      channel: "telegram",
-      sessionKey: opts.mux.sessionKey,
-      accountId: opts.mux.accountId ?? opts.accountId,
-      raw: { telegram: raw },
     });
     return { ok: true, messageId: String(messageId), chatId };
   }
@@ -1159,41 +1139,26 @@ export async function sendStickerTelegram(
     throw new Error("Telegram sticker file_id is required");
   }
 
-  if (opts.mux) {
-    const target = parseTelegramTarget(to);
-    const chatId = normalizeChatId(target.chatId);
-    const threadParams = buildTelegramThreadReplyParams({
-      targetMessageThreadId: target.messageThreadId,
-      messageThreadId: opts.messageThreadId,
-      chatType: target.chatType,
-      replyToMessageId: opts.replyToMessageId,
-    });
-    const raw = buildTelegramRawSendMedia({
-      method: "sendSticker",
-      mediaUrl: fileId.trim(),
-      messageThreadId: threadParams.message_thread_id as number | undefined,
-      replyToMessageId: threadParams.reply_to_message_id as number | undefined,
-    });
-    const result = await sendViaMux({
-      cfg: opts.mux.cfg,
-      channel: "telegram",
-      sessionKey: opts.mux.sessionKey,
-      accountId: opts.mux.accountId ?? opts.accountId,
-      raw: { telegram: raw },
-    });
-    return { messageId: String(result.messageId ?? "unknown"), chatId };
-  }
-
-  const { cfg, account, api } = resolveTelegramApiContext(opts);
   const target = parseTelegramTarget(to);
   const chatId = normalizeChatId(target.chatId);
-
   const threadParams = buildTelegramThreadReplyParams({
     targetMessageThreadId: target.messageThreadId,
     messageThreadId: opts.messageThreadId,
     chatType: target.chatType,
     replyToMessageId: opts.replyToMessageId,
   });
+  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
+  if (isTelegramMuxTransport(transport)) {
+    return await muxSendSticker({
+      transport,
+      chatId,
+      fileId: fileId.trim(),
+      messageThreadId: threadParams.message_thread_id as number | undefined,
+      replyToMessageId: threadParams.reply_to_message_id as number | undefined,
+    });
+  }
+
+  const { cfg, account, api } = resolveTelegramApiContext(opts);
   const hasThreadParams = Object.keys(threadParams).length > 0;
 
   const requestWithDiag = createTelegramRequestWithDiag({
@@ -1262,28 +1227,31 @@ export async function sendPollTelegram(
   poll: PollInput,
   opts: TelegramPollOpts = {},
 ): Promise<{ messageId: string; chatId: string; pollId?: string }> {
-  if (opts.mux) {
-    const target = parseTelegramTarget(to);
-    const chatId = normalizeChatId(target.chatId);
-    const normalizedPoll = normalizePollInput(poll, { maxOptions: 10 });
+  const target = parseTelegramTarget(to);
+  const chatId = normalizeChatId(target.chatId);
+  // Normalize the poll input (validates question, options, maxSelections)
+  const normalizedPoll = normalizePollInput(poll, { maxOptions: 10 });
+  const threadParams = buildTelegramThreadReplyParams({
+    targetMessageThreadId: target.messageThreadId,
+    messageThreadId: opts.messageThreadId,
+    chatType: target.chatType,
+    replyToMessageId: opts.replyToMessageId,
+  });
+  const durationSeconds = normalizedPoll.durationSeconds;
+  if (durationSeconds === undefined && normalizedPoll.durationHours !== undefined) {
+    throw new Error(
+      "Telegram poll durationHours is not supported. Use durationSeconds (5-600) instead.",
+    );
+  }
+  if (durationSeconds !== undefined && (durationSeconds < 5 || durationSeconds > 600)) {
+    throw new Error("Telegram poll durationSeconds must be between 5 and 600");
+  }
 
-    const durationSeconds = normalizedPoll.durationSeconds;
-    if (durationSeconds === undefined && normalizedPoll.durationHours !== undefined) {
-      throw new Error(
-        "Telegram poll durationHours is not supported. Use durationSeconds (5-600) instead.",
-      );
-    }
-    if (durationSeconds !== undefined && (durationSeconds < 5 || durationSeconds > 600)) {
-      throw new Error("Telegram poll durationSeconds must be between 5 and 600");
-    }
-
-    const threadParams = buildTelegramThreadReplyParams({
-      targetMessageThreadId: target.messageThreadId,
-      messageThreadId: opts.messageThreadId,
-      chatType: target.chatType,
-      replyToMessageId: opts.replyToMessageId,
-    });
-    const raw = buildTelegramRawSendPoll({
+  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
+  if (isTelegramMuxTransport(transport)) {
+    return await muxSendPoll({
+      transport,
+      chatId,
       question: normalizedPoll.question,
       options: normalizedPoll.options,
       allowsMultipleAnswers: normalizedPoll.maxSelections > 1,
@@ -1293,29 +1261,9 @@ export async function sendPollTelegram(
       replyToMessageId: threadParams.reply_to_message_id as number | undefined,
       silent: opts.silent,
     });
-    const result = await sendViaMux({
-      cfg: opts.mux.cfg,
-      channel: "telegram",
-      sessionKey: opts.mux.sessionKey,
-      accountId: opts.mux.accountId ?? opts.accountId,
-      raw: { telegram: raw },
-    });
-    return { messageId: String(result.messageId ?? "unknown"), chatId };
   }
 
   const { cfg, account, api } = resolveTelegramApiContext(opts);
-  const target = parseTelegramTarget(to);
-  const chatId = normalizeChatId(target.chatId);
-
-  // Normalize the poll input (validates question, options, maxSelections)
-  const normalizedPoll = normalizePollInput(poll, { maxOptions: 10 });
-
-  const threadParams = buildTelegramThreadReplyParams({
-    targetMessageThreadId: target.messageThreadId,
-    messageThreadId: opts.messageThreadId,
-    chatType: target.chatType,
-    replyToMessageId: opts.replyToMessageId,
-  });
 
   // Build poll options as simple strings (Grammy accepts string[] or InputPollOption[])
   const pollOptions = normalizedPoll.options;
@@ -1332,16 +1280,6 @@ export async function sendPollTelegram(
     chatId,
     input: to,
   });
-
-  const durationSeconds = normalizedPoll.durationSeconds;
-  if (durationSeconds === undefined && normalizedPoll.durationHours !== undefined) {
-    throw new Error(
-      "Telegram poll durationHours is not supported. Use durationSeconds (5-600) instead.",
-    );
-  }
-  if (durationSeconds !== undefined && (durationSeconds < 5 || durationSeconds > 600)) {
-    throw new Error("Telegram poll durationSeconds must be between 5 and 600");
-  }
 
   // Build poll parameters following Grammy's api.sendPoll signature
   // sendPoll(chat_id, question, options, other?, signal?)
@@ -1425,27 +1363,20 @@ export async function createForumTopicTelegram(
     throw new Error("Forum topic name must be 128 characters or fewer");
   }
 
-  if (opts.mux) {
-    const raw = buildTelegramRawCreateForumTopic({
+  // Accept topic-qualified targets (e.g. telegram:group:<id>:topic:<thread>)
+  // but createForumTopic must always target the base supergroup chat id.
+  const target = parseTelegramTarget(chatId);
+  const normalizedChatId = normalizeChatId(target.chatId);
+
+  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
+  if (isTelegramMuxTransport(transport)) {
+    return await muxCreateForumTopic({
+      transport,
+      chatId: normalizedChatId,
       name: trimmedName,
       iconColor: opts.iconColor,
       iconCustomEmojiId: opts.iconCustomEmojiId?.trim() || undefined,
     });
-    const target = parseTelegramTarget(chatId);
-    const normalizedChatId = normalizeChatId(target.chatId);
-    const result = await sendViaMux({
-      cfg: opts.mux.cfg,
-      channel: "telegram",
-      sessionKey: opts.mux.sessionKey,
-      accountId: opts.mux.accountId ?? opts.accountId,
-      raw: { telegram: raw },
-    });
-    const muxResult = result as Record<string, unknown>;
-    return {
-      topicId: typeof muxResult.message_thread_id === "number" ? muxResult.message_thread_id : 0,
-      name: trimmedName,
-      chatId: normalizedChatId,
-    };
   }
 
   const cfg = loadConfig();
@@ -1454,10 +1385,6 @@ export async function createForumTopicTelegram(
     accountId: opts.accountId,
   });
   const token = resolveToken(opts.token, account);
-  // Accept topic-qualified targets (e.g. telegram:group:<id>:topic:<thread>)
-  // but createForumTopic must always target the base supergroup chat id.
-  const target = parseTelegramTarget(chatId);
-  const normalizedChatId = normalizeChatId(target.chatId);
   const client = resolveTelegramClientOptions(account);
   const api = opts.api ?? new Bot(token, client ? { client } : undefined).api;
 

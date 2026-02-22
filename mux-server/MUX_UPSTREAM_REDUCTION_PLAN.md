@@ -73,6 +73,42 @@ Notes:
 
 - `pnpm tsgo` baseline remains noisy in this branch; no new errors were reported for touched files in this slice.
 
+### 2026-02-22: Phase 2 started (Telegram transport shim for mux delegation)
+
+Implemented:
+
+- Added transport shim:
+  - `src/telegram/transport.ts`
+  - helpers:
+    - `resolveTelegramTransport`
+    - `isTelegramMuxTransport`
+    - `sendTelegramMuxRaw`
+    - `reactMessageTelegramViaMux`
+    - `deleteMessageTelegramViaMux`
+    - `editMessageTelegramViaMux`
+    - `sendStickerTelegramViaMux`
+    - `sendPollTelegramViaMux`
+    - `createForumTopicTelegramViaMux`
+- Rewired `src/telegram/send.ts` mux branches to delegate via shim:
+  - `sendMessageTelegram` / `sendMessageTelegramViaMux`
+  - `reactMessageTelegram`
+  - `deleteMessageTelegram`
+  - `editMessageTelegram`
+  - `sendStickerTelegram`
+  - `sendPollTelegram`
+  - `createForumTopicTelegram`
+- Kept direct grammY path behavior intact; only mux-specific request construction/sending moved.
+
+Validation run:
+
+- `pnpm exec oxfmt --check src/telegram/send.ts src/telegram/transport.ts`
+- `pnpm vitest run src/telegram/send.test.ts src/telegram/send.proxy.test.ts src/channels/plugins/outbound/mux-routing.test.ts`
+  - result: 3 files passed, 76 tests passed
+
+Notes:
+
+- `MuxTransportOpts` remains exported from `src/telegram/send.ts` as a compatibility type alias to the transport shim type.
+
 ## Baseline
 
 Date: 2026-02-22
