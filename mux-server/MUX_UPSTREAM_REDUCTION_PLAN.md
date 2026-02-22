@@ -109,6 +109,31 @@ Notes:
 
 - `MuxTransportOpts` remains exported from `src/telegram/send.ts` as a compatibility type alias to the transport shim type.
 
+### 2026-02-22: Phase 3 started (draft finalize-path simplification)
+
+Implemented:
+
+- Added draft-final helper in `src/telegram/draft-stream.ts`:
+  - `handleDraftFinalPayload`
+  - encapsulates:
+    - regressive final-text suppression for preview messages
+    - finalize-via-edit fast path via `tryFinalizeDraftAsEdit`
+- Simplified `src/telegram/bot-message-dispatch.ts` final-delivery branch:
+  - replaced inline finalize decision tree with `handleDraftFinalPayload`
+  - kept sequencing and delivery semantics unchanged
+
+Validation run:
+
+- `pnpm exec oxfmt --check src/telegram/draft-stream.ts src/telegram/bot-message-dispatch.ts`
+- `pnpm vitest run src/telegram/draft-stream.test.ts src/telegram/bot-message-dispatch.test.ts`
+  - result: 2 files passed, 26 tests passed
+- `pnpm vitest run src/telegram/send.test.ts src/telegram/send.proxy.test.ts src/channels/plugins/outbound/mux-routing.test.ts`
+  - result: 3 files passed, 76 tests passed
+
+Notes:
+
+- This slice intentionally keeps direct send/edit/delete behavior unchanged; only draft finalization orchestration was centralized.
+
 ## Baseline
 
 Date: 2026-02-22

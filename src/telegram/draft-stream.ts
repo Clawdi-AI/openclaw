@@ -216,6 +216,64 @@ export async function tryFinalizeDraftAsEdit(params: {
 }
 
 /**
+ * Handle final payload delivery through the draft preview path when possible.
+ * Encapsulates:
+ * - regressive-text suppression (avoid overwriting richer preview with shorter final)
+ * - finalize-via-edit fast path
+ */
+export async function handleDraftFinalPayload(params: {
+  draftStream: TelegramDraftStream | undefined;
+  alreadyFinalizedViaPreview: boolean;
+  currentPreviewText: string;
+  finalText: string | undefined;
+  hasMedia: boolean;
+  isError: boolean;
+  maxChars?: number;
+  editFn: (messageId: number, text: string) => Promise<void>;
+  log?: (message: string) => void;
+}): Promise<{
+  finalizedViaPreview: boolean;
+  handledByDraftPath: boolean;
+}> {
+  if (!params.draftStream || params.alreadyFinalizedViaPreview) {
+    return {
+      finalizedViaPreview: params.alreadyFinalizedViaPreview,
+      handledByDraftPath: false,
+    };
+  }
+
+  // Regressive text suppression (direct path only): ignore final edits
+  // shorter than the current preview (e.g., "Okay." -> "Ok").
+  if (
+    params.draftStream.messageId() &&
+    params.currentPreviewText &&
+    typeof params.finalText === "string" &&
+    params.currentPreviewText.startsWith(params.finalText) &&
+    params.finalText.length < params.currentPreviewText.length
+  ) {
+    await params.draftStream.stop();
+    return {
+      finalizedViaPreview: params.alreadyFinalizedViaPreview,
+      handledByDraftPath: true,
+    };
+  }
+
+  const finalized = await tryFinalizeDraftAsEdit({
+    draftStream: params.draftStream,
+    finalText: params.finalText,
+    hasMedia: params.hasMedia,
+    isError: params.isError,
+    maxChars: params.maxChars,
+    editFn: params.editFn,
+    log: params.log,
+  });
+  return {
+    finalizedViaPreview: finalized ? true : params.alreadyFinalizedViaPreview,
+    handledByDraftPath: finalized,
+  };
+}
+
+/**
  * Clean up a draft stream after delivery completes.
  * Always stops the stream; clears (deletes preview message) only when
  * the final text was NOT already edited in-place via `tryFinalizeDraftAsEdit`.

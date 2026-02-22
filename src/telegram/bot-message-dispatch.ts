@@ -29,7 +29,7 @@ import { resolveTelegramDraftStreamingChunking } from "./draft-chunking.js";
 import {
   cleanupDraftStream,
   createTelegramDraftStream,
-  tryFinalizeDraftAsEdit,
+  handleDraftFinalPayload,
 } from "./draft-stream.js";
 import { editMessageTelegram } from "./send.js";
 import { cacheSticker, describeStickerImage } from "./sticker-cache.js";
@@ -326,43 +326,32 @@ export const dispatchTelegramMessage = async ({
               payload.channelData?.telegram as { buttons?: TelegramInlineButtons } | undefined
             )?.buttons;
 
-            // Regressive text suppression (direct path only): ignore final edits
-            // shorter than the current preview (e.g., "Okay." -> "Ok").
             const currentPreviewText = streamMode === "block" ? draftText : lastPartialText;
-            if (
-              draftStream?.messageId() &&
-              currentPreviewText &&
-              typeof payload.text === "string" &&
-              currentPreviewText.startsWith(payload.text) &&
-              payload.text.length < currentPreviewText.length
-            ) {
-              await draftStream?.stop();
-              return;
-            }
-
-            if (draftStream && !finalizedViaPreviewMessage) {
-              const finalized = await tryFinalizeDraftAsEdit({
-                draftStream,
-                finalText: payload.text,
-                hasMedia,
-                isError: payload.isError ?? false,
-                maxChars: draftMaxChars,
-                editFn: async (msgId, text) => {
-                  await editMessageTelegram(chatId, msgId, text, {
-                    api: bot.api,
-                    cfg,
-                    accountId: route.accountId,
-                    linkPreview: telegramCfg.linkPreview,
-                    buttons: previewButtons,
-                  });
-                },
-                log: logVerbose,
-              });
-              if (finalized) {
-                finalizedViaPreviewMessage = true;
+            const draftFinalize = await handleDraftFinalPayload({
+              draftStream,
+              alreadyFinalizedViaPreview: finalizedViaPreviewMessage,
+              currentPreviewText,
+              finalText: payload.text,
+              hasMedia,
+              isError: payload.isError ?? false,
+              maxChars: draftMaxChars,
+              editFn: async (msgId, text) => {
+                await editMessageTelegram(chatId, msgId, text, {
+                  api: bot.api,
+                  cfg,
+                  accountId: route.accountId,
+                  linkPreview: telegramCfg.linkPreview,
+                  buttons: previewButtons,
+                });
+              },
+              log: logVerbose,
+            });
+            finalizedViaPreviewMessage = draftFinalize.finalizedViaPreview;
+            if (draftFinalize.handledByDraftPath) {
+              if (draftFinalize.finalizedViaPreview) {
                 deliveryState.delivered = true;
-                return;
               }
+              return;
             }
           }
           const result = await deliverReplies({
