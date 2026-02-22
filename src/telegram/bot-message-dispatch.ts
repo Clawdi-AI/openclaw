@@ -133,12 +133,25 @@ export const dispatchTelegramMessage = async ({
     draftStream && streamMode === "block"
       ? resolveTelegramDraftStreamingChunking(cfg, route.accountId)
       : undefined;
-  const shouldSplitPreviewMessages = streamMode === "block";
   const draftChunker = draftChunking ? new EmbeddedBlockChunker(draftChunking) : undefined;
   const mediaLocalRoots = getAgentScopedMediaLocalRoots(cfg, route.agentId);
   let lastPartialText = "";
   let draftText = "";
   let hasStreamedMessage = false;
+  const resetDraftBuffers = () => {
+    draftText = "";
+    draftChunker?.reset();
+  };
+  const resetDraftPreviewState = () => {
+    lastPartialText = "";
+    resetDraftBuffers();
+  };
+  const handleDraftBoundary = () => {
+    if (streamMode === "block" && hasStreamedMessage) {
+      draftStream?.forceNewMessage();
+    }
+    resetDraftPreviewState();
+  };
   const updateDraftFromPartial = (text?: string) => {
     if (!draftStream || !text) {
       return;
@@ -168,8 +181,7 @@ export const dispatchTelegramMessage = async ({
       delta = text.slice(lastPartialText.length);
     } else {
       // Streaming buffer reset (or non-monotonic stream). Start fresh.
-      draftChunker?.reset();
-      draftText = "";
+      resetDraftBuffers();
     }
     lastPartialText = text;
     if (!delta) {
@@ -387,33 +399,8 @@ export const dispatchTelegramMessage = async ({
         skillFilter,
         disableBlockStreaming,
         onPartialReply: draftStream ? (payload) => updateDraftFromPartial(payload.text) : undefined,
-        onAssistantMessageStart: draftStream
-          ? () => {
-              // Only split preview bubbles in block mode. In partial mode, keep
-              // editing one preview message to avoid flooding the chat.
-              logVerbose(
-                `telegram: onAssistantMessageStart called, hasStreamedMessage=${hasStreamedMessage}`,
-              );
-              if (shouldSplitPreviewMessages && hasStreamedMessage) {
-                logVerbose(`telegram: calling forceNewMessage()`);
-                draftStream.forceNewMessage();
-              }
-              lastPartialText = "";
-              draftText = "";
-              draftChunker?.reset();
-            }
-          : undefined,
-        onReasoningEnd: draftStream
-          ? () => {
-              // Same policy as assistant-message boundaries: split only in block mode.
-              if (shouldSplitPreviewMessages && hasStreamedMessage) {
-                draftStream.forceNewMessage();
-              }
-              lastPartialText = "";
-              draftText = "";
-              draftChunker?.reset();
-            }
-          : undefined,
+        onAssistantMessageStart: draftStream ? handleDraftBoundary : undefined,
+        onReasoningEnd: draftStream ? handleDraftBoundary : undefined,
         onModelSelected,
       },
     }));
