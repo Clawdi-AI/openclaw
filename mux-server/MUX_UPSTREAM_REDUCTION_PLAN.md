@@ -11,6 +11,68 @@ Scope here is deliberately practical:
 3. Move mux-specific logic into mux-specific modules where possible.
 4. Make future rebase work smaller and more mechanical.
 
+## Execution Log
+
+### 2026-02-22: Phase 1 started (shared mux overlay extraction)
+
+Implemented:
+
+- Added shared helper module:
+  - `src/channels/plugins/outbound/mux-overlay.ts`
+  - helpers:
+    - `resolveTelegramMuxTransportOpts`
+    - `maybeSendDiscordViaMux`
+    - `maybeSendWhatsAppViaMux`
+- Exported helpers in plugin SDK:
+  - `src/plugin-sdk/index.ts`
+- Rewired core outbound adapters to use helper:
+  - `src/channels/plugins/outbound/telegram.ts`
+  - `src/channels/plugins/outbound/discord.ts`
+  - `src/channels/plugins/outbound/whatsapp.ts`
+- Rewired extension outbound adapters to use helper:
+  - `extensions/telegram/src/channel.ts`
+  - `extensions/discord/src/channel.ts`
+  - `extensions/whatsapp/src/channel.ts`
+
+Validation run:
+
+- `pnpm exec vitest run src/channels/plugins/outbound/mux-routing.test.ts extensions/discord/src/mux-sendpayload.test.ts extensions/telegram/src/mux-sendpayload.test.ts extensions/whatsapp/src/mux-sendpayload.test.ts`
+  - result: 4 files passed, 15 tests passed
+
+Notes:
+
+- `pnpm tsgo` currently has unrelated baseline errors in this branch; touched files from this phase do not report TypeScript errors.
+- Metrics scripts (`pnpm metrics:patch`) read committed refs only, so post-refactor metric deltas should be checked after committing this phase.
+
+### 2026-02-22: Phase 1 continued (shared payload fallback sequence extraction)
+
+Implemented:
+
+- Added shared payload sequence helper:
+  - `src/channels/plugins/outbound/payload-sequence.ts`
+  - helpers:
+    - `resolvePayloadTextAndMedia`
+    - `sendPayloadWithMediaSequence`
+    - `PayloadSendSequenceStep`
+- Exported helpers in plugin SDK:
+  - `src/plugin-sdk/index.ts`
+- Rewired extension outbound `sendPayload` paths to use shared helper:
+  - `extensions/discord/src/channel.ts`
+  - `extensions/telegram/src/channel.ts`
+  - `extensions/whatsapp/src/channel.ts`
+- Rewired core Telegram outbound `sendPayload` path to use shared helper:
+  - `src/channels/plugins/outbound/telegram.ts`
+
+Validation run:
+
+- `pnpm exec oxfmt --check src/channels/plugins/outbound/payload-sequence.ts src/plugin-sdk/index.ts src/channels/plugins/outbound/telegram.ts extensions/discord/src/channel.ts extensions/whatsapp/src/channel.ts extensions/telegram/src/channel.ts`
+- `pnpm vitest run src/channels/plugins/outbound/mux-routing.test.ts extensions/discord/src/mux-sendpayload.test.ts extensions/telegram/src/mux-sendpayload.test.ts extensions/whatsapp/src/mux-sendpayload.test.ts`
+  - result: 4 files passed, 15 tests passed
+
+Notes:
+
+- `pnpm tsgo` baseline remains noisy in this branch; no new errors were reported for touched files in this slice.
+
 ## Baseline
 
 Date: 2026-02-22

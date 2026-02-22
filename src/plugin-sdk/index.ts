@@ -458,6 +458,16 @@ export {
 export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 export { isMuxEnabled, sendViaMux } from "../channels/plugins/outbound/mux.js";
+export {
+  maybeSendDiscordViaMux,
+  maybeSendWhatsAppViaMux,
+  resolveTelegramMuxTransportOpts,
+} from "../channels/plugins/outbound/mux-overlay.js";
+export {
+  resolvePayloadTextAndMedia,
+  sendPayloadWithMediaSequence,
+  type PayloadSendSequenceStep,
+} from "../channels/plugins/outbound/payload-sequence.js";
 export type { MuxTransportOpts } from "../telegram/send.js";
 
 // Media utilities

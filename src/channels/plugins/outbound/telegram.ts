@@ -3,27 +3,11 @@ import {
   parseTelegramReplyToMessageId,
   parseTelegramThreadId,
 } from "../../../telegram/outbound-params.js";
-import { sendMessageTelegram, type MuxTransportOpts } from "../../../telegram/send.js";
+import { sendMessageTelegram } from "../../../telegram/send.js";
 import { type TelegramButtons } from "../mux-envelope.js";
 import type { ChannelOutboundAdapter } from "../types.js";
-import { isMuxEnabled } from "./mux.js";
-
-function resolveMuxOpts(params: {
-  cfg: Parameters<typeof isMuxEnabled>[0]["cfg"];
-  accountId?: string | null;
-  sessionKey?: string | null;
-}): MuxTransportOpts | undefined {
-  if (
-    !isMuxEnabled({
-      cfg: params.cfg,
-      channel: "telegram",
-      accountId: params.accountId ?? undefined,
-    })
-  ) {
-    return undefined;
-  }
-  return { cfg: params.cfg, sessionKey: params.sessionKey ?? "" };
-}
+import { resolveTelegramMuxTransportOpts } from "./mux-overlay.js";
+import { resolvePayloadTextAndMedia, sendPayloadWithMediaSequence } from "./payload-sequence.js";
 
 export const telegramOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
@@ -33,7 +17,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
   sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, sessionKey }) => {
     const replyToMessageId = parseTelegramReplyToMessageId(replyToId);
     const messageThreadId = parseTelegramThreadId(threadId);
-    const mux = resolveMuxOpts({ cfg, accountId, sessionKey });
+    const mux = resolveTelegramMuxTransportOpts({ cfg, accountId, sessionKey });
     const send = deps?.sendTelegram ?? sendMessageTelegram;
     const result = await send(to, text, {
       verbose: false,
@@ -59,7 +43,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
   }) => {
     const replyToMessageId = parseTelegramReplyToMessageId(replyToId);
     const messageThreadId = parseTelegramThreadId(threadId);
-    const mux = resolveMuxOpts({ cfg, accountId, sessionKey });
+    const mux = resolveTelegramMuxTransportOpts({ cfg, accountId, sessionKey });
     const send = deps?.sendTelegram ?? sendMessageTelegram;
     const result = await send(to, text, {
       verbose: false,
@@ -91,14 +75,9 @@ export const telegramOutbound: ChannelOutboundAdapter = {
       | undefined;
     const quoteText =
       typeof telegramData?.quoteText === "string" ? telegramData.quoteText : undefined;
-    const text = payload.text ?? "";
-    const mediaUrls = payload.mediaUrls?.length
-      ? payload.mediaUrls
-      : payload.mediaUrl
-        ? [payload.mediaUrl]
-        : [];
+    const { text, mediaUrls } = resolvePayloadTextAndMedia(payload);
 
-    const mux = resolveMuxOpts({ cfg, accountId, sessionKey });
+    const mux = resolveTelegramMuxTransportOpts({ cfg, accountId, sessionKey });
     const send = deps?.sendTelegram ?? sendMessageTelegram;
     const baseOpts = {
       verbose: false,
@@ -111,25 +90,17 @@ export const telegramOutbound: ChannelOutboundAdapter = {
       mux,
     };
 
-    if (mediaUrls.length === 0) {
-      const result = await send(to, text, {
-        ...baseOpts,
-        buttons: telegramData?.buttons,
-      });
-      return { channel: "telegram", ...result };
-    }
-
-    // Telegram allows reply_markup on media; attach buttons only to first send.
-    let finalResult: Awaited<ReturnType<typeof send>> | undefined;
-    for (let i = 0; i < mediaUrls.length; i += 1) {
-      const mediaUrl = mediaUrls[i];
-      const isFirst = i === 0;
-      finalResult = await send(to, isFirst ? text : "", {
-        ...baseOpts,
-        mediaUrl,
-        ...(isFirst ? { buttons: telegramData?.buttons } : {}),
-      });
-    }
-    return { channel: "telegram", ...(finalResult ?? { messageId: "unknown", chatId: to }) };
+    const result = await sendPayloadWithMediaSequence({
+      text,
+      mediaUrls,
+      // Telegram allows reply_markup on media; attach buttons only to first send.
+      sendSingle: async ({ text, mediaUrl, isFirst }) =>
+        await send(to, text, {
+          ...baseOpts,
+          mediaUrl,
+          ...(isFirst ? { buttons: telegramData?.buttons } : {}),
+        }),
+    });
+    return { channel: "telegram", ...result };
   },
 };
