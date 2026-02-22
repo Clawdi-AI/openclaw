@@ -161,3 +161,31 @@ TELEGRAM_E2E_GROUP_ID=<supergroup_id> bash phala-deploy/local-mux-e2e/scripts/e2
 - [ ] Tapping a button → processes command correctly (callback flow)
 - [ ] Regular message → streams via draft-stream as before
 - [ ] `/status` → returns status text (no argsMenu, goes through directive handling)
+
+## Metrics
+
+Three metrics track the health of the mux fork:
+
+- **Fidelity** — Does the mux path match the direct bot path, feature-by-feature? Scored as `(pass + 0.5 × partial) / (total − na) × 100`. Higher is better. See the full feature checklist in `patch-metrics.config.json`.
+- **Patch size** — Lines changed in files that already exist upstream (modified only). Lower is better — smaller patches are easier to rebase when upstream moves.
+- **Complexity** — Total code footprint of the fork (all insertions + deletions vs the reference tag). Tracks overall growth.
+
+### Configuration
+
+File groups and the fidelity checklist live in [`patch-metrics.config.json`](../patch-metrics.config.json). Groups use glob patterns to bucket changed files into `mux-upstream` (patches to existing code), `mux-new` (new mux files), and `phala-deploy`.
+
+### Running
+
+```bash
+# Human-readable summary
+pnpm metrics:patch
+
+# Machine-readable JSON
+pnpm metrics:patch -- --json
+
+# Compare HEAD against another branch (e.g. main)
+pnpm metrics:patch -- --compare main
+
+# Override reference tag and commit
+pnpm metrics:patch -- --ref v2026.2.17 --commit abc123
+```

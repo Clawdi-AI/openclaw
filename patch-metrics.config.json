@@ -1,0 +1,135 @@
+{
+  "defaultRef": "v2026.2.17",
+  "groups": [
+    {
+      "id": "mux-upstream",
+      "label": "Mux (upstream patches)",
+      "globs": [
+        "src/auto-reply/**",
+        "src/agents/tools/telegram-actions.ts",
+        "src/channels/plugins/actions/telegram.ts",
+        "src/infra/device-identity.state-dir.test.ts",
+        "src/infra/device-identity.ts",
+        "src/infra/outbound/**",
+        "src/telegram/send.ts",
+        "src/telegram/draft-stream.ts",
+        "src/telegram/draft-stream.test.ts",
+        "src/telegram/bot-message-dispatch.ts",
+        "src/telegram/bot-message-dispatch.test.ts",
+        "src/telegram/bot-access.ts",
+        "src/telegram/bot.create-telegram-bot.test.ts",
+        "src/telegram/callback-actions.ts",
+        "src/channels/plugins/outbound/telegram.ts",
+        "src/channels/plugins/outbound/discord.ts",
+        "src/channels/plugins/outbound/whatsapp.ts",
+        "src/channels/plugins/mux-envelope.ts",
+        "src/channels/plugins/types.*.ts",
+        "src/gateway/server-http.ts",
+        "src/gateway/server.impl.ts",
+        "src/config/types.*.ts",
+        "src/plugin-sdk/**",
+        "src/web/inbound/monitor.ts",
+        "src/web/outbound.ts",
+        "extensions/*/src/channel.ts"
+      ]
+    },
+    {
+      "id": "mux-new",
+      "label": "Mux (new files)",
+      "globs": [
+        "mux-server/**",
+        "src/gateway/mux-*",
+        "src/channels/plugins/outbound/mux*",
+        "src/config/types.mux.ts",
+        "extensions/*/src/mux-sendpayload.test.ts"
+      ]
+    },
+    {
+      "id": "phala-deploy",
+      "label": "Phala Deploy",
+      "globs": ["phala-deploy/**"]
+    },
+    {
+      "id": "docs-providers",
+      "label": "Docs (providers)",
+      "globs": ["docs/providers/**"]
+    },
+    {
+      "id": "repo-meta",
+      "label": "Repo metadata/tooling",
+      "globs": [
+        ".agents/**",
+        ".gitignore",
+        "AGENTS.md",
+        "package.json",
+        "pnpm-lock.yaml",
+        "tsdown.config.ts"
+      ]
+    },
+    {
+      "id": "composio",
+      "label": "Composio integration",
+      "globs": ["scripts/e2e/composio-inject-docker.sh", "skills/composio/**"]
+    },
+    {
+      "id": "model",
+      "label": "Model integration",
+      "globs": [
+        "src/agents/model-auth.ts",
+        "src/agents/models-config.providers.ts",
+        "src/agents/redpill-models.ts",
+        "src/agents/redpill-models.test.ts",
+        "src/agents/pi-embedded-runner-extraparams.e2e.test.ts",
+        "src/agents/pi-embedded-runner/extra-params.ts",
+        "src/config/zod-schema.providers-core.ts",
+        "src/cli/program/register.onboard.ts",
+        "src/commands/auth-choice*.ts",
+        "src/commands/onboard-*.ts",
+        "src/commands/onboard-*/**",
+        "src/config/types.ts",
+        "src/config/zod-schema.ts",
+        "src/config/zod-schema.core.ts",
+        "src/config/zod-schema.providers-whatsapp.ts"
+      ]
+    }
+  ],
+  "scorecards": [
+    {
+      "id": "fidelity",
+      "label": "Fidelity",
+      "excludeFromDenominator": ["na"],
+      "weights": {
+        "pass": 1,
+        "partial": 0.5,
+        "fail": 0,
+        "na": 0
+      },
+      "checks": {
+        "tg-inbound-text": "pass",
+        "tg-inbound-command": "pass",
+        "tg-inbound-argsmenu": "pass",
+        "tg-inbound-callback": "pass",
+        "tg-inbound-media": "pass",
+        "tg-inbound-plugin-commands": "fail",
+        "tg-inbound-reaction": "fail",
+        "tg-inbound-chat-migration": "fail",
+        "tg-inbound-channel-post": "fail",
+        "tg-inbound-sticker-vision": "fail",
+        "tg-inbound-media-group": "partial",
+        "tg-inbound-text-fragment": "partial",
+        "tg-outbound-text": "pass",
+        "tg-outbound-media": "pass",
+        "tg-outbound-edit": "pass",
+        "tg-outbound-delete": "pass",
+        "tg-outbound-reaction": "pass",
+        "tg-outbound-inline-keyboard": "pass",
+        "tg-draft-stream": "pass",
+        "tg-draft-finalize": "pass",
+        "dc-outbound": "pass",
+        "dc-inbound": "pass",
+        "wa-outbound": "pass",
+        "wa-inbound": "pass"
+      }
+    }
+  ]
+}
