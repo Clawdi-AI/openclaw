@@ -26,6 +26,7 @@ import { buildTelegramThreadParams } from "./bot/helpers.js";
 import type { TelegramStreamMode } from "./bot/types.js";
 import type { TelegramInlineButtons } from "./button-types.js";
 import { resolveTelegramDraftStreamingChunking } from "./draft-chunking.js";
+import { createTelegramDraftPreviewController } from "./draft-preview-controller.js";
 import {
   cleanupDraftStream,
   createTelegramDraftStream,
@@ -134,91 +135,12 @@ export const dispatchTelegramMessage = async ({
       ? resolveTelegramDraftStreamingChunking(cfg, route.accountId)
       : undefined;
   const draftChunker = draftChunking ? new EmbeddedBlockChunker(draftChunking) : undefined;
+  const draftPreview = createTelegramDraftPreviewController({
+    draftStream,
+    streamMode,
+    draftChunker,
+  });
   const mediaLocalRoots = getAgentScopedMediaLocalRoots(cfg, route.agentId);
-  let lastPartialText = "";
-  let draftText = "";
-  let hasStreamedMessage = false;
-  const resetDraftBuffers = () => {
-    draftText = "";
-    draftChunker?.reset();
-  };
-  const resetDraftPreviewState = () => {
-    lastPartialText = "";
-    resetDraftBuffers();
-  };
-  const handleDraftBoundary = () => {
-    if (streamMode === "block" && hasStreamedMessage) {
-      draftStream?.forceNewMessage();
-    }
-    resetDraftPreviewState();
-  };
-  const updateDraftFromPartial = (text?: string) => {
-    if (!draftStream || !text) {
-      return;
-    }
-    if (text === lastPartialText) {
-      return;
-    }
-    // Mark that we've received streaming content (for forceNewMessage decision).
-    hasStreamedMessage = true;
-    if (streamMode === "partial") {
-      // Some providers briefly emit a shorter prefix snapshot (for example
-      // "Sure." -> "Sure" -> "Sure."). Keep the longer preview to avoid
-      // visible punctuation flicker.
-      if (
-        lastPartialText &&
-        lastPartialText.startsWith(text) &&
-        text.length < lastPartialText.length
-      ) {
-        return;
-      }
-      lastPartialText = text;
-      draftStream.update(text);
-      return;
-    }
-    let delta = text;
-    if (text.startsWith(lastPartialText)) {
-      delta = text.slice(lastPartialText.length);
-    } else {
-      // Streaming buffer reset (or non-monotonic stream). Start fresh.
-      resetDraftBuffers();
-    }
-    lastPartialText = text;
-    if (!delta) {
-      return;
-    }
-    if (!draftChunker) {
-      draftText = text;
-      draftStream.update(draftText);
-      return;
-    }
-    draftChunker.append(delta);
-    draftChunker.drain({
-      force: false,
-      emit: (chunk) => {
-        draftText += chunk;
-        draftStream.update(draftText);
-      },
-    });
-  };
-  const flushDraft = async () => {
-    if (!draftStream) {
-      return;
-    }
-    if (draftChunker?.hasBuffered()) {
-      draftChunker.drain({
-        force: true,
-        emit: (chunk) => {
-          draftText += chunk;
-        },
-      });
-      draftChunker.reset();
-      if (draftText) {
-        draftStream.update(draftText);
-      }
-    }
-    await draftStream.flush();
-  };
 
   const disableBlockStreaming =
     typeof telegramCfg.blockStreaming === "boolean"
@@ -332,17 +254,16 @@ export const dispatchTelegramMessage = async ({
         ...prefixOptions,
         deliver: async (payload, info) => {
           if (info.kind === "final") {
-            await flushDraft();
+            await draftPreview.flush();
             const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
             const previewButtons = (
               payload.channelData?.telegram as { buttons?: TelegramInlineButtons } | undefined
             )?.buttons;
 
-            const currentPreviewText = streamMode === "block" ? draftText : lastPartialText;
             const draftFinalize = await handleDraftFinalPayload({
               draftStream,
               alreadyFinalizedViaPreview: finalizedViaPreviewMessage,
-              currentPreviewText,
+              currentPreviewText: draftPreview.currentPreviewText(),
               finalText: payload.text,
               hasMedia,
               isError: payload.isError ?? false,
@@ -398,9 +319,11 @@ export const dispatchTelegramMessage = async ({
       replyOptions: {
         skillFilter,
         disableBlockStreaming,
-        onPartialReply: draftStream ? (payload) => updateDraftFromPartial(payload.text) : undefined,
-        onAssistantMessageStart: draftStream ? handleDraftBoundary : undefined,
-        onReasoningEnd: draftStream ? handleDraftBoundary : undefined,
+        onPartialReply: draftStream
+          ? (payload) => draftPreview.updateFromPartial(payload.text)
+          : undefined,
+        onAssistantMessageStart: draftStream ? draftPreview.onBoundary : undefined,
+        onReasoningEnd: draftStream ? draftPreview.onBoundary : undefined,
         onModelSelected,
       },
     }));
