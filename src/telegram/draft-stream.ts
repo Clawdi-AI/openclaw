@@ -253,7 +253,8 @@ export async function handleDraftFinalPayload(params: {
   ) {
     await params.draftStream.stop();
     return {
-      finalizedViaPreview: params.alreadyFinalizedViaPreview,
+      // Keep preview as the delivered final result.
+      finalizedViaPreview: true,
       handledByDraftPath: true,
     };
   }
@@ -282,8 +283,9 @@ export async function cleanupDraftStream(
   draftStream: TelegramDraftStream,
   finalizedViaEdit: boolean,
 ): Promise<void> {
-  await draftStream.stop();
-  if (!finalizedViaEdit) {
-    await draftStream.clear();
+  if (finalizedViaEdit) {
+    await draftStream.stop();
+    return;
   }
+  await draftStream.clear();
 }

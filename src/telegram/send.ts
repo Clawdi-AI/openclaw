@@ -51,6 +51,7 @@ import { resolveTelegramVoiceSend } from "./voice.js";
 type TelegramApi = Bot["api"];
 type TelegramApiOverride = Partial<TelegramApi>;
 export type MuxTransportOpts = TelegramMuxTransportOpts;
+type TelegramMuxTransport = Parameters<typeof sendTelegramMuxRaw>[0]["transport"];
 
 type TelegramSendOpts = {
   token?: string;
@@ -463,12 +464,9 @@ function mediaSenderLabelToMethod(label: string): string {
 async function sendMessageTelegramViaMux(
   to: string,
   text: string,
-  opts: TelegramSendOpts & { mux: MuxTransportOpts },
+  opts: TelegramSendOpts & { transport: TelegramMuxTransport },
 ): Promise<TelegramSendResult> {
-  const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
-  if (!isTelegramMuxTransport(transport)) {
-    throw new Error("sendMessageTelegramViaMux requires mux transport");
-  }
+  const transport = opts.transport;
   const cfg = transport.cfg;
   const target = parseTelegramTarget(to);
   const chatId = normalizeChatId(target.chatId);
@@ -598,7 +596,7 @@ export async function sendMessageTelegram(
 ): Promise<TelegramSendResult> {
   const transport = resolveTelegramTransport({ mux: opts.mux, accountId: opts.accountId });
   if (isTelegramMuxTransport(transport)) {
-    return sendMessageTelegramViaMux(to, text, { ...opts, mux: transport });
+    return sendMessageTelegramViaMux(to, text, { ...opts, transport });
   }
 
   const { cfg, account, api } = resolveTelegramApiContext(opts);

@@ -4,7 +4,6 @@ import { sendPollWhatsApp } from "../../../web/outbound.js";
 import { resolveWhatsAppOutboundTarget } from "../../../whatsapp/resolve-outbound-target.js";
 import type { ChannelOutboundAdapter } from "../types.js";
 import { maybeSendWhatsAppViaMux } from "./mux-overlay.js";
-import { isMuxEnabled } from "./mux.js";
 
 export const whatsappOutbound: ChannelOutboundAdapter = {
   deliveryMode: "gateway",
@@ -70,23 +69,16 @@ export const whatsappOutbound: ChannelOutboundAdapter = {
     return { channel: "whatsapp", ...sendResult };
   },
   sendPoll: async ({ cfg, to, poll, accountId, sessionKey }) => {
-    if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
-      if (!sessionKey?.trim()) {
-        throw new Error(
-          "whatsapp mux poll delivery requires sessionKey; use routed replies instead",
-        );
-      }
-      const result = await maybeSendWhatsAppViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text: "",
-        poll,
-      });
-      if (result) {
-        return { channel: "whatsapp", ...result };
-      }
+    const result = await maybeSendWhatsAppViaMux({
+      cfg,
+      accountId,
+      sessionKey,
+      to,
+      text: "",
+      poll,
+    });
+    if (result) {
+      return { channel: "whatsapp", ...result };
     }
     return await sendPollWhatsApp(to, poll, {
       verbose: shouldLogVerbose(),

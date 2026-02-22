@@ -306,7 +306,6 @@ describe("dispatchTelegramMessage draft streaming", () => {
       }),
     );
     expect(draftStream.clear).toHaveBeenCalledTimes(1);
-    expect(draftStream.stop).toHaveBeenCalled();
   });
 
   it("disables block streaming when streamMode is off", async () => {
@@ -489,5 +488,26 @@ describe("dispatchTelegramMessage draft streaming", () => {
         replies: [expect.objectContaining({ text: expect.stringContaining("⚠️") })],
       }),
     );
+  });
+
+  it("keeps richer preview when final text regresses", async () => {
+    const draftStream = createDraftStream(999);
+    createTelegramDraftStream.mockReturnValue(draftStream);
+    dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
+      async ({ dispatcherOptions, replyOptions }) => {
+        await replyOptions?.onPartialReply?.({ text: "Short with detail" });
+        await dispatcherOptions.deliver({ text: "Short" }, { kind: "final" });
+        return { queuedFinal: true };
+      },
+    );
+    deliverReplies.mockResolvedValue({ delivered: true });
+    editMessageTelegram.mockResolvedValue({ ok: true, chatId: "123", messageId: "999" });
+
+    await dispatchWithContext({ context: createContext(), streamMode: "partial" });
+
+    expect(editMessageTelegram).not.toHaveBeenCalled();
+    expect(deliverReplies).not.toHaveBeenCalled();
+    expect(draftStream.clear).not.toHaveBeenCalled();
+    expect(draftStream.stop).toHaveBeenCalled();
   });
 });

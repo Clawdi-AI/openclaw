@@ -2,7 +2,6 @@ import { sendMessageDiscord, sendPollDiscord } from "../../../discord/send.js";
 import { normalizeDiscordOutboundTarget } from "../normalize/discord.js";
 import type { ChannelOutboundAdapter } from "../types.js";
 import { maybeSendDiscordViaMux } from "./mux-overlay.js";
-import { isMuxEnabled } from "./mux.js";
 
 export const discordOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
@@ -67,23 +66,16 @@ export const discordOutbound: ChannelOutboundAdapter = {
     return { channel: "discord", ...sendResult };
   },
   sendPoll: async ({ cfg, to, poll, accountId, silent, sessionKey }) => {
-    if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
-      if (!sessionKey?.trim()) {
-        throw new Error(
-          "discord mux poll delivery requires sessionKey; use routed replies instead",
-        );
-      }
-      const result = await maybeSendDiscordViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text: "",
-        poll,
-      });
-      if (result) {
-        return { channel: "discord", ...result };
-      }
+    const result = await maybeSendDiscordViaMux({
+      cfg,
+      accountId,
+      sessionKey,
+      to,
+      text: "",
+      poll,
+    });
+    if (result) {
+      return { channel: "discord", ...result };
     }
     return await sendPollDiscord(to, poll, {
       accountId: accountId ?? undefined,
