@@ -106,6 +106,8 @@ require_cmd npm
 [[ -f "$COMPOSE_FILE" ]] || die "compose file not found: $COMPOSE_FILE"
 
 IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
+PKG_VERSION="$(node -p "require('${ROOT_DIR}/package.json').version")"
+VERSION_REF="${IMAGE_REPO}:${PKG_VERSION}"
 
 if [[ "$NO_BUILD" -eq 0 ]]; then
   log "building OpenClaw package tarball"
@@ -129,12 +131,13 @@ if [[ "$NO_BUILD" -eq 0 ]]; then
   fi
 fi
 
-log "building Docker image: $IMAGE_REF"
-run docker build -f "$SCRIPT_DIR/Dockerfile" -t "$IMAGE_REF" "$ROOT_DIR"
+log "building Docker image: $IMAGE_REF (version: $PKG_VERSION)"
+run docker build -f "$SCRIPT_DIR/Dockerfile" -t "$IMAGE_REF" -t "$VERSION_REF" "$ROOT_DIR"
 
 if [[ "$NO_PUSH" -eq 0 ]]; then
-  log "pushing Docker image: $IMAGE_REF"
+  log "pushing Docker image: $IMAGE_REF + $VERSION_REF"
   run docker push "$IMAGE_REF"
+  run docker push "$VERSION_REF"
 fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -153,11 +156,13 @@ DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_REF")"
 log "resolved digest: $DIGEST"
 
 TMP_FILE="$(mktemp)"
-awk -v digest="$DIGEST" '
+awk -v digest="$DIGEST" -v ver="$VERSION_REF" '
   BEGIN { updated = 0 }
   {
     if (!updated && $1 == "image:") {
-      print "    image: " digest
+      # Use name:tag@digest format — digest pins the pull, tag is human-readable
+      split(digest, parts, "@")
+      print "    image: " ver "@" parts[2]
       updated = 1
       next
     }

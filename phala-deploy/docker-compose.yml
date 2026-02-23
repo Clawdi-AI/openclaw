@@ -1,6 +1,6 @@
 services:
   openclaw:
-    image: h4x3rotab/openclaw-cvm@sha256:36f85260e6720e7201aaeef111d24f77e50d84047cd9b645a125806fcc6713fc
+    image: h4x3rotab/openclaw-cvm:2026.2.17-phala.2@sha256:e7c2cd531a99b514522d8e16c8862875692361f92ae4a40784f3dc1ee71f3c6b
     # For local builds, uncomment below and comment out image:
     # build:
     #   context: ..

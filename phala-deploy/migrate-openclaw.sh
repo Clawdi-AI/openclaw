@@ -7,6 +7,7 @@
 #
 # Usage:
 #   rv-exec COMPOSEIO_ADMIN_API -- bash phala-deploy/migrate-openclaw.sh <CVM_ID>
+#   bash phala-deploy/migrate-openclaw.sh --ssh-key ~/.ssh/mykey <CVM_ID>
 #
 # Migrations:
 #   composio   — if COMPOSEIO_ADMIN_API is set and config is missing
@@ -19,15 +20,25 @@ ok()   { printf '\033[1;32m[migrate] ✓\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[migrate] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 CVM_ID=""
+SSH_KEY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) sed -n '2,/^[^#]/{ /^#/s/^# \?//p }' "$0"; exit 0 ;;
+    --ssh-key) SSH_KEY="${2:?--ssh-key requires a path}"; shift 2 ;;
     -*) die "unknown option: $1" ;;
     *)  CVM_ID="$1"; shift ;;
   esac
 done
 
-[[ -n "$CVM_ID" ]] || die "usage: migrate-openclaw.sh <CVM_ID>"
+[[ -n "$CVM_ID" ]] || die "usage: migrate-openclaw.sh [--ssh-key <path>] <CVM_ID>"
+
+# Build extra args for phala ssh (after --) and phala cp (before args)
+SSH_ARGS=()
+CP_ARGS=()
+if [[ -n "$SSH_KEY" ]]; then
+  SSH_ARGS+=(-i "$SSH_KEY")
+  CP_ARGS+=(-i "$SSH_KEY")
+fi
 
 REMOTE_CFG="/root/.openclaw/openclaw.json"
 REMOTE_TMP="/tmp/openclaw.json"
@@ -37,9 +48,9 @@ trap 'rm -f "$LOCAL_TMP"' EXIT
 # ── download openclaw.json ──────────────────────────────────────────────────
 
 log "Downloading openclaw.json from CVM ${CVM_ID}..."
-phala ssh "$CVM_ID" -- docker cp "openclaw:${REMOTE_CFG}" "$REMOTE_TMP" \
+phala ssh "$CVM_ID" -- "${SSH_ARGS[@]}" docker cp "openclaw:${REMOTE_CFG}" "$REMOTE_TMP" \
   || die "docker cp from container failed"
-phala cp "${CVM_ID}:${REMOTE_TMP}" "$LOCAL_TMP" \
+phala cp "${CP_ARGS[@]}" "${CVM_ID}:${REMOTE_TMP}" "$LOCAL_TMP" \
   || die "phala cp download failed"
 ok "Downloaded openclaw.json ($(wc -c < "$LOCAL_TMP") bytes)"
 
@@ -119,6 +130,51 @@ else
   log "Migration: brave-search — skipped (no BRAVE_SEARCH_API_KEY)"
 fi
 
+# --- Migration: openai-codex provider ---
+log "Migration: codex-provider..."
+CODEX_MOCK_JWT="eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF9zdWIyYXBpX3Byb3h5In0sImV4cCI6OTk5OTk5OTk5OX0." \
+node -e '
+  const fs = require("fs");
+  function main() {
+    const cfgPath = process.argv[1];
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    const providers = cfg.models?.providers;
+    if (!providers) { console.log("  codex-provider: no providers block, skipping."); return; }
+
+    if (providers["openai-codex"] && !providers["openai"]) {
+      console.log("  codex-provider: already migrated, skipping.");
+      return;
+    }
+
+    const old = providers["openai"];
+    if (!old) { console.log("  codex-provider: no openai provider found, skipping."); return; }
+
+    const realApiKey = old.apiKey || "";
+    providers["openai-codex"] = {
+      baseUrl: old.baseUrl,
+      apiKey: process.env.CODEX_MOCK_JWT,
+      headers: { "x-api-key": realApiKey },
+      models: old.models || [],
+    };
+    delete providers["openai"];
+
+    const defaults = cfg.agents?.defaults;
+    if (defaults?.models) {
+      if (defaults.models["openai/gpt-5.2-codex"]) {
+        defaults.models["openai-codex/gpt-5.3-codex"] = { alias: "Codex" };
+        delete defaults.models["openai/gpt-5.2-codex"];
+      }
+    }
+    if (defaults?.model?.primary === "openai/gpt-5.2-codex") {
+      defaults.model.primary = "openai-codex/gpt-5.3-codex";
+    }
+
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+    console.log("  codex-provider: migrated (openai -> openai-codex)");
+  }
+  main();
+' "$LOCAL_TMP" || die "codex-provider migration failed"
+
 # --- (future migrations go here) ---
 
 # ── upload if changed ───────────────────────────────────────────────────────
@@ -131,9 +187,9 @@ if [[ "$CHECKSUM_BEFORE" == "$CHECKSUM_AFTER" ]]; then
 fi
 
 log "Uploading openclaw.json to CVM..."
-phala cp "$LOCAL_TMP" "${CVM_ID}:${REMOTE_TMP}" \
+phala cp "${CP_ARGS[@]}" "$LOCAL_TMP" "${CVM_ID}:${REMOTE_TMP}" \
   || die "phala cp upload failed"
-phala ssh "$CVM_ID" -- docker cp "${REMOTE_TMP}" "openclaw:${REMOTE_CFG}" \
+phala ssh "$CVM_ID" -- "${SSH_ARGS[@]}" docker cp "${REMOTE_TMP}" "openclaw:${REMOTE_CFG}" \
   || die "docker cp into container failed"
 
 ok "Done — openclaw.json migrated on CVM ${CVM_ID}"
