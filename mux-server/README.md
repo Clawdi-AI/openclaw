@@ -55,7 +55,7 @@ This repo now has 3 mux-related pieces:
 
 - External mux service implementation (this directory)
 - Telegram + Discord + WhatsApp outbound + inbound forwarding
-- Shared payload contract helpers live in `src/channels/plugins/mux-envelope.ts` and are re-exported by `mux-server/src/mux-envelope.ts` so OpenClaw and mux-server stay in lockstep.
+- Shared payload contract helpers live in `src/channels/plugins/mux-envelope.ts`; `mux-server/src/mux-envelope.ts` is a versioned local copy synced from that source so OpenClaw and mux-server stay in lockstep.
 
 In short: OpenClaw inbound/outbound adapters are in `src/`; the standalone mux service is here.
 
@@ -86,8 +86,6 @@ node --import tsx mux-server/src/server.ts
 - `DISCORD_BOT_TOKEN` (required for Discord transport): Discord bot token.
 - `MUX_REGISTER_KEY` (optional): enables instance-centric runtime auth via `POST /v1/instances/register`.
 - `MUX_JWT_PRIVATE_KEY` (optional): Ed25519 private key PEM for stable JWT signing across restarts.
-- `MUX_API_KEY` (optional, legacy): seeds a single API-key tenant (`tenant-default`).
-- `MUX_TENANTS_JSON` (optional, legacy): JSON array for multi-tenant API-key auth seed.
 - `MUX_ADMIN_TOKEN` (optional): enables admin-only endpoints (for example `POST /v1/admin/pairings/token`, `GET /v1/admin/whatsapp/health`).
 - `MUX_PUBLIC_URL` (optional): public base URL for proxy endpoints (e.g. `https://mux.example.com`). Defaults to `http://<MUX_HOST>:<MUX_PORT>`. Used to construct file proxy URLs in inbound attachment metadata.
 - `MUX_HOST` (default `127.0.0.1`)
@@ -96,7 +94,6 @@ node --import tsx mux-server/src/server.ts
 - `MUX_DB_PATH` (default `./mux-server/data/mux-server.sqlite`)
 - `MUX_IDEMPOTENCY_TTL_MS` (default `600000`)
 - `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
-- `MUX_OPENCLAW_INBOUND_URL` (optional, legacy default tenant only): OpenClaw mux inbound URL.
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
 - `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events (recommended: `mux`).
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
@@ -124,27 +121,9 @@ node --import tsx mux-server/src/server.ts
 - `MUX_PAIRING_INVALID_TEXT` (default `Pairing link is invalid or expired. Request a new link from your dashboard.`): message sent when token is invalid/reused/expired.
 - `MUX_UNPAIRED_HINT_TEXT` (default `This chat is not paired yet. Open your dashboard and use a new pairing link.`): message sent when unpaired chat sends slash command (for example `/help`).
 
-`MUX_TENANTS_JSON` format:
-
-```json
-[
-  {
-    "id": "tenant-a",
-    "name": "Tenant A",
-    "apiKey": "tenant-a-key",
-    "inboundUrl": "http://127.0.0.1:18789/v1/mux/inbound",
-    "inboundTimeoutMs": 15000
-  },
-  { "id": "tenant-b", "name": "Tenant B", "apiKey": "tenant-b-key" }
-]
-```
-
 Notes:
 
-- Instance-centric runtime auth is the recommended model:
-  - OpenClaw registers itself via `POST /v1/instances/register` (shared `MUX_REGISTER_KEY`).
-  - OpenClaw uses the returned runtime JWT for mux APIs (`/v1/pairings/*`, `/v1/mux/outbound/send`).
-  - mux uses a separate short-lived inbound JWT for mux -> OpenClaw delivery; OpenClaw validates via JWKS.
+- Auth model: OpenClaw registers via `POST /v1/instances/register` (shared `MUX_REGISTER_KEY`) and uses the returned runtime JWT for mux APIs (`/v1/pairings/*`, `/v1/mux/outbound/send`). Mux uses a separate short-lived inbound JWT per delivery; OpenClaw validates via JWKS.
 - Inbound listeners are auto-enabled by capability:
 - Telegram when `TELEGRAM_BOT_TOKEN` is set.
 - Discord when `DISCORD_BOT_TOKEN` is set.
@@ -220,7 +199,7 @@ Example:
 
 How this works:
 
-- direct inbound/outbound uses `default` account (legacy/non-mux behavior)
+- direct inbound/outbound uses `default` account (non-mux behavior)
 - mux inbound is forwarded by mux-server with `accountId=mux`
 - mux outbound is selected only when OpenClaw context has `AccountId=mux`
 - result: direct and mux traffic run side-by-side without touching each other
@@ -248,7 +227,7 @@ How this works:
 
 Headers:
 
-- `Authorization: Bearer <tenant_api_key>`
+- `Authorization: Bearer <runtime_jwt>`
 - Optional: `Idempotency-Key: <stable-request-id>`
 
 Body:
@@ -306,7 +285,7 @@ Transport contract:
 
 Headers:
 
-- `Authorization: Bearer <tenant_api_key>`
+- `Authorization: Bearer <runtime_jwt>`
 
 Body:
 
@@ -450,7 +429,7 @@ Proposal:
 
 Headers:
 
-- `Authorization: Bearer <tenant_api_key>`
+- `Authorization: Bearer <runtime_jwt>`
 
 Response `200`:
 
@@ -471,7 +450,7 @@ Response `200`:
 
 Headers:
 
-- `Authorization: Bearer <tenant_api_key>`
+- `Authorization: Bearer <runtime_jwt>`
 
 Body:
 
@@ -648,7 +627,6 @@ Implementation checklist:
 - [x] WhatsApp: enqueue first, then forward worker marks done only on success
 - [x] WhatsApp: retry queue items with backoff; do not drop on first failure
 - [x] Logging: explicit `ack_committed` and `retry_deferred` events per channel
-- [ ] Tests: add WhatsApp failure-then-retry regression test
 
 Out of scope for this pass:
 
@@ -813,28 +791,96 @@ MUX_EXPECT_STATUS=200 \
 pnpm --dir mux-server smoke
 ```
 
-Current test coverage (`mux-server/test/server.test.ts`):
+Current test coverage (`mux-server/test/server.test.ts`, 48 tests):
+
+**Auth & infrastructure:**
 
 - health endpoint responds
 - instance register endpoint requires shared register key and returns runtime jwt metadata
-- jwks endpoint responds
+- admin pairing token endpoint requires admin auth and issues token (control-plane flow)
+- runtime jwt auth enforces openclaw identity on outbound endpoints
 - outbound endpoint rejects unauthorized requests
-- multi-tenant auth via `MUX_TENANTS_JSON`
-- pairing claim/list/unbind flow
-- duplicate pairing claim conflict handling
+- returns 400 for invalid JSON body
+- returns 413 when request body exceeds max size
+- admin whatsapp health endpoint requires admin auth
+- admin whatsapp health endpoint reports credential presence
+
+**Registration & routing:**
+
 - instance register updates inbound target and forwards to latest inbound url
-- outbound route resolution from `(tenant, channel, sessionKey)` mapping
-- Telegram inbound forwarding to tenant inbound endpoint
-- Telegram retry without offset advance on failed forward
-- Telegram media-only inbound forwarding with attachment payload preservation
-- Discord inbound forwarding with raw payload + media attachment preservation (URL passthrough)
-- Discord retry without replaying already-acked earlier messages
+- outbound resolves route from (tenant, channel, sessionKey) mapping
+
+**Pairing:**
+
+- supports pairing claim/list/unbind
+- rejects duplicate pairing claim
+- rejects cross-tenant route collisions during pairing claim
 - dashboard token pairing via `/start <token>` then forwarding subsequent messages
-- idempotency replay + payload mismatch handling
-- idempotency persistence across process restart
+- pairs telegram DM threads once and isolates sessions per thread
+- maps forum general topic to thread 1 and omits message_thread_id on sendMessage
+- pairs from dashboard token sent in discord DM and forwards later message
+- maps discord guild threads to thread-scoped sessions from route-less pairing
+- allows multiple discord pairing tokens without route pre-locking
+- does not consume discord token when first claim attempt is invalid
+- issues whatsapp pairing token without deep link or start command
 
-Envelope tests (`mux-server/test/mux-envelope.test.ts`):
+**Telegram outbound:**
 
-- normalization of url-only, content-only, and dual (url+content) attachments
-- rejection of attachments with neither content nor url
-- Discord inbound envelope with url-based attachments
+- telegram outbound requires raw envelope
+- telegram outbound raw envelope preserves body and enforces route lock
+- telegram outbound raw editMessageText keeps route lock and skips thread id injection
+- telegram outbound raw sendDocument passthrough with route lock
+- telegram outbound raw setMessageReaction injects chat_id but not thread_id
+- telegram outbound raw setMyCommands skips chat_id injection
+- telegram typing action via /send sends chat action for bound route
+
+**Discord outbound:**
+
+- discord outbound raw envelope forwards body unchanged
+- discord outbound requires raw envelope
+- sends discord outbound through guild-bound route and enforces guild lock
+- sends discord outbound through dm-bound route
+- discord typing action via /send triggers typing on bound DM route
+- acks discord invalid pairing token message to avoid replay spam
+
+**WhatsApp outbound:**
+
+- whatsapp outbound accepts text envelope
+- whatsapp outbound returns 502 when no active listener is available
+- whatsapp typing action via /send tries composing on bound route
+
+**Telegram inbound:**
+
+- forwards inbound Telegram updates to tenant inbound endpoint
+- forwards Telegram callback queries without transport rewriting
+- retries Telegram inbound without advancing offset when forward fails
+- forwards media-only Telegram photo updates with attachment payload
+
+**Discord inbound:**
+
+- forwards inbound Discord DM messages with raw payload and media attachment
+- retries Discord failed message without replaying already-acked earlier message
+
+**Bot control commands:**
+
+- telegram bot control commands support help, status, unpair, and switch
+- discord bot control commands support status, unpair, and switch on an active route
+
+**Idempotency:**
+
+- idempotency replays same payload and rejects mismatched payload
+- idempotency survives restart with SQLite
+
+Envelope tests (`mux-server/test/mux-envelope.test.ts`, 11 tests):
+
+- preserves raw outbound text
+- preserves outbound media url order and duplicates
+- parses outbound action envelope
+- builds telegram inbound envelope without rewriting body
+- builds telegram callback envelope with raw callback event
+- builds discord inbound envelope with url attachments
+- builds whatsapp inbound envelope without rewriting body
+- normalizeMuxInboundAttachments accepts url-only attachments
+- normalizeMuxInboundAttachments accepts content-only attachments
+- normalizeMuxInboundAttachments rejects attachments with neither content nor url
+- normalizeMuxInboundAttachments accepts attachments with both content and url

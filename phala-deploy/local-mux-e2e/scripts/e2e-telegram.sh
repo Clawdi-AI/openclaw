@@ -33,6 +33,11 @@ for envfile in "${STACK_DIR}/.env.local" "${REPO_ROOT}/.env.local"; do
   fi
 done
 
+# Accept alias name for local e2e token.
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_BOT_TOKEN_E2E:-}" ]]; then
+  export TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN_E2E}"
+fi
+
 # Resolve TELEGRAM_BOT_TOKEN from mux-server container if not in env.
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   TELEGRAM_BOT_TOKEN="$(docker exec mux-server-local-e2e printenv TELEGRAM_BOT_TOKEN 2>/dev/null)" || true
@@ -382,7 +387,7 @@ if [[ -n "${e2e_openclaw_id}" ]]; then
   runtime_token="$(echo "${register_response}" | jq -r '.runtimeToken // empty')" || true
 fi
 
-user_chat_id="$(compose exec -T mux-server grep -oP '"telegram_pairing_token_claimed".*"routeKey":"telegram:default:chat:\K[0-9]+' \
+user_chat_id="$(compose exec -T mux-server grep -oP '"telegram_pairing_token_(claimed|ignored_bound_route)".*"routeKey":"telegram:default:chat:\K[0-9]+' \
   "${MUX_LOG}" 2>/dev/null | tail -1)" || true
 
 file_id=""

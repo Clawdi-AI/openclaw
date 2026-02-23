@@ -58,7 +58,7 @@ Optional env vars for `gen-cvm-config.sh`:
 | `MODEL_BASE_URL` | _(omitted)_ | AI provider base URL |
 | `MODEL_API_KEY`  | _(omitted)_ | AI provider API key  |
 
-> **Tip:** With [Redpill Vault](https://github.com/aspect-build/redpill-vault), pull secrets from the vault instead of passing them inline:
+> **Optional:** With [Redpill Vault](https://github.com/aspect-build/redpill-vault), you can populate env vars via `rv-exec` instead of passing them inline:
 >
 > ```sh
 > OPENCLAW_CONFIG_B64=$(rv-exec --project openclaw \
@@ -90,7 +90,7 @@ Local-only mode only needs `MASTER_KEY`, `REDPILL_API_KEY`, and `OPENCLAW_CONFIG
 
 Get a Redpill API key at [redpill.ai](https://redpill.ai). This gives access to GPU TEE models (DeepSeek, Qwen, Llama, etc.) with end-to-end encrypted inference.
 
-> **Tip:** With Redpill Vault, generate the env file from vault secrets:
+> **Optional:** With Redpill Vault, generate the env file from vault secrets:
 >
 > ```sh
 > rv-exec --dotenv /tmp/deploy.env \
@@ -133,14 +133,14 @@ phala deploy \
 
 The `-e /tmp/deploy.env` flag passes your secrets as encrypted environment variables. They are injected at runtime and never stored in plaintext.
 
-The CLI will output your CVM ID and dashboard URL. Save these.
+The CLI will output your CVM details and dashboard URL. Save these.
 
 ### 7. Verify
 
 Check the container logs:
 
 ```sh
-phala logs openclaw --cvm-id <your-cvm-name-or-uuid>
+phala logs openclaw --cvm-id <your-cvm-name>
 ```
 
 **S3 mode** — you should see:
@@ -197,18 +197,21 @@ Runtime JWT contract details: `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`.
 Once the CVM is running, generate a pairing token to link a chat to your instance:
 
 ```sh
-./phala-deploy/mux-pair-token.sh telegram
+./phala-deploy/mux-pair-token.sh \
+  --openclaw-cvm openclaw-dev \
+  --mux-cvm openclaw-mux-dev \
+  telegram
 ```
 
 This calls `POST /v1/admin/pairings/token` on the mux-server. Send the returned token as a message in the Telegram bot to complete pairing.
 
 ### Manual pairing (without mux-pair-token.sh)
 
-If you don't have `.env.rollout-targets`, issue tokens directly:
+If you want to issue tokens directly, use:
 
 ```sh
 # 1. Get the device ID from the OpenClaw CVM
-phala ssh <openclaw-cvm-id> -- \
+phala ssh <openclaw-cvm-name> -- \
   'docker exec openclaw cat /root/.openclaw/identity/device.json' \
   | jq -r .deviceId
 
@@ -236,18 +239,18 @@ Use `phala ssh` and `phala cp` to transfer files — this works even on images w
 
 ```sh
 # 1. Download: container → CVM host → local
-phala ssh <cvm-id> -- docker cp openclaw:/root/.openclaw/openclaw.json /tmp/openclaw.json
-phala cp <cvm-id>:/tmp/openclaw.json ./openclaw.json
+phala ssh <cvm-name> -- docker cp openclaw:/root/.openclaw/openclaw.json /tmp/openclaw.json
+phala cp <cvm-name>:/tmp/openclaw.json ./openclaw.json
 
 # 2. Edit locally
 vi ./openclaw.json   # or jq, node -e, etc.
 
 # 3. Upload: local → CVM host → container
-phala cp ./openclaw.json <cvm-id>:/tmp/openclaw.json
-phala ssh <cvm-id> -- docker cp /tmp/openclaw.json openclaw:/root/.openclaw/openclaw.json
+phala cp ./openclaw.json <cvm-name>:/tmp/openclaw.json
+phala ssh <cvm-name> -- docker cp /tmp/openclaw.json openclaw:/root/.openclaw/openclaw.json
 
 # 4. Restart to pick up changes
-phala ssh <cvm-id> -- docker restart openclaw
+phala ssh <cvm-name> -- docker restart openclaw
 ```
 
 > **Note:** A few fields hot-reload without restart (e.g., `skills`, `agents.defaults.model.primary`), but structural changes (model providers, gateway config) require a container restart.
@@ -272,23 +275,19 @@ Available migrations:
 Usage:
 
 ```sh
-# With Composio API key from vault:
-rv-exec COMPOSEIO_ADMIN_API -- bash phala-deploy/migrate-openclaw.sh <cvm-id>
-
-# With API key directly:
-COMPOSEIO_ADMIN_API=ak_xxx bash phala-deploy/migrate-openclaw.sh <cvm-id>
+COMPOSEIO_ADMIN_API=ak_xxx bash phala-deploy/migrate-openclaw.sh <cvm-name>
 ```
 
 After migration, restart the container so the entrypoint writes the mcporter config:
 
 ```sh
-phala ssh <cvm-id> -- docker restart openclaw
+phala ssh <cvm-name> -- docker restart openclaw
 ```
 
 Verify Composio is working:
 
 ```sh
-phala ssh <cvm-id> -- 'docker exec openclaw mcporter list clawdi-mcp'
+phala ssh <cvm-name> -- 'docker exec openclaw mcporter list clawdi-mcp'
 # Should show 6 tools
 ```
 
@@ -369,26 +368,24 @@ The container runs an SSH daemon on port 1022. The CVM exposes it via the Phala 
 
 ### Setup
 
-Set the SSH host (find `app_id` and `gateway` from the Phala dashboard):
-
-```sh
-export CVM_SSH_HOST=<app_id>-1022.<gateway>.phala.network
-```
-
-Your SSH public key is automatically injected into the container from the CVM host.
+No extra SSH setup is required beyond `phala` CLI auth. Use CVM names directly with `phala ssh` / `phala cp`.
 
 ### Usage
 
 ```sh
 # Interactive shell
-./phala-deploy/cvm-ssh
+phala ssh <cvm-name>
 
 # Run a command
-./phala-deploy/cvm-exec 'openclaw channels status --probe'
+phala ssh <cvm-name> -- docker exec openclaw openclaw channels status --probe
 
-# Copy files to/from the container
-./phala-deploy/cvm-scp pull /root/.openclaw ./backup
-./phala-deploy/cvm-scp push ./backup /root/.openclaw
+# Copy files from container -> local
+phala ssh <cvm-name> -- docker cp openclaw:/root/.openclaw /tmp/openclaw-backup
+phala cp <cvm-name>:/tmp/openclaw-backup ./backup
+
+# Copy files from local -> container
+phala cp ./backup <cvm-name>:/tmp/openclaw-backup
+phala ssh <cvm-name> -- docker cp /tmp/openclaw-backup openclaw:/root/.openclaw
 ```
 
 **Note:** The entrypoint creates symlinks `~/.openclaw → /data/openclaw` and `~/.config → /data/.config`, so `openclaw` commands work without any env var prefixes.
@@ -410,31 +407,48 @@ Two commands: build, then deploy.
 ./phala-deploy/build-pin-openclaw.sh
 ./phala-deploy/build-pin-mux.sh        # only when mux changed
 
-# Deploy OpenClaw CVM
-rv-exec MASTER_KEY REDPILL_API_KEY S3_BUCKET S3_ENDPOINT S3_PROVIDER S3_REGION \
-  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY MUX_REGISTER_KEY \
-  -- bash phala-deploy/deploy-openclaw.sh
+# Deploy OpenClaw CVM (set env vars first)
+export MASTER_KEY=replace-with-master-key
+export REDPILL_API_KEY=replace-with-redpill-key
+export S3_BUCKET=replace-with-bucket
+export S3_ENDPOINT=replace-with-s3-endpoint
+export S3_PROVIDER=Other
+export S3_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=replace-with-access-key-id
+export AWS_SECRET_ACCESS_KEY=replace-with-secret-access-key
+export MUX_REGISTER_KEY=replace-with-shared-register-key
+bash phala-deploy/deploy-openclaw.sh \
+  --openclaw-cvm openclaw-dev \
+  --mux-cvm openclaw-mux-dev
 
-# Deploy mux-server CVM
-rv-exec MUX_REGISTER_KEY MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN_PROD DISCORD_BOT_TOKEN_PROD \
-  -- bash phala-deploy/deploy-mux.sh
+# Deploy mux-server CVM (set env vars first)
+export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
+export TELEGRAM_BOT_TOKEN=replace-with-telegram-token
+export DISCORD_BOT_TOKEN=replace-with-discord-token
+bash phala-deploy/deploy-mux.sh \
+  --openclaw-cvm openclaw-dev \
+  --mux-cvm openclaw-mux-dev
 ```
 
 Both deploy scripts accept `--dry-run`, `--test-only` (smoke tests without deploying), and `--skip-test`.
+Pass CVM names directly to scripts.
 
-All scripts read CVM IDs from `phala-deploy/.env.rollout-targets` (see `cvm-rollout-targets.env.example`).
+- `deploy-openclaw.sh`: requires `--openclaw-cvm` and `--mux-cvm`
+- `deploy-mux.sh`: requires `--mux-cvm`; `--openclaw-cvm` is required when smoke tests run (default and `--test-only`), optional with `--skip-test`
+
+> **Optional:** If you already store secrets in Redpill Vault, you can still wrap deploy commands with `rv-exec` to set env vars before running the scripts.
 
 ### Manual deploy (without deploy-openclaw.sh)
 
-If you manage secrets outside rv vault (e.g., a local env file), deploy manually:
+If you prefer a manual env file flow, deploy manually:
 
 ```sh
-# 1. Build and push a new image (pins digest in docker-compose.yml)
+# 1. Build and push images (pins full-image digest in docker-compose.yml and writes image refs)
 ./phala-deploy/build-pin-openclaw.sh
 
 # 2. Download the existing config from the CVM (preserved across deploys)
-phala ssh <cvm-id> -- docker cp openclaw:/root/.openclaw/openclaw.json /tmp/openclaw.json
-phala cp <cvm-id>:/tmp/openclaw.json ./openclaw.json
+phala ssh <cvm-name> -- docker cp openclaw:/root/.openclaw/openclaw.json /tmp/openclaw.json
+phala cp <cvm-name>:/tmp/openclaw.json ./openclaw.json
 
 # 3. Base64-encode it
 OPENCLAW_CONFIG_B64=$(base64 -w0 ./openclaw.json)
@@ -448,13 +462,13 @@ EOF
 chmod 600 /tmp/deploy.env
 
 # 5. Deploy
-phala deploy --cvm-id <cvm-id> -c phala-deploy/docker-compose.yml -e /tmp/deploy.env
+phala deploy --cvm-id <cvm-name> -c phala-deploy/docker-compose.yml -e /tmp/deploy.env
 
 # 6. Wait for the CVM to come up (image pull can take 5-10 min on a new node)
 phala cvms list    # check status: starting → running
 
 # 7. Verify
-phala ssh <cvm-id> -- docker logs openclaw 2>&1 | grep -iE '(mcporter|Starting|error)'
+phala ssh <cvm-name> -- docker logs openclaw 2>&1 | grep -iE '(mcporter|Starting|error)'
 ```
 
 > **Tip:** If you only need to update the config (not the image), skip steps 1 and 4-5 and use the [download-edit-upload](#modifying-config-on-an-existing-cvm) workflow instead.
@@ -462,8 +476,8 @@ phala ssh <cvm-id> -- docker logs openclaw 2>&1 | grep -iE '(mcporter|Starting|e
 **Verification:** each deploy script runs smoke tests automatically. For manual checks:
 
 ```sh
-./phala-deploy/cvm-exec 'openclaw --version'
-./phala-deploy/cvm-exec 'openclaw channels status --probe'
+phala ssh <cvm-name> -- docker exec openclaw openclaw --version
+phala ssh <cvm-name> -- docker exec openclaw openclaw channels status --probe
 ```
 
 Full runbook with fallback procedures: `phala-deploy/UPDATE_RUNBOOK.md`.
@@ -480,24 +494,23 @@ If your CVM is destroyed (S3 mode only):
 
 ## File reference
 
-| File                     | Purpose                                                           |
-| ------------------------ | ----------------------------------------------------------------- |
-| `Dockerfile`             | CVM image (Ubuntu 24.04 + Node 24 + rclone + Docker-in-Docker)    |
-| `entrypoint.sh`          | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway     |
-| `docker-compose.yml`     | Compose file for `phala deploy`                                   |
-| `mux-server-compose.yml` | Compose file for mux-server CVM deployment                        |
-| `build-pin-openclaw.sh`  | Rebuild tarball + image, push, and pin compose image digest       |
-| `build-pin-mux.sh`       | Rebuild mux image, push, and pin mux compose digest               |
-| `deploy-openclaw.sh`     | Deploy OpenClaw CVM, wait for health, run smoke tests             |
-| `deploy-mux.sh`          | Deploy mux-server CVM, wait for health, run smoke tests           |
-| `migrate-openclaw.sh`    | Apply config migrations to a running CVM via SSH                  |
-| `gen-cvm-config.sh`      | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)   |
-| `mux-pair-token.sh`      | Mint mux pairing token for a tenant OpenClaw instance (admin API) |
-| `UPDATE_RUNBOOK.md`      | Detailed update runbook with fallback procedures                  |
-| `cvm-ssh`                | Interactive SSH into the container                                |
-| `cvm-exec`               | Run a command in the container                                    |
-| `cvm-scp`                | Copy files to/from the container                                  |
-| `S3_STORAGE.md`          | Detailed S3 encryption documentation                              |
+| File                                 | Purpose                                                                                                   |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `Dockerfile`                         | CVM image (Ubuntu 24.04 + Node 24 + rclone + Docker-in-Docker)                                            |
+| `entrypoint.sh`                      | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway                                             |
+| `docker-compose.yml`                 | Compose file for `phala deploy`                                                                           |
+| `image-refs/openclaw-base-image.ref` | Canonical pinned OpenClaw base image ref (`repo:tag@sha256:...`)                                          |
+| `image-refs/openclaw-full-image.ref` | Canonical pinned OpenClaw full image ref (`repo:tag@sha256:...`)                                          |
+| `mux-server-compose.yml`             | Compose file for mux-server CVM deployment                                                                |
+| `build-pin-openclaw.sh`              | Rebuild tarball, build/push full then base target images, pin compose full image digest, write image refs |
+| `build-pin-mux.sh`                   | Rebuild mux image, push, and pin mux compose digest                                                       |
+| `deploy-openclaw.sh`                 | Deploy OpenClaw CVM, wait for health, run smoke tests                                                     |
+| `deploy-mux.sh`                      | Deploy mux-server CVM, wait for health, run smoke tests                                                   |
+| `migrate-openclaw.sh`                | Apply config migrations to a running CVM via SSH                                                          |
+| `gen-cvm-config.sh`                  | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)                                           |
+| `mux-pair-token.sh`                  | Mint mux pairing token for a tenant OpenClaw instance (admin API)                                         |
+| `UPDATE_RUNBOOK.md`                  | Detailed update runbook with fallback procedures                                                          |
+| `S3_STORAGE.md`                      | Detailed S3 encryption documentation                                                                      |
 
 ## CVM environment notes
 
@@ -529,6 +542,22 @@ Important guardrail: never reuse production WhatsApp auth/session files in the l
 
 - The old container auto-restarts before compose runs. Wait a moment and retry, or check `journalctl -u app-compose` on the VM host.
 
+**OpenClaw rollout looks stuck after deploy**
+
+- Rollout usually has two phases:
+  1. CVM reboot/reconcile (~2 minutes)
+  2. image pull + compose start (can take a few more minutes)
+- Do **not** force-start old containers with `docker start openclaw` during this window; that can bring back the previous image.
+- Watch serial logs for real progress (instead of guessing):
+  - `phala logs --serial --cvm-id <openclaw-cvm-name> -f`
+- While pull/startup is still running, `docker ps` may continue to show the old container/image temporarily.
+- Then re-check:
+  - `phala cvms get <openclaw-cvm-name> --json`
+  - `phala ssh <openclaw-cvm-name> -- docker ps -a`
+  - `phala ssh <openclaw-cvm-name> -- docker inspect openclaw --format '{{.Config.Image}} {{.State.Status}} {{.State.Health.Status}}'`
+- If manual recovery is required, use compose with the dstack env file:
+  - `phala ssh <openclaw-cvm-name> -- docker compose -f /dstack/docker-compose.yaml --env-file /dstack/.host-shared/.decrypted-env up -d`
+
 **Docker daemon fails inside CVM**
 
 - This is non-critical (gateway works without it). The CVM kernel may not support all iptables modules. Check logs for details.
@@ -544,3 +573,15 @@ Important guardrail: never reuse production WhatsApp auth/session files in the l
 **Docker-in-Docker storage**
 
 - DinD inside the CVM requires `--storage-driver=vfs` (overlay-on-overlay fails inside the TEE VM).
+
+**Telegram bot stops responding (`/bot_status` no reply)**
+
+- If mux logs show `telegram getUpdates failed (409)`, another poller is using the same Telegram bot token.
+- Common cause: local `phala-deploy/local-mux-e2e` stack is running with the same `TELEGRAM_BOT_TOKEN` as the remote mux.
+- Check mux health details:
+  - `curl -fsS https://<mux-app-id>-18891.<gateway-domain>/health | jq .`
+  - When degraded, `/health` includes `telegramInbound.code = "poll_conflict"`.
+- Fix:
+  - stop the competing poller (for local e2e: `./phala-deploy/local-mux-e2e/scripts/down.sh`)
+  - keep only one long-poller per bot token
+  - verify recovery in logs: `phala logs mux-server --cvm-id <mux-cvm-name> --tail 120`

@@ -71,6 +71,7 @@ export type MuxInboundEnvelope = {
   channelData: Record<string, unknown>;
   attachments?: MuxInboundAttachment[];
   openclawId?: string;
+  wasMentioned?: boolean;
 };
 
 export type MuxOutboundOperation = {
@@ -472,6 +473,7 @@ export function buildTelegramInboundEnvelope(params: {
   rawUpdate: unknown;
   media: unknown;
   attachments: MuxInboundAttachment[];
+  wasMentioned?: boolean;
 }): MuxInboundEnvelope {
   const raw = {
     update: params.rawUpdate,
@@ -510,6 +512,9 @@ export function buildTelegramInboundEnvelope(params: {
   };
   if (params.attachments.length > 0) {
     payload.attachments = params.attachments;
+  }
+  if (params.wasMentioned != null) {
+    payload.wasMentioned = params.wasMentioned;
   }
   return payload;
 }
@@ -588,6 +593,7 @@ export function buildDiscordInboundEnvelope(params: {
   rawMessage: unknown;
   media: unknown;
   attachments: MuxInboundAttachment[];
+  wasMentioned?: boolean;
 }): MuxInboundEnvelope {
   const raw = {
     message: params.rawMessage,
@@ -623,6 +629,9 @@ export function buildDiscordInboundEnvelope(params: {
   };
   if (params.attachments.length > 0) {
     payload.attachments = params.attachments;
+  }
+  if (params.wasMentioned != null) {
+    payload.wasMentioned = params.wasMentioned;
   }
   return payload;
 }

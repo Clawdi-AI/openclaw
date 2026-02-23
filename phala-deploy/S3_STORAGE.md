@@ -108,17 +108,7 @@ Save this value securely. If you lose it, the encrypted data on S3 is unrecovera
 
 ### 3. Prepare deploy env vars
 
-Preferred (vault-backed):
-
-```sh
-rv-exec --dotenv /tmp/deploy.env \
-  MASTER_KEY REDPILL_API_KEY \
-  S3_BUCKET S3_ENDPOINT S3_PROVIDER S3_REGION \
-  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
-  -- bash -lc 'test -s /tmp/deploy.env && echo "deploy env ready: /tmp/deploy.env"'
-```
-
-Legacy fallback (local-only): save credentials to `phala-deploy/secrets/.env` (gitignored):
+Create an env file (keep it out of git):
 
 ```env
 MASTER_KEY=your-base64-master-key
@@ -129,6 +119,12 @@ S3_PROVIDER=Cloudflare
 S3_REGION=auto
 AWS_ACCESS_KEY_ID=your-access-key
 AWS_SECRET_ACCESS_KEY=your-secret-key
+```
+
+Then set strict permissions:
+
+```sh
+chmod 600 /tmp/deploy.env
 ```
 
 ### 4. Deploy

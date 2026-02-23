@@ -289,3 +289,90 @@ export async function cleanupDraftStream(
   }
   await draftStream.clear();
 }
+
+// ---------------------------------------------------------------------------
+// Shared streaming dispatch — encapsulates the draft-stream lifecycle
+// (create → partial dedup → finalize-as-edit → cleanup) so that both the
+// direct Telegram path and the mux path share the same wiring.
+// ---------------------------------------------------------------------------
+
+export type TelegramStreamingDispatchParams = {
+  transport: TelegramDraftStreamTransport;
+  /** Edit function for finalization (called with the preview message id and final text). */
+  editFn: (messageId: number, text: string) => Promise<void>;
+  maxChars?: number;
+  minInitialChars?: number;
+  log?: (message: string) => void;
+  warn?: (message: string) => void;
+};
+
+export type TelegramStreamingDispatch = {
+  draftStream: TelegramDraftStream;
+  /** Wire into replyOptions.onPartialReply. Deduplicates + suppresses regressive updates. */
+  onPartialReply: (payload: { text?: string }) => void;
+  /**
+   * Call inside deliver() when info.kind === "final".
+   * Returns true if the preview was edited in-place (caller should skip fallback delivery).
+   */
+  tryFinalize: (payload: {
+    text?: string;
+    mediaUrl?: string;
+    mediaUrls?: string[];
+    isError?: boolean;
+  }) => Promise<boolean>;
+  /** Call in finally block. */
+  cleanup: () => Promise<void>;
+};
+
+export function createTelegramStreamingDispatch(
+  params: TelegramStreamingDispatchParams,
+): TelegramStreamingDispatch {
+  const draftStream = createTelegramDraftStream({
+    transport: params.transport,
+    maxChars: params.maxChars,
+    minInitialChars: params.minInitialChars ?? 30,
+    log: params.log,
+    warn: params.warn,
+  });
+
+  let lastPartialText = "";
+  let finalizedViaPreviewMessage = false;
+
+  return {
+    draftStream,
+    onPartialReply: (payload) => {
+      const text = payload.text;
+      if (!text || text === lastPartialText) {
+        return;
+      }
+      if (
+        lastPartialText &&
+        lastPartialText.startsWith(text) &&
+        text.length < lastPartialText.length
+      ) {
+        return;
+      }
+      lastPartialText = text;
+      draftStream.update(text);
+    },
+    tryFinalize: async (payload) => {
+      if (finalizedViaPreviewMessage) {
+        return false;
+      }
+      const finalized = await tryFinalizeDraftAsEdit({
+        draftStream,
+        finalText: payload.text,
+        hasMedia: Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0,
+        isError: payload.isError ?? false,
+        maxChars: params.maxChars,
+        editFn: params.editFn,
+        log: params.log,
+      });
+      if (finalized) {
+        finalizedViaPreviewMessage = true;
+      }
+      return finalized;
+    },
+    cleanup: () => cleanupDraftStream(draftStream, finalizedViaPreviewMessage),
+  };
+}

@@ -424,6 +424,55 @@ describe("mux server", () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
+  test("health endpoint reports telegram poll conflict when getUpdates returns 409", async () => {
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/getUpdates") {
+        res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error_code: 409, description: "Conflict" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, result: { username: "test_bot" } }));
+    });
+
+    const server = await startServer({
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_RETRY_MS: "100",
+      },
+    });
+
+    const deadline = Date.now() + 5_000;
+    let healthBody: Record<string, unknown> | null = null;
+    while (Date.now() < deadline) {
+      const health = await fetch(`http://127.0.0.1:${server.port}/health`);
+      healthBody = (await health.json()) as Record<string, unknown>;
+      const telegramInbound =
+        healthBody.telegramInbound && typeof healthBody.telegramInbound === "object"
+          ? (healthBody.telegramInbound as Record<string, unknown>)
+          : null;
+      if (telegramInbound?.code === "poll_conflict") {
+        break;
+      }
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 100));
+    }
+
+    expect(healthBody).toBeTruthy();
+    const telegramInbound =
+      healthBody?.telegramInbound && typeof healthBody.telegramInbound === "object"
+        ? (healthBody.telegramInbound as Record<string, unknown>)
+        : null;
+    expect(telegramInbound).toMatchObject({
+      status: "degraded",
+      code: "poll_conflict",
+      message: "Telegram getUpdates returned 409; another poller is using this bot token.",
+    });
+    expect(typeof telegramInbound?.lastConflictAtMs).toBe("number");
+    expect(JSON.stringify(telegramInbound?.lastError ?? "")).toContain(
+      "telegram getUpdates failed (409)",
+    );
+  });
+
   test("instance register endpoint requires shared register key and returns runtime jwt metadata", async () => {
     const server = await startServer({
       extraEnv: {

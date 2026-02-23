@@ -27,10 +27,7 @@ This stack mirrors the production shape on one machine:
 
 - Docker (Compose v2)
 - `curl`, `jq`
-- Secrets available via one of:
-  - `rv-exec` (preferred — automatically injects secrets into compose)
-  - `.env.local` files (repo-root for `CODEX_API_KEY`/`CODEX_API_ENDPOINT`, stack-level for `MODEL_PRIMARY` etc.)
-  - Direct env exports
+- Secrets available via `.env.local` files (repo-root for `CODEX_API_KEY`/`CODEX_API_ENDPOINT`, stack-level for `MODEL_PRIMARY` etc.) or direct env exports
 - Required secrets:
   - `TELEGRAM_BOT_TOKEN` (or `DISCORD_BOT_TOKEN` for Discord tests)
   - `CODEX_API_KEY` + `CODEX_API_ENDPOINT` (when `MODEL_PRIMARY` is set)
@@ -51,9 +48,8 @@ What `up.sh` does:
 1. Sources `.env.local` from both the stack dir and the repo root (for secrets like `CODEX_API_KEY`).
 2. Optionally copies WhatsApp auth snapshot into local state (if `WA_AUTH_SOURCE` is set).
 3. Generates the OpenClaw config JSON with model provider, mux gateway, and channel settings.
-4. Uses `rv-exec` for secret injection if available; falls back to plain env otherwise.
-5. Runs `docker compose up -d --build --remove-orphans`.
-6. Writes the config into the running container and restarts OpenClaw.
+4. Runs `docker compose up -d --build --remove-orphans`.
+5. Writes the config into the running container and restarts OpenClaw.
 
 To enable WhatsApp inbound, set `WA_AUTH_SOURCE` inline or in `phala-deploy/local-mux-e2e/.env.local` (from `.env.example`).
 

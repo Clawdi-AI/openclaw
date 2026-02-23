@@ -19,17 +19,15 @@ Do not run both services in one CVM.
    - `openclawId` is the device `deviceId` from `/root/.openclaw/identity/device.json`
    - when `MASTER_KEY` is set, OpenClaw derives the device keypair deterministically, so deleting `device.json` is recoverable after restart
 
-## One-time local setup
+## Required script args
 
-```bash
-cp phala-deploy/cvm-rollout-targets.env.example phala-deploy/.env.rollout-targets
-```
+- `deploy-openclaw.sh`: requires both `--openclaw-cvm <name>` and `--mux-cvm <name>`
+- `deploy-mux.sh`: requires `--mux-cvm <name>`; `--openclaw-cvm <name>` is required when smoke tests run (default and `--test-only`), optional with `--skip-test`
+- `mux-pair-token.sh`: requires both `--openclaw-cvm <name>` and `--mux-cvm <name>`
 
-Edit `phala-deploy/.env.rollout-targets` with your CVM IDs (`PHALA_OPENCLAW_CVM_IDS`, `PHALA_MUX_CVM_IDS`).
+## Manual env-file flow
 
-## No-rv fallback (manual .env files)
-
-If `rv-exec` is unavailable, use local `.env` files with `phala deploy`-compatible key/value pairs.
+Use local `.env` files with `phala deploy`-compatible key/value pairs.
 Keep these files out of git and set strict permissions.
 
 Create OpenClaw deploy env (example):
@@ -60,42 +58,43 @@ EOF
 chmod 600 /tmp/mux-phala-deploy.env
 ```
 
-Deploy without `rv-exec`:
+Deploy:
 
 ```bash
 # OpenClaw
 phala deploy \
-  --cvm-id "$PHALA_OPENCLAW_CVM_IDS" \
+  --cvm-id <openclaw-cvm-name> \
   -c phala-deploy/docker-compose.yml \
   -e /tmp/openclaw-phala-deploy.env
 
 # mux-server
 phala deploy \
-  --cvm-id "$PHALA_MUX_CVM_IDS" \
+  --cvm-id <mux-cvm-name> \
   -c phala-deploy/mux-server-compose.yml \
   -e /tmp/mux-phala-deploy.env
 ```
 
-Generate pairing token without `rv-exec`:
+Generate pairing token:
 
 ```bash
 export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
-export PHALA_MUX_CVM_ID=<mux-cvm-uuid>
-export PHALA_OPENCLAW_CVM_ID=<openclaw-cvm-uuid>
-export CVM_SSH_HOST=<openclaw-app-id>-1022.<gateway-domain>
-
-./phala-deploy/mux-pair-token.sh telegram agent:main:main
+./phala-deploy/mux-pair-token.sh \
+  --openclaw-cvm openclaw-dev \
+  --mux-cvm openclaw-mux-dev \
+  telegram agent:main:main
 ```
 
 ## Update flow with a local env file
 
-If you have a local secrets file (e.g., `configs/my-instance.env`) instead of rv vault:
+If you have a local secrets file (e.g., `configs/my-instance.env`):
 
 ### 1. Build and pin the new image
 
 ```bash
 ./phala-deploy/build-pin-openclaw.sh
-# This pushes to Docker Hub and updates the digest in docker-compose.yml
+# This pushes full + base target images, updates docker-compose.yml with the full image, and writes:
+#   phala-deploy/image-refs/openclaw-base-image.ref
+#   phala-deploy/image-refs/openclaw-full-image.ref
 ```
 
 ### 2. Download the existing config
@@ -103,8 +102,8 @@ If you have a local secrets file (e.g., `configs/my-instance.env`) instead of rv
 The config on the data volume persists across deploys. Download it so you can pass it back as `OPENCLAW_CONFIG_B64`:
 
 ```bash
-phala ssh <cvm-id> -- docker cp openclaw:/root/.openclaw/openclaw.json /tmp/openclaw.json
-phala cp <cvm-id>:/tmp/openclaw.json ./openclaw.json
+phala ssh <cvm-name> -- docker cp openclaw:/root/.openclaw/openclaw.json /tmp/openclaw.json
+phala cp <cvm-name>:/tmp/openclaw.json ./openclaw.json
 ```
 
 ### 3. Build the deploy env file
@@ -127,7 +126,7 @@ The env file needs at minimum: `MASTER_KEY`, `OPENCLAW_CONFIG_B64`. Add `REDPILL
 ### 4. Deploy
 
 ```bash
-phala deploy --cvm-id <cvm-id> \
+phala deploy --cvm-id <cvm-name> \
   -c phala-deploy/docker-compose.yml \
   -e /tmp/deploy.env
 ```
@@ -141,7 +140,7 @@ Image pulls can take 5-10 minutes on a node that hasn't cached the image.
 phala cvms list
 
 # Once running, check entrypoint logs
-phala ssh <cvm-id> -- docker logs openclaw 2>&1 \
+phala ssh <cvm-name> -- docker logs openclaw 2>&1 \
   | grep -iE '(mcporter|Starting|Keys derived|error)'
 ```
 
@@ -153,16 +152,16 @@ mcporter config written for Composio MCP (standalone mode).
 Starting OpenClaw gateway...
 ```
 
-## Standard update flow (with rv vault)
+## Standard update flow
 
 ### 1. Preflight
 
 ```bash
-bash phala-deploy/deploy-openclaw.sh --dry-run
-bash phala-deploy/deploy-mux.sh --dry-run
+bash phala-deploy/deploy-openclaw.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --dry-run
+bash phala-deploy/deploy-mux.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --dry-run
 ```
 
-This validates vault secrets and prints the deploy commands without executing them.
+This validates required env vars and prints the deploy commands without executing them.
 
 ### 2. Build and pin images
 
@@ -181,14 +180,27 @@ mux-server (only when mux changed):
 ### 3. Deploy
 
 ```bash
-# Deploy OpenClaw
-rv-exec MASTER_KEY REDPILL_API_KEY S3_BUCKET S3_ENDPOINT S3_PROVIDER S3_REGION \
-  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY MUX_REGISTER_KEY \
-  -- bash phala-deploy/deploy-openclaw.sh
+# Deploy OpenClaw (set env vars first)
+export MASTER_KEY=replace-with-master-key
+export REDPILL_API_KEY=replace-with-redpill-key
+export S3_BUCKET=replace-with-bucket
+export S3_ENDPOINT=replace-with-s3-endpoint
+export S3_PROVIDER=Other
+export S3_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=replace-with-access-key-id
+export AWS_SECRET_ACCESS_KEY=replace-with-secret-access-key
+export MUX_REGISTER_KEY=replace-with-shared-register-key
+bash phala-deploy/deploy-openclaw.sh \
+  --openclaw-cvm openclaw-dev \
+  --mux-cvm openclaw-mux-dev
 
-# Deploy mux-server
-rv-exec MUX_REGISTER_KEY MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN_PROD DISCORD_BOT_TOKEN_PROD \
-  -- bash phala-deploy/deploy-mux.sh
+# Deploy mux-server (set env vars first)
+export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
+export TELEGRAM_BOT_TOKEN=replace-with-telegram-token
+export DISCORD_BOT_TOKEN=replace-with-discord-token
+bash phala-deploy/deploy-mux.sh \
+  --openclaw-cvm openclaw-dev \
+  --mux-cvm openclaw-mux-dev
 ```
 
 Each script deploys its CVM, waits for health, and runs smoke tests. They can be run independently.
@@ -198,26 +210,34 @@ Each script deploys its CVM, waits for health, and runs smoke tests. They can be
 OpenClaw CVM:
 
 ```bash
-export CVM_SSH_HOST=<openclaw-app-id>-1022.<gateway-domain>
-./phala-deploy/cvm-exec 'openclaw --version'
-./phala-deploy/cvm-exec 'openclaw channels status --probe'
+phala ssh <openclaw-cvm-name> -- docker exec openclaw openclaw --version
+phala ssh <openclaw-cvm-name> -- docker exec openclaw openclaw channels status --probe
 ```
 
 mux CVM:
 
 ```bash
 curl -fsS https://<mux-app-id>-18891.<gateway-domain>/health
-phala logs mux-server --cvm-id <mux-cvm-uuid> --tail 120
+phala logs mux-server --cvm-id <mux-cvm-name> --tail 120
 ```
 
 Transient behavior note:
 
 - During/just after rollout, container SSH may briefly fail (for example `Connection closed by UNKNOWN port 65535`) while Docker/app services are restarting.
+- Rollout usually has two phases:
+  1. CVM reboot/reconcile (~2 minutes)
+  2. image pull + compose start (can take a few more minutes)
 - Treat this as transient first, not immediate config breakage.
+- Do **not** force-start old containers with `docker start openclaw` during this window; wait for compose reconciliation first.
 - Verification order:
-  1. Check control plane first: `phala cvms get <openclaw-app-id> --json` and confirm status `running` + expected image digest in compose.
-  2. Retry `./phala-deploy/cvm-exec 'openclaw --version'` after a short wait.
-  3. Only escalate to debugging if repeated retries still fail.
+  1. Check control plane first: `phala cvms get <openclaw-app-id> --json` and confirm status `running` + expected image in compose.
+  2. Watch serial logs for real progress (instead of guessing):
+     `phala logs --serial --cvm-id <openclaw-cvm-name> -f`
+  3. During image pull/startup, `docker ps` may still show the old container/image for a while; wait for pull/recreate to complete.
+  4. After serial logs show compose completion, verify:
+     `phala ssh <openclaw-cvm-name> -- docker exec openclaw openclaw --version`
+  5. If manual recovery is needed, use compose + env-file (not `docker start`):
+     `phala ssh <openclaw-cvm-name> -- docker compose -f /dstack/docker-compose.yaml --env-file /dstack/.host-shared/.decrypted-env up -d`
 
 ### 5. Pairing smoke check
 
@@ -229,12 +249,11 @@ Pairing token generation is target-driven:
 Issue pairing token (admin token):
 
 ```bash
-export PHALA_MUX_CVM_ID=<mux-cvm-uuid>
-export PHALA_OPENCLAW_CVM_ID=<openclaw-cvm-uuid>
-export CVM_SSH_HOST=<openclaw-app-id>-1022.<gateway-domain>
-
-rv-exec MUX_ADMIN_TOKEN -- \
-  bash -lc './phala-deploy/mux-pair-token.sh telegram agent:main:main'
+export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
+./phala-deploy/mux-pair-token.sh \
+  --openclaw-cvm openclaw-dev \
+  --mux-cvm openclaw-mux-dev \
+  telegram agent:main:main
 ```
 
 ## Fast fixes for known failures
@@ -245,8 +264,27 @@ Cause: missing `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` in mux deploy env.
 
 Fix:
 
-1. Ensure `TELEGRAM_BOT_TOKEN_PROD` / `DISCORD_BOT_TOKEN_PROD` are set in the vault.
-2. Re-run: `rv-exec MUX_REGISTER_KEY MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN_PROD DISCORD_BOT_TOKEN_PROD -- bash phala-deploy/deploy-mux.sh`
+1. Ensure `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` are exported.
+2. Re-run: `bash phala-deploy/deploy-mux.sh --openclaw-cvm <openclaw-cvm-name> --mux-cvm <mux-cvm-name>`
+
+### Telegram `/bot_status` gets no response, mux logs show `getUpdates failed (409)`
+
+Cause: another poller is using the same Telegram bot token (most often a local `phala-deploy/local-mux-e2e` stack).
+
+How to confirm:
+
+1. Check mux health details:
+   - `curl -fsS https://<mux-app-id>-18891.<gateway-domain>/health | jq .`
+   - degraded state shows `telegramInbound.code = "poll_conflict"`.
+2. Check logs:
+   - `phala logs mux-server --cvm-id <mux-cvm-name> --tail 120`
+
+Fix:
+
+1. Stop the competing poller (local e2e example):
+   - `./phala-deploy/local-mux-e2e/scripts/down.sh`
+2. Ensure only one long-poller runs for this bot token.
+3. Re-check logs/health to confirm conflict is gone.
 
 ### mux healthy but no messages forwarded to OpenClaw
 
@@ -259,7 +297,7 @@ Fix:
    - `gateway.http.endpoints.mux.registerKey`
    - `gateway.http.endpoints.mux.inboundUrl` (must be public/reachable by mux)
 2. Generate a fresh pairing token and pair again:
-   - `./phala-deploy/mux-pair-token.sh telegram agent:main:main`
+   - `./phala-deploy/mux-pair-token.sh --openclaw-cvm <openclaw-cvm-name> --mux-cvm <mux-cvm-name> telegram agent:main:main`
 3. Check mux logs for `instance_registered` and `*_inbound_forwarded` / `*_inbound_retry_deferred`.
 
 ### mux startup error: `UNIQUE constraint failed: tenants.api_key_hash`
@@ -269,14 +307,13 @@ Cause: stale mux DB tenant rows conflict with current bootstrap seed.
 Fix:
 
 1. SSH to the mux CVM host and clear mux state volume:
-   - `docker rm -f mux-server || true`
-   - `docker volume rm -f mux_data || true`
-2. Re-run: `rv-exec MUX_REGISTER_KEY MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN_PROD DISCORD_BOT_TOKEN_PROD -- bash phala-deploy/deploy-mux.sh`
+   - `phala ssh <mux-cvm-name> -- docker rm -f mux-server || true`
+   - `phala ssh <mux-cvm-name> -- docker volume rm -f mux_data || true`
+2. Re-run: `bash phala-deploy/deploy-mux.sh --openclaw-cvm <openclaw-cvm-name> --mux-cvm <mux-cvm-name>`
 
 ## Related files
 
 - `phala-deploy/deploy-openclaw.sh`
 - `phala-deploy/deploy-mux.sh`
-- `phala-deploy/cvm-rollout-targets.env.example`
 - `phala-deploy/mux-pair-token.sh`
 - `phala-deploy/mux-server-compose.yml`

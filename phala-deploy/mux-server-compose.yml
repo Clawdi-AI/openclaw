@@ -1,6 +1,6 @@
 services:
   mux-server:
-    image: h4x3rotab/openclaw-mux@sha256:f04998269e7e4afa260be6f1188ef979bdae39a455ba333708a29f43bbb72c8e
+    image: h4x3rotab/openclaw-mux@sha256:82e3d34f54ec89dbb99c07a08ed8aacec4c12a231bf5df71dba86a94a2c1874f
     container_name: mux-server
     ports:
       - "1022:22"

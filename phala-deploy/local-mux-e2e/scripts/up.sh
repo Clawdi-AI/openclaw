@@ -30,6 +30,14 @@ if [[ -f "${REPO_ROOT}/.env.local" ]]; then
   set +a
 fi
 
+# Accept alias names while keeping canonical env names in compose/runtime.
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_BOT_TOKEN_E2E:-}" ]]; then
+  export TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN_E2E}"
+fi
+if [[ -z "${DISCORD_BOT_TOKEN:-}" && -n "${DISCORD_BOT_TOKEN_E2E:-}" ]]; then
+  export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN_E2E}"
+fi
+
 "${SCRIPT_DIR}/prepare-whatsapp-auth.sh"
 
 # --- Derive GATEWAY_AUTH_TOKEN from MASTER_KEY (same HKDF as entrypoint.sh) ---
@@ -113,18 +121,10 @@ OPENCLAW_CONFIG_B64=$(printf '%s' "$CONFIG_JSON" | base64 -w0)
 export OPENCLAW_CONFIG_B64
 
 # --- Bring up the stack ---
-# Use rv-exec for secret injection when available; fall back to plain env if
-# the required secrets are already exported (e.g. from .env.local).
-if command -v rv-exec >/dev/null 2>&1; then
-  rv-exec TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN CODEX_API_KEY CODEX_API_ENDPOINT \
-    -- docker compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans
-else
-  if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-    echo "[local-mux-e2e] WARNING: TELEGRAM_BOT_TOKEN not set and rv-exec not found." >&2
-    echo "[local-mux-e2e] Install rv-exec or export secrets manually." >&2
-  fi
-  docker compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  echo "[local-mux-e2e] WARNING: TELEGRAM_BOT_TOKEN not set." >&2
 fi
+docker compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans
 
 # --- Force-update the config inside the running container ---
 # The entrypoint only writes config on first boot (when the file doesn't exist).
