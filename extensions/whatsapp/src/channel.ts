@@ -2,7 +2,6 @@ import {
   applyAccountNameToChannelSection,
   buildChannelConfigSchema,
   collectWhatsAppStatusIssues,
-  createActionGate,
   DEFAULT_ACCOUNT_ID,
   escapeRegExp,
   formatPairingApproveHint,
@@ -14,21 +13,17 @@ import {
   migrateBaseNameToDefaultAccount,
   normalizeAccountId,
   normalizeE164,
-  maybeSendWhatsAppViaMux,
-  resolvePayloadTextAndMedia,
   normalizeWhatsAppMessagingTarget,
   normalizeWhatsAppTarget,
-  readStringParam,
   resolveDefaultWhatsAppAccountId,
-  resolveWhatsAppOutboundTarget,
   resolveWhatsAppAccount,
   resolveWhatsAppGroupRequireMention,
   resolveWhatsAppGroupToolPolicy,
   resolveWhatsAppHeartbeatRecipients,
-  sendPayloadWithMediaSequence,
+  whatsappMessageActions,
+  whatsappOutbound,
   whatsappOnboardingAdapter,
   WhatsAppConfigSchema,
-  type ChannelMessageActionName,
   type ChannelPlugin,
   type OpenClawConfig,
   type ResolvedWhatsAppAccount,
@@ -244,166 +239,8 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
     listPeers: async (params) => listWhatsAppDirectoryPeersFromConfig(params),
     listGroups: async (params) => listWhatsAppDirectoryGroupsFromConfig(params),
   },
-  actions: {
-    listActions: ({ cfg }) => {
-      if (!cfg.channels?.whatsapp) {
-        return [];
-      }
-      const gate = createActionGate(cfg.channels.whatsapp.actions);
-      const actions = new Set<ChannelMessageActionName>();
-      if (gate("reactions")) {
-        actions.add("react");
-      }
-      if (gate("polls")) {
-        actions.add("poll");
-      }
-      return Array.from(actions);
-    },
-    supportsAction: ({ action }) => action === "react",
-    handleAction: async ({ action, params, cfg, accountId }) => {
-      if (action !== "react") {
-        throw new Error(`Action ${action} is not supported for provider ${meta.id}.`);
-      }
-      const messageId = readStringParam(params, "messageId", {
-        required: true,
-      });
-      const emoji = readStringParam(params, "emoji", { allowEmpty: true });
-      const remove = typeof params.remove === "boolean" ? params.remove : undefined;
-      return await getWhatsAppRuntime().channel.whatsapp.handleWhatsAppAction(
-        {
-          action: "react",
-          chatJid:
-            readStringParam(params, "chatJid") ?? readStringParam(params, "to", { required: true }),
-          messageId,
-          emoji,
-          remove,
-          participant: readStringParam(params, "participant"),
-          accountId: accountId ?? undefined,
-          fromMe: typeof params.fromMe === "boolean" ? params.fromMe : undefined,
-        },
-        cfg,
-      );
-    },
-  },
-  outbound: {
-    deliveryMode: "gateway",
-    chunker: (text, limit) => getWhatsAppRuntime().channel.text.chunkText(text, limit),
-    chunkerMode: "text",
-    textChunkLimit: 4000,
-    pollMaxOptions: 12,
-    resolveTarget: ({ to, allowFrom, mode }) =>
-      resolveWhatsAppOutboundTarget({ to, allowFrom, mode }),
-    sendText: async ({ cfg, to, text, accountId, deps, gifPlayback, sessionKey }) => {
-      const muxResult = await maybeSendWhatsAppViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text,
-        gifPlayback,
-      });
-      if (muxResult) {
-        return { channel: "whatsapp", ...muxResult };
-      }
-      const send = deps?.sendWhatsApp ?? getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp;
-      const sendResult = await send(to, text, {
-        verbose: false,
-        accountId: accountId ?? undefined,
-        gifPlayback,
-      });
-      return { channel: "whatsapp", ...sendResult };
-    },
-    sendMedia: async ({ cfg, to, text, mediaUrl, accountId, deps, gifPlayback, sessionKey }) => {
-      const muxResult = await maybeSendWhatsAppViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text,
-        mediaUrl,
-        gifPlayback,
-      });
-      if (muxResult) {
-        return { channel: "whatsapp", ...muxResult };
-      }
-      const send = deps?.sendWhatsApp ?? getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp;
-      const sendResult = await send(to, text, {
-        verbose: false,
-        mediaUrl,
-        accountId: accountId ?? undefined,
-        gifPlayback,
-      });
-      return { channel: "whatsapp", ...sendResult };
-    },
-    sendPayload: async ({
-      cfg,
-      to,
-      payload,
-      accountId,
-      deps,
-      gifPlayback,
-      replyToId,
-      threadId,
-      sessionKey,
-    }) => {
-      const channelData =
-        typeof payload.channelData === "object" && payload.channelData !== null
-          ? payload.channelData
-          : undefined;
-      const rawWhatsApp = (
-        channelData as { raw?: { whatsapp?: Record<string, unknown> } } | undefined
-      )?.raw?.whatsapp;
-      const muxResult = await maybeSendWhatsAppViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text: payload.text ?? "",
-        mediaUrl: payload.mediaUrl,
-        mediaUrls: payload.mediaUrls,
-        replyToId,
-        threadId,
-        channelData,
-        gifPlayback,
-        rawWhatsApp,
-      });
-      if (muxResult) {
-        return { channel: "whatsapp", ...muxResult };
-      }
-
-      const send = deps?.sendWhatsApp ?? getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp;
-      const { text, mediaUrls } = resolvePayloadTextAndMedia(payload);
-      const result = await sendPayloadWithMediaSequence({
-        text,
-        mediaUrls,
-        sendSingle: async ({ text, mediaUrl }) =>
-          await send(to, text, {
-            verbose: false,
-            mediaUrl,
-            accountId: accountId ?? undefined,
-            gifPlayback,
-          }),
-      });
-      return { channel: "whatsapp", ...result };
-    },
-    sendPoll: async ({ cfg, to, poll, accountId, sessionKey }) => {
-      const muxResult = await maybeSendWhatsAppViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text: "",
-        poll,
-      });
-      if (muxResult) {
-        return { channel: "whatsapp", ...muxResult };
-      }
-      return await getWhatsAppRuntime().channel.whatsapp.sendPollWhatsApp(to, poll, {
-        verbose: getWhatsAppRuntime().logging.shouldLogVerbose(),
-        accountId: accountId ?? undefined,
-      });
-    },
-  },
+  actions: whatsappMessageActions,
+  outbound: whatsappOutbound,
   auth: {
     login: async ({ cfg, accountId, runtime, verbose }) => {
       const resolvedAccountId = accountId?.trim() || resolveDefaultWhatsAppAccountId(cfg);

@@ -3,7 +3,7 @@ import {
   parseTelegramReplyToMessageId,
   parseTelegramThreadId,
 } from "../../../telegram/outbound-params.js";
-import { sendMessageTelegram } from "../../../telegram/send.js";
+import { sendMessageTelegram, sendPollTelegram } from "../../../telegram/send.js";
 import { type TelegramButtons } from "../mux-envelope.js";
 import type { ChannelOutboundAdapter } from "../types.js";
 import { resolveTelegramMuxTransportOpts } from "./mux-overlay.js";
@@ -14,7 +14,8 @@ export const telegramOutbound: ChannelOutboundAdapter = {
   chunker: markdownToTelegramHtmlChunks,
   chunkerMode: "markdown",
   textChunkLimit: 4000,
-  sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, sessionKey }) => {
+  pollMaxOptions: 10,
+  sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, silent, sessionKey }) => {
     const replyToMessageId = parseTelegramReplyToMessageId(replyToId);
     const messageThreadId = parseTelegramThreadId(threadId);
     const mux = resolveTelegramMuxTransportOpts({ cfg, accountId, sessionKey });
@@ -25,6 +26,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
       messageThreadId,
       replyToMessageId,
       accountId: accountId ?? undefined,
+      silent: silent ?? undefined,
       mux,
     });
     return { channel: "telegram", ...result };
@@ -39,6 +41,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     deps,
     replyToId,
     threadId,
+    silent,
     sessionKey,
   }) => {
     const replyToMessageId = parseTelegramReplyToMessageId(replyToId);
@@ -53,6 +56,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
       replyToMessageId,
       accountId: accountId ?? undefined,
       mediaLocalRoots,
+      silent: silent ?? undefined,
       mux,
     });
     return { channel: "telegram", ...result };
@@ -103,4 +107,12 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     });
     return { channel: "telegram", ...result };
   },
+  sendPoll: async ({ cfg, to, poll, accountId, threadId, silent, isAnonymous, sessionKey }) =>
+    await sendPollTelegram(to, poll, {
+      accountId: accountId ?? undefined,
+      messageThreadId: parseTelegramThreadId(threadId),
+      silent: silent ?? undefined,
+      isAnonymous: isAnonymous ?? undefined,
+      mux: resolveTelegramMuxTransportOpts({ cfg, accountId, sessionKey }),
+    }),
 };

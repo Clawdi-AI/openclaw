@@ -16,16 +16,13 @@ import {
   migrateBaseNameToDefaultAccount,
   normalizeAccountId,
   normalizeDiscordMessagingTarget,
-  normalizeDiscordOutboundTarget,
   PAIRING_APPROVED_MESSAGE,
-  maybeSendDiscordViaMux,
-  resolvePayloadTextAndMedia,
   resolveDiscordAccount,
   resolveDefaultDiscordAccountId,
   resolveDiscordGroupRequireMention,
   resolveDiscordGroupToolPolicy,
-  sendPayloadWithMediaSequence,
   setAccountEnabledInConfigSection,
+  discordOutbound,
   type ChannelMessageActionAdapter,
   type ChannelPlugin,
   type OpenClawConfig,
@@ -291,136 +288,7 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
       };
     },
   },
-  outbound: {
-    deliveryMode: "direct",
-    chunker: null,
-    textChunkLimit: 2000,
-    pollMaxOptions: 10,
-    resolveTarget: ({ to }) => normalizeDiscordOutboundTarget(to),
-    sendText: async ({
-      cfg,
-      to,
-      text,
-      accountId,
-      deps,
-      replyToId,
-      threadId,
-      silent,
-      sessionKey,
-    }) => {
-      const muxResult = await maybeSendDiscordViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text,
-        replyToId,
-        threadId,
-      });
-      if (muxResult) {
-        return { channel: "discord", ...muxResult };
-      }
-      const send = deps?.sendDiscord ?? getDiscordRuntime().channel.discord.sendMessageDiscord;
-      const sendResult = await send(to, text, {
-        verbose: false,
-        replyTo: replyToId ?? undefined,
-        accountId: accountId ?? undefined,
-        silent: silent ?? undefined,
-      });
-      return { channel: "discord", ...sendResult };
-    },
-    sendMedia: async ({
-      cfg,
-      to,
-      text,
-      mediaUrl,
-      accountId,
-      deps,
-      replyToId,
-      threadId,
-      silent,
-      sessionKey,
-    }) => {
-      const muxResult = await maybeSendDiscordViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text,
-        mediaUrl,
-        replyToId,
-        threadId,
-      });
-      if (muxResult) {
-        return { channel: "discord", ...muxResult };
-      }
-      const send = deps?.sendDiscord ?? getDiscordRuntime().channel.discord.sendMessageDiscord;
-      const sendResult = await send(to, text, {
-        verbose: false,
-        mediaUrl,
-        replyTo: replyToId ?? undefined,
-        accountId: accountId ?? undefined,
-        silent: silent ?? undefined,
-      });
-      return { channel: "discord", ...sendResult };
-    },
-    sendPayload: async ({ cfg, to, payload, accountId, deps, replyToId, threadId, sessionKey }) => {
-      const channelData =
-        typeof payload.channelData === "object" && payload.channelData !== null
-          ? payload.channelData
-          : undefined;
-      const rawDiscord = (
-        channelData as { raw?: { discord?: Record<string, unknown> } } | undefined
-      )?.raw?.discord;
-      const muxResult = await maybeSendDiscordViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text: payload.text ?? "",
-        mediaUrl: payload.mediaUrl,
-        mediaUrls: payload.mediaUrls,
-        replyToId,
-        threadId,
-        channelData,
-        rawDiscord,
-      });
-      if (muxResult) {
-        return { channel: "discord", ...muxResult };
-      }
-      const send = deps?.sendDiscord ?? getDiscordRuntime().channel.discord.sendMessageDiscord;
-      const { text, mediaUrls } = resolvePayloadTextAndMedia(payload);
-      const result = await sendPayloadWithMediaSequence({
-        text,
-        mediaUrls,
-        sendSingle: async ({ text, mediaUrl }) =>
-          await send(to, text, {
-            verbose: false,
-            mediaUrl,
-            replyTo: replyToId ?? undefined,
-            accountId: accountId ?? undefined,
-          }),
-      });
-      return { channel: "discord", ...result };
-    },
-    sendPoll: async ({ cfg, to, poll, accountId, silent, sessionKey }) => {
-      const muxResult = await maybeSendDiscordViaMux({
-        cfg,
-        accountId,
-        sessionKey,
-        to,
-        text: "",
-        poll,
-      });
-      if (muxResult) {
-        return { channel: "discord", ...muxResult };
-      }
-      return await getDiscordRuntime().channel.discord.sendPollDiscord(to, poll, {
-        accountId: accountId ?? undefined,
-        silent: silent ?? undefined,
-      });
-    },
-  },
+  outbound: discordOutbound,
   status: {
     defaultRuntime: {
       accountId: DEFAULT_ACCOUNT_ID,

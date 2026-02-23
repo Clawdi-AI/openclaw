@@ -14,23 +14,19 @@ import {
   normalizeAccountId,
   normalizeTelegramMessagingTarget,
   PAIRING_APPROVED_MESSAGE,
-  parseTelegramReplyToMessageId,
-  parseTelegramThreadId,
-  resolvePayloadTextAndMedia,
   resolveDefaultTelegramAccountId,
   resolveTelegramAccount,
   resolveTelegramGroupRequireMention,
   resolveTelegramGroupToolPolicy,
   setAccountEnabledInConfigSection,
-  sendPayloadWithMediaSequence,
   telegramOnboardingAdapter,
+  telegramOutbound,
   TelegramConfigSchema,
   type ChannelMessageActionAdapter,
   type ChannelPlugin,
   type OpenClawConfig,
   type ResolvedTelegramAccount,
   type TelegramProbe,
-  resolveTelegramMuxTransportOpts,
 } from "openclaw/plugin-sdk";
 import { getTelegramRuntime } from "./runtime.js";
 
@@ -49,8 +45,6 @@ const telegramMessageActions: ChannelMessageActionAdapter = {
     return ma.handleAction(ctx);
   },
 };
-
-type TelegramButtons = Array<Array<{ text: string; callback_data: string }>>;
 
 export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProbe> = {
   id: "telegram",
@@ -254,106 +248,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
       };
     },
   },
-  outbound: {
-    deliveryMode: "direct",
-    chunker: (text, limit) => getTelegramRuntime().channel.text.chunkMarkdownText(text, limit),
-    chunkerMode: "markdown",
-    textChunkLimit: 4000,
-    pollMaxOptions: 10,
-    sendText: async ({
-      cfg,
-      to,
-      text,
-      accountId,
-      deps,
-      replyToId,
-      threadId,
-      silent,
-      sessionKey,
-    }) => {
-      const replyToMessageId = parseTelegramReplyToMessageId(replyToId);
-      const messageThreadId = parseTelegramThreadId(threadId);
-      const mux = resolveTelegramMuxTransportOpts({ cfg, accountId, sessionKey });
-      const send = deps?.sendTelegram ?? getTelegramRuntime().channel.telegram.sendMessageTelegram;
-      const result = await send(to, text, {
-        verbose: false,
-        messageThreadId,
-        replyToMessageId,
-        accountId: accountId ?? undefined,
-        silent: silent ?? undefined,
-        mux,
-      });
-      return { channel: "telegram", ...result };
-    },
-    sendMedia: async ({
-      cfg,
-      to,
-      text,
-      mediaUrl,
-      accountId,
-      deps,
-      replyToId,
-      threadId,
-      silent,
-      sessionKey,
-    }) => {
-      const replyToMessageId = parseTelegramReplyToMessageId(replyToId);
-      const messageThreadId = parseTelegramThreadId(threadId);
-      const mux = resolveTelegramMuxTransportOpts({ cfg, accountId, sessionKey });
-      const send = deps?.sendTelegram ?? getTelegramRuntime().channel.telegram.sendMessageTelegram;
-      const result = await send(to, text, {
-        verbose: false,
-        mediaUrl,
-        messageThreadId,
-        replyToMessageId,
-        accountId: accountId ?? undefined,
-        silent: silent ?? undefined,
-        mux,
-      });
-      return { channel: "telegram", ...result };
-    },
-    sendPayload: async ({ cfg, to, payload, accountId, deps, replyToId, threadId, sessionKey }) => {
-      const replyToMessageId = parseTelegramReplyToMessageId(replyToId);
-      const messageThreadId = parseTelegramThreadId(threadId);
-      const telegramData = payload.channelData?.telegram as
-        | { buttons?: TelegramButtons; quoteText?: string }
-        | undefined;
-      const quoteText =
-        typeof telegramData?.quoteText === "string" ? telegramData.quoteText : undefined;
-      const { text, mediaUrls } = resolvePayloadTextAndMedia(payload);
-
-      const mux = resolveTelegramMuxTransportOpts({ cfg, accountId, sessionKey });
-      const send = deps?.sendTelegram ?? getTelegramRuntime().channel.telegram.sendMessageTelegram;
-      const baseOpts = {
-        verbose: false,
-        textMode: "html" as const,
-        messageThreadId,
-        replyToMessageId,
-        quoteText,
-        accountId: accountId ?? undefined,
-        mux,
-      };
-
-      const result = await sendPayloadWithMediaSequence({
-        text,
-        mediaUrls,
-        sendSingle: async ({ text, mediaUrl, isFirst }) =>
-          await send(to, text, {
-            ...baseOpts,
-            mediaUrl,
-            ...(isFirst ? { buttons: telegramData?.buttons } : {}),
-          }),
-      });
-      return { channel: "telegram", ...result };
-    },
-    sendPoll: async ({ to, poll, accountId, threadId, silent, isAnonymous }) =>
-      await getTelegramRuntime().channel.telegram.sendPollTelegram(to, poll, {
-        accountId: accountId ?? undefined,
-        messageThreadId: parseTelegramThreadId(threadId),
-        silent: silent ?? undefined,
-        isAnonymous: isAnonymous ?? undefined,
-      }),
-  },
+  outbound: telegramOutbound,
   status: {
     defaultRuntime: {
       accountId: DEFAULT_ACCOUNT_ID,

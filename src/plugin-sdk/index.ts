@@ -458,6 +458,9 @@ export {
 export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 export { isMuxEnabled, sendViaMux } from "../channels/plugins/outbound/mux.js";
+export { discordOutbound } from "../channels/plugins/outbound/discord.js";
+export { telegramOutbound } from "../channels/plugins/outbound/telegram.js";
+export { whatsappOutbound } from "../channels/plugins/outbound/whatsapp.js";
 export {
   maybeSendDiscordViaMux,
   maybeSendWhatsAppViaMux,
@@ -468,6 +471,7 @@ export {
   sendPayloadWithMediaSequence,
   type PayloadSendSequenceStep,
 } from "../channels/plugins/outbound/payload-sequence.js";
+export { whatsappMessageActions } from "../channels/plugins/actions/whatsapp.js";
 export type { MuxTransportOpts } from "../telegram/send.js";
 
 // Media utilities

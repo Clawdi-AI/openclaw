@@ -3,6 +3,11 @@ import type { OpenClawConfig } from "../../../config/config.js";
 
 const handleDiscordAction = vi.fn(async (..._args: unknown[]) => ({ details: { ok: true } }));
 const handleTelegramAction = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+const handleWhatsAppAction = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+const sendPollWhatsApp = vi.fn(async (..._args: unknown[]) => ({
+  messageId: "wa-poll-1",
+  toJid: "15550001111@s.whatsapp.net",
+}));
 const sendReactionSignal = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
 const removeReactionSignal = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
 const handleSlackAction = vi.fn(async (..._args: unknown[]) => ({ details: { ok: true } }));
@@ -13,6 +18,14 @@ vi.mock("../../../agents/tools/discord-actions.js", () => ({
 
 vi.mock("../../../agents/tools/telegram-actions.js", () => ({
   handleTelegramAction,
+}));
+
+vi.mock("../../../agents/tools/whatsapp-actions.js", () => ({
+  handleWhatsAppAction,
+}));
+
+vi.mock("../../../web/outbound.js", () => ({
+  sendPollWhatsApp,
 }));
 
 vi.mock("../../../signal/send-reactions.js", () => ({
@@ -27,6 +40,7 @@ vi.mock("../../../agents/tools/slack-actions.js", () => ({
 const { discordMessageActions } = await import("./discord.js");
 const { handleDiscordMessageAction } = await import("./discord/handle-action.js");
 const { telegramMessageActions } = await import("./telegram.js");
+const { whatsappMessageActions } = await import("./whatsapp.js");
 const { signalMessageActions } = await import("./signal.js");
 const { createSlackActions } = await import("../slack.actions.js");
 
@@ -673,6 +687,102 @@ describe("signalMessageActions", () => {
       targetAuthor: "uuid:123e4567-e89b-12d3-a456-426614174000",
       targetAuthorUuid: undefined,
     });
+  });
+});
+
+describe("whatsappMessageActions", () => {
+  it("lists enabled reactions and polls", () => {
+    const cfg = {
+      channels: {
+        whatsapp: {
+          actions: {
+            reactions: true,
+            polls: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const actions = whatsappMessageActions.listActions?.({ cfg }) ?? [];
+    expect(actions).toContain("react");
+    expect(actions).toContain("poll");
+  });
+
+  it("supports react and poll only", () => {
+    expect(whatsappMessageActions.supportsAction?.({ action: "react" })).toBe(true);
+    expect(whatsappMessageActions.supportsAction?.({ action: "poll" })).toBe(true);
+    expect(whatsappMessageActions.supportsAction?.({ action: "send" })).toBe(false);
+  });
+
+  it("maps react params into whatsapp action handler", async () => {
+    const cfg = {
+      channels: {
+        whatsapp: {
+          actions: {
+            reactions: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await whatsappMessageActions.handleAction?.({
+      channel: "whatsapp",
+      action: "react",
+      params: {
+        to: "+15550001111",
+        messageId: "msg-1",
+        emoji: "✅",
+      },
+      cfg,
+      accountId: "main",
+    });
+
+    expect(handleWhatsAppAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "react",
+        chatJid: "+15550001111",
+        messageId: "msg-1",
+        emoji: "✅",
+        accountId: "main",
+      }),
+      cfg,
+    );
+  });
+
+  it("sends polls with expected maxSelections mapping", async () => {
+    const cfg = {
+      channels: {
+        whatsapp: {
+          actions: {
+            polls: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await whatsappMessageActions.handleAction?.({
+      channel: "whatsapp",
+      action: "poll",
+      params: {
+        to: "+15550001111",
+        pollQuestion: "Ready?",
+        pollOption: ["Yes", "No", "Later"],
+        pollMulti: true,
+      },
+      cfg,
+      accountId: "ops",
+    });
+
+    expect(sendPollWhatsApp).toHaveBeenCalledWith(
+      "+15550001111",
+      expect.objectContaining({
+        question: "Ready?",
+        options: ["Yes", "No", "Later"],
+        maxSelections: 3,
+      }),
+      expect.objectContaining({
+        accountId: "ops",
+      }),
+    );
   });
 });
 
