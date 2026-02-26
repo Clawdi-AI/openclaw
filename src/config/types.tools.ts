@@ -402,6 +402,8 @@ export type ToolsConfig = {
       provider?: "brave" | "perplexity" | "grok";
       /** Brave Search API key (optional; defaults to BRAVE_API_KEY env var). */
       apiKey?: string;
+      /** Base URL override for Brave Search API (proxy mode). */
+      baseUrl?: string;
       /** Default search results count (1-10). */
       maxResults?: number;
       /** Timeout in seconds for search requests. */
