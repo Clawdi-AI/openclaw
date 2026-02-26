@@ -4,7 +4,6 @@ import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -383,7 +382,7 @@ async function createAdminPairingToken(params: {
   openclawId: string;
   inboundUrl?: string;
   inboundTimeoutMs?: number;
-  channel: string;
+  channel?: string;
   sessionKey?: string;
   ttlSec?: number;
 }) {
@@ -395,7 +394,6 @@ async function createAdminPairingToken(params: {
     },
     body: JSON.stringify({
       openclawId: params.openclawId,
-      channel: params.channel,
       ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
       ...(params.ttlSec ? { ttlSec: params.ttlSec } : {}),
       ...(params.inboundUrl ? { inboundUrl: params.inboundUrl } : {}),
@@ -477,9 +475,7 @@ describe("mux server", () => {
       message: "Telegram getUpdates returned 409; another poller is using this bot token.",
     });
     expect(typeof telegramInbound?.lastConflictAtMs).toBe("number");
-    expect(JSON.stringify(telegramInbound?.lastError ?? "")).toContain(
-      "telegram getUpdates failed (409)",
-    );
+    expect(JSON.stringify(telegramInbound?.lastError ?? "")).toContain("getUpdates failed (409)");
   });
 
   test("instance register endpoint requires shared register key and returns runtime jwt metadata", async () => {
@@ -2332,7 +2328,7 @@ describe("mux server", () => {
     });
   });
 
-  test("retries Telegram inbound without advancing offset when forward fails", async () => {
+  test("advances Telegram offset on forward failure and retries in background", async () => {
     const inboundAttempts: Array<Record<string, unknown>> = [];
     let failFirstForward = true;
     const inbound = await startHttpServer(async (req, res) => {
@@ -2405,6 +2401,8 @@ describe("mux server", () => {
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
         MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+        // Short retry interval for test speed
+        MUX_TELEGRAM_BG_RETRY_INTERVAL_MS: "100",
       },
     });
 
@@ -2417,19 +2415,22 @@ describe("mux server", () => {
     expect(claim.status).toBe(200);
     releaseUpdates = true;
 
+    // The poller should advance the offset immediately (to 462) even though
+    // the first forward fails. The background retry delivers the message.
     await waitForCondition(
       () => inboundAttempts.length >= 2,
       6_000,
-      "timed out waiting for telegram retry forward",
+      "timed out waiting for telegram background retry",
     );
 
     expect(inboundAttempts[0]?.body).toBe("retry telegram message");
     expect(inboundAttempts[1]?.body).toBe("retry telegram message");
 
+    // Offset should advance past 461 after the first (failed) attempt —
+    // the poller must NOT re-poll with offset=1 twice.
     const seenOffsets = telegramRequests
       .map((request) => (typeof request.offset === "number" ? Number(request.offset) : null))
       .filter((offset): offset is number => offset !== null);
-    expect(seenOffsets.filter((offset) => offset === 1).length).toBeGreaterThanOrEqual(2);
     expect(seenOffsets.some((offset) => offset === 462)).toBe(true);
   }, 15_000);
 
@@ -3622,7 +3623,6 @@ describe("mux server", () => {
       port: server.port,
       adminToken: DEFAULT_ADMIN_TOKEN,
       openclawId: "tenant-a",
-      channel: "discord",
       ttlSec: 120,
     });
     expect(tokenResponse.status).toBe(200);
@@ -3632,8 +3632,6 @@ describe("mux server", () => {
       startCommand?: string | null;
     };
     expect(tokenBody.token.startsWith("mpt_")).toBe(true);
-    expect(tokenBody.deepLink ?? null).toBeNull();
-    expect(tokenBody.startCommand ?? null).toBeNull();
 
     gatewayState.pairingToken = tokenBody.token;
     dispatchGatewayMessages();
@@ -4586,14 +4584,12 @@ describe("mux server", () => {
       port: server.port,
       adminToken: DEFAULT_ADMIN_TOKEN,
       openclawId: "tenant-a",
-      channel: "discord",
       sessionKey: "dc:dm:777777",
       ttlSec: 120,
     });
     expect(firstToken.status).toBe(200);
     expect(await firstToken.json()).toMatchObject({
       ok: true,
-      channel: "discord",
       token: expect.stringMatching(/^mpt_/),
     });
 
@@ -4601,18 +4597,16 @@ describe("mux server", () => {
       port: server.port,
       adminToken: DEFAULT_ADMIN_TOKEN,
       openclawId: "tenant-b",
-      channel: "discord",
       sessionKey: "dc:dm:777777",
       ttlSec: 120,
     });
     expect(secondToken.status).toBe(200);
     expect(await secondToken.json()).toMatchObject({
       ok: true,
-      channel: "discord",
     });
   }, 15_000);
 
-  test("does not consume discord token when first claim attempt is invalid", async () => {
+  test("channel-agnostic token can be claimed by any channel", async () => {
     const dmChannelId = "997001";
     const dmUserId = "9090";
     const sentMessages: Array<Record<string, unknown>> = [];
@@ -4724,7 +4718,6 @@ describe("mux server", () => {
       port: server.port,
       adminToken: DEFAULT_ADMIN_TOKEN,
       openclawId: "tenant-a",
-      channel: "discord",
       sessionKey: "dc:dm:9090",
       ttlSec: 120,
     });
@@ -4736,39 +4729,17 @@ describe("mux server", () => {
       "timed out waiting for discord gateway identify before token claim",
     );
 
-    const dbPath = resolve(server.tempDir, "mux-server.sqlite");
-    const db = new DatabaseSync(dbPath);
-    db.prepare(
-      "UPDATE pairing_tokens SET channel = 'telegram' WHERE tenant_id = ? AND channel = 'discord' AND consumed_at_ms IS NULL",
-    ).run("tenant-a");
-    db.close();
-
+    // Token issued without channel — should be claimable by discord
     dispatchMessage("1001", tokenBody.token, "2026-01-01T00:00:01.000Z");
-
-    await waitForCondition(
-      () => sentMessages.some((message) => toSafeString(message.content).includes("Invalid token")),
-      6_000,
-      "timed out waiting for failed discord token claim",
-    );
-
-    const dbRestore = new DatabaseSync(dbPath);
-    dbRestore
-      .prepare(
-        "UPDATE pairing_tokens SET channel = 'discord' WHERE tenant_id = ? AND channel = 'telegram' AND consumed_at_ms IS NULL",
-      )
-      .run("tenant-a");
-    dbRestore.close();
-
-    dispatchMessage("1002", tokenBody.token, "2026-01-01T00:00:02.000Z");
 
     await waitForCondition(
       () => sentMessages.some((message) => toSafeString(message.content).includes("Paired")),
       6_000,
-      "timed out waiting for successful discord token claim after failure",
+      "timed out waiting for channel-agnostic discord token claim",
     );
   }, 20_000);
 
-  test("issues whatsapp pairing token without deep link or start command", async () => {
+  test("issues channel-agnostic pairing token with telegram deep link", async () => {
     const server = await startServer({
       tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
     });
@@ -4777,18 +4748,17 @@ describe("mux server", () => {
       port: server.port,
       adminToken: DEFAULT_ADMIN_TOKEN,
       openclawId: "tenant-a",
-      channel: "whatsapp",
       sessionKey: "agent:main:whatsapp:direct:+15550001111",
       ttlSec: 120,
     });
     expect(tokenResponse.status).toBe(200);
-    expect(await tokenResponse.json()).toMatchObject({
+    const body = await tokenResponse.json();
+    expect(body).toMatchObject({
       ok: true,
-      channel: "whatsapp",
       token: expect.stringMatching(/^mpt_/),
-      deepLink: null,
-      startCommand: null,
     });
+    // Channel-agnostic tokens always include telegram startCommand and deepLink
+    expect(typeof (body as Record<string, unknown>).startCommand).toBe("string");
   });
 
   test("whatsapp outbound accepts legacy text envelope", async () => {

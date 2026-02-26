@@ -65,17 +65,21 @@ CONFIG_JSON=$(node -e "
     },
   };
 
-  // Model config — Codex via sub2api
+  // Model config — Codex via sub2api.
+  // Preserve template-provided model definitions and only inject runtime auth/baseUrl.
   cfg.agents.defaults.model = { primary: process.argv[6] };
-  cfg.models = {
-    providers: {
-      'openai-codex': {
-        baseUrl: process.argv[7],
-        apiKey: process.argv[8],
-        headers: { 'x-api-key': process.argv[9] },
-        models: [],
-      },
+  cfg.models = cfg.models || {};
+  cfg.models.providers = cfg.models.providers || {};
+  const codexProvider = cfg.models.providers['openai-codex'] || {};
+  cfg.models.providers['openai-codex'] = {
+    ...codexProvider,
+    baseUrl: process.argv[7],
+    apiKey: process.argv[8],
+    headers: {
+      ...(codexProvider.headers || {}),
+      'x-api-key': process.argv[9],
     },
+    models: Array.isArray(codexProvider.models) ? codexProvider.models : [],
   };
 
   // Brave Search web tool (optional)

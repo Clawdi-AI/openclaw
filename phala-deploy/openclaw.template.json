@@ -58,6 +58,27 @@
       "compaction": { "mode": "safeguard" }
     }
   },
+  "models": {
+    "providers": {
+      "openai-codex": {
+        "baseUrl": "https://example.invalid/v1",
+        "apiKey": "set-by-gen-cvm-config",
+        "headers": { "x-api-key": "set-by-gen-cvm-config" },
+        "models": [
+          { "id": "gpt-5.3-codex", "name": "gpt-5.3-codex" },
+          { "id": "gpt-5.2-codex", "name": "gpt-5.2-codex" },
+          { "id": "gpt-5.1-codex-max", "name": "gpt-5.1-codex-max" },
+          { "id": "gpt-5.1-codex", "name": "gpt-5.1-codex" },
+          { "id": "gpt-5.2", "name": "gpt-5.2" },
+          { "id": "gpt-5.1", "name": "gpt-5.1" },
+          { "id": "gpt-5-codex", "name": "gpt-5-codex" },
+          { "id": "gpt-5", "name": "gpt-5" },
+          { "id": "gpt-5.1-codex-mini", "name": "gpt-5.1-codex-mini" },
+          { "id": "gpt-5-codex-mini", "name": "gpt-5-codex-mini" }
+        ]
+      }
+    }
+  },
   "skills": {
     "entries": {
       "gog": { "enabled": false },
