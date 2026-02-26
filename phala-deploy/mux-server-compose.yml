@@ -1,6 +1,6 @@
 services:
   mux-server:
-    image: h4x3rotab/openclaw-mux@sha256:2cc98cc0d9acececdb665caf4713ae4ae562ba1ce3ff81218f107b7a2b1cecc1
+    image: h4x3rotab/openclaw-mux@sha256:cfe6eda026525ed31f784e725fe7d0b1788febea78f5c2e97444d7d00c02f711
     container_name: mux-server
     ports:
       - "1022:22"
@@ -27,6 +27,11 @@ services:
       - mux_data:/data
       - mux_credentials:/root/.openclaw/credentials
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
 volumes:
   mux_data:
