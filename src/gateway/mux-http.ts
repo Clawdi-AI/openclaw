@@ -675,12 +675,14 @@ async function dispatchMuxTelegram(params: {
   }
 
   let markDispatchIdle: (() => void) | undefined;
+  let deliveryAttempted = false;
   try {
     await dispatchReplyWithBufferedBlockDispatcher({
       ctx,
       cfg,
       dispatcherOptions: {
         deliver: async (payload, info) => {
+          deliveryAttempted = true;
           if (info.kind === "final" && (await streaming.tryFinalize(payload))) {
             return;
           }
@@ -712,6 +714,13 @@ async function dispatchMuxTelegram(params: {
   } catch (err) {
     warn(`mux inbound dispatch failed messageId=${messageId}: ${String(err)}`);
   } finally {
-    await streaming.cleanup();
+    // When no final payloads were delivered (e.g. blanket suppression after a
+    // messaging-tool send) but the draft stream already has a preview message,
+    // keep the streamed content instead of deleting it.
+    if (!deliveryAttempted && streaming.draftStream.messageId() != null) {
+      await streaming.draftStream.stop();
+    } else {
+      await streaming.cleanup();
+    }
   }
 }
