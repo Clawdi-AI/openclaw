@@ -211,6 +211,15 @@ function toSafeString(value: unknown, fallback = ""): string {
   return fallback;
 }
 
+function filterRealInbound(
+  requests: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return requests.filter((r) => {
+    const messageId = toSafeString(r.messageId);
+    return !messageId.startsWith("synth:");
+  });
+}
+
 function readHeaderString(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) {
     return value.trim();
@@ -2999,13 +3008,14 @@ describe("mux server", () => {
     });
 
     await waitForCondition(
-      () => inboundRequests.length >= 1 && sentMessages.length >= 3,
+      () => filterRealInbound(inboundRequests).length >= 1 && sentMessages.length >= 3,
       5_000,
       "timed out waiting for post-pair inbound forward and notices",
     );
 
-    expect(inboundRequests).toHaveLength(1);
-    expect(inboundRequests[0]).toMatchObject({
+    const realInbound = filterRealInbound(inboundRequests);
+    expect(realInbound).toHaveLength(1);
+    expect(realInbound[0]).toMatchObject({
       channel: "telegram",
       sessionKey: "agent:main:telegram:group:-100777:topic:2",
       body: "/help",
@@ -3048,7 +3058,7 @@ describe("mux server", () => {
         },
       ],
     });
-  });
+  }, 10_000);
 
   test("pairs telegram DM threads once and isolates sessions per thread", async () => {
     const inboundRequests: Array<Record<string, unknown>> = [];
@@ -3254,7 +3264,7 @@ describe("mux server", () => {
     expect(threadReply).toBeDefined();
     expect(toSafeString(threadReply?.chat_id)).toBe("999");
     expect(threadReply?.message_thread_id).toBe(3);
-  });
+  }, 10_000);
 
   test("maps forum general topic to thread 1 and omits message_thread_id on sendMessage", async () => {
     const inboundRequests: Array<Record<string, unknown>> = [];
@@ -3629,13 +3639,14 @@ describe("mux server", () => {
     dispatchGatewayMessages();
 
     await waitForCondition(
-      () => inboundRequests.length >= 1 && pairingNotices.length >= 3,
+      () => filterRealInbound(inboundRequests).length >= 1 && pairingNotices.length >= 3,
       12_000,
       "timed out waiting for discord post-pair inbound forward and notices",
     );
 
-    expect(inboundRequests).toHaveLength(1);
-    expect(inboundRequests[0]).toMatchObject({
+    const realInbound = filterRealInbound(inboundRequests);
+    expect(realInbound).toHaveLength(1);
+    expect(realInbound[0]).toMatchObject({
       channel: "discord",
       sessionKey: "agent:main:discord:direct:4242",
       body: "hello after pair",
@@ -3911,12 +3922,13 @@ describe("mux server", () => {
     dispatchGatewayMessages();
 
     await waitForCondition(
-      () => inboundRequests.length >= 2,
+      () => filterRealInbound(inboundRequests).length >= 2,
       25_000,
       "timed out waiting for discord guild thread inbound forwards",
     );
 
-    expect(inboundRequests).toEqual(
+    const realInbound = filterRealInbound(inboundRequests);
+    expect(realInbound).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           channel: "discord",
@@ -4133,7 +4145,7 @@ describe("mux server", () => {
     );
 
     await waitForCondition(
-      () => inboundRequests.length >= 1 && sentMessages.length >= 4,
+      () => filterRealInbound(inboundRequests).length >= 1 && sentMessages.length >= 4,
       7_000,
       "timed out waiting for telegram bot control flow",
     );
@@ -4150,8 +4162,9 @@ describe("mux server", () => {
       true,
     );
 
-    expect(inboundRequests).toHaveLength(1);
-    expect(inboundRequests[0]).toMatchObject({
+    const realInboundTg = filterRealInbound(inboundRequests);
+    expect(realInboundTg).toHaveLength(1);
+    expect(realInboundTg[0]).toMatchObject({
       channel: "telegram",
       sessionKey: "agent:main:telegram:group:-100888:switch",
       body: "/help",
@@ -4369,7 +4382,7 @@ describe("mux server", () => {
     });
 
     await waitForCondition(
-      () => inboundRequests.length >= 1,
+      () => filterRealInbound(inboundRequests).length >= 1,
       12_000,
       "timed out waiting for discord /help forward after switch",
     );
@@ -4386,8 +4399,9 @@ describe("mux server", () => {
       sentMessages.some((msg) => toSafeString(msg.content).includes("Paired successfully")),
     ).toBe(true);
 
-    expect(inboundRequests).toHaveLength(1);
-    expect(inboundRequests[0]).toMatchObject({
+    const realInboundDc = filterRealInbound(inboundRequests);
+    expect(realInboundDc).toHaveLength(1);
+    expect(realInboundDc[0]).toMatchObject({
       channel: "discord",
       sessionKey: "dc:dm:4242:switch",
       body: "/help",

@@ -1,0 +1,38 @@
+{
+  "clawdiIntro": {
+    "text": "Hi! I'm **Clawdi** — your AI assistant.\n\nTo get started, pair this chat with your Clawdi account:\nVisit **clawdi.ai** and connect this messenger from your dashboard."
+  },
+  "pairingSuccess": {
+    "text": "**Paired successfully**\n\nYou can chat now."
+  },
+  "pairingRepaired": {
+    "text": "**Reconnected successfully**\n\nYou can chat now."
+  },
+  "pairingTakeover": {
+    "text": "**Paired successfully**\n\nYour previous connection was closed. You're now connected to a new assistant."
+  },
+  "pairingInvalid": {
+    "text": "**Pairing link is invalid or expired**\n\nRequest a new link from your dashboard."
+  },
+  "whatsappContactTip": {
+    "text": "**Tip:** Save this number to your contacts and give it a custom name — like your assistant's name or anything you'd like!"
+  },
+  "postPairingPrompt": {
+    "text": "You have a new user who just connected via {{channel}}. Introduce yourself briefly, mention your key capabilities, and let them know how to get started."
+  },
+  "botHelp": {
+    "text": null
+  },
+  "botStatus": {
+    "text": null
+  },
+  "botUnpairSuccess": {
+    "text": null
+  },
+  "botNotPaired": {
+    "text": null
+  },
+  "botSwitchUsage": {
+    "text": null
+  }
+}

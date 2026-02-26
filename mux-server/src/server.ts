@@ -522,13 +522,66 @@ const whatsappQueueBatchSize = Number(process.env.MUX_WHATSAPP_QUEUE_BATCH_SIZE 
 const pairingTokenTtlSec = Number(process.env.MUX_PAIRING_TOKEN_TTL_SEC || 15 * 60);
 const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
 let telegramBotUsername = readNonEmptyString(process.env.MUX_TELEGRAM_BOT_USERNAME);
-const pairingSuccessTextOverride = readNonEmptyString(process.env.MUX_PAIRING_SUCCESS_TEXT);
-const pairingInvalidTextOverride = readNonEmptyString(process.env.MUX_PAIRING_INVALID_TEXT);
-const botControlHelpTextOverride = readNonEmptyString(process.env.MUX_BOT_HELP_TEXT);
-const botUnpairSuccessTextOverride = readNonEmptyString(process.env.MUX_BOT_UNPAIR_SUCCESS_TEXT);
-const botNotPairedTextOverride = readNonEmptyString(process.env.MUX_BOT_NOT_PAIRED_TEXT);
-const botSwitchUsageTextOverride = readNonEmptyString(process.env.MUX_BOT_SWITCH_USAGE_TEXT);
-const configuredUnpairedHintText = readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT);
+type NoticesConfigEntry = { text: string | null };
+type NoticesConfig = Partial<{
+  clawdiIntro: NoticesConfigEntry;
+  pairingSuccess: NoticesConfigEntry;
+  pairingRepaired: NoticesConfigEntry;
+  pairingTakeover: NoticesConfigEntry;
+  pairingInvalid: NoticesConfigEntry;
+  whatsappContactTip: NoticesConfigEntry;
+  postPairingPrompt: NoticesConfigEntry;
+  botHelp: NoticesConfigEntry;
+  botStatus: NoticesConfigEntry;
+  botUnpairSuccess: NoticesConfigEntry;
+  botNotPaired: NoticesConfigEntry;
+  botSwitchUsage: NoticesConfigEntry;
+}>;
+
+type ClaimType = "fresh" | "repaired" | "takeover";
+type ClaimResult = {
+  tenantId: string;
+  bindingId: string;
+  routeKey: string;
+  sessionKey: string;
+  claimType: ClaimType;
+  previousTenantId?: string;
+};
+
+function loadNoticesConfig(): NoticesConfig {
+  const configPath = process.env.MUX_NOTICES_CONFIG_PATH || "./config/notices.json";
+  try {
+    const raw = fs.readFileSync(path.resolve(configPath), "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+const noticesConfig = loadNoticesConfig();
+
+function getNoticeText(key: keyof NoticesConfig): string | null {
+  const entry = noticesConfig[key];
+  if (entry && typeof entry.text === "string") {
+    return entry.text;
+  }
+  return null;
+}
+
+// Env var overrides take priority over config file
+const pairingSuccessTextOverride =
+  readNonEmptyString(process.env.MUX_PAIRING_SUCCESS_TEXT) || getNoticeText("pairingSuccess");
+const pairingInvalidTextOverride =
+  readNonEmptyString(process.env.MUX_PAIRING_INVALID_TEXT) || getNoticeText("pairingInvalid");
+const botControlHelpTextOverride =
+  readNonEmptyString(process.env.MUX_BOT_HELP_TEXT) || getNoticeText("botHelp");
+const botUnpairSuccessTextOverride =
+  readNonEmptyString(process.env.MUX_BOT_UNPAIR_SUCCESS_TEXT) || getNoticeText("botUnpairSuccess");
+const botNotPairedTextOverride =
+  readNonEmptyString(process.env.MUX_BOT_NOT_PAIRED_TEXT) || getNoticeText("botNotPaired");
+const botSwitchUsageTextOverride =
+  readNonEmptyString(process.env.MUX_BOT_SWITCH_USAGE_TEXT) || getNoticeText("botSwitchUsage");
+const configuredUnpairedHintText =
+  readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT) || getNoticeText("clawdiIntro");
 const requestBodyMaxBytes = (() => {
   const parsed = Number(process.env.MUX_MAX_BODY_BYTES || 10 * 1024 * 1024);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -726,8 +779,14 @@ const stmtInsertPairingToken = db.prepare(`
 const stmtSelectActivePairingTokenByHash = db.prepare(`
   SELECT tenant_id, channel, session_key
   FROM pairing_tokens
-  WHERE token_hash = ? AND expires_at_ms > ?
+  WHERE token_hash = ? AND consumed_at_ms IS NULL AND expires_at_ms > ?
   LIMIT 1
+`);
+
+const stmtConsumePairingToken = db.prepare(`
+  UPDATE pairing_tokens
+  SET consumed_at_ms = ?
+  WHERE token_hash = ? AND consumed_at_ms IS NULL AND expires_at_ms > ?
 `);
 
 const stmtAttachPairingTokenBinding = db.prepare(`
@@ -2469,21 +2528,59 @@ function renderBotSwitchUsageNotice(channel: NoticeChannel): StyledNotice {
 
 function renderUnpairedHintNotice(channel: NoticeChannel): StyledNotice {
   if (configuredUnpairedHintText) {
-    return { text: configuredUnpairedHintText };
+    return convertConfigNotice(channel, configuredUnpairedHintText);
   }
-  const stepThree =
-    channel === "telegram"
-      ? `3) Send the token here (or use ${styleCode(channel, "/start <token>")}).`
-      : "3) Send the token in this chat.";
   return buildStyledNotice(channel, [
-    styleBold(channel, "OpenClaw: this chat is not paired yet"),
+    `Hi! I'm ${styleBold(channel, "Clawdi")} — your AI assistant.`,
     "",
-    styleBold(channel, "Pairing steps"),
-    "1) Open your dashboard.",
-    "2) Generate a pairing link/token for this channel.",
-    stepThree,
+    "To get started, pair this chat with your Clawdi account:",
+    `Visit ${styleBold(channel, "clawdi.ai")} and connect this messenger from your dashboard.`,
+  ]);
+}
+
+function convertConfigNotice(channel: NoticeChannel, text: string): StyledNotice {
+  if (channel === "telegram") {
+    // Escape HTML entities first, then convert markdown to HTML tags
+    const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const converted = escaped
+      .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+      .replace(/`(.+?)`/g, "<code>$1</code>");
+    return { text: converted, parseMode: "HTML" };
+  }
+  return { text };
+}
+
+function renderPairingRepairedNotice(channel: NoticeChannel): StyledNotice {
+  const override = getNoticeText("pairingRepaired");
+  if (override) {
+    return convertConfigNotice(channel, override);
+  }
+  return buildStyledNotice(channel, [
+    styleBold(channel, "Reconnected successfully"),
     "",
-    `After pairing, ${styleCode(channel, "/help")} is provided by your OpenClaw instance.`,
+    "You can chat now.",
+  ]);
+}
+
+function renderPairingTakeoverNotice(channel: NoticeChannel): StyledNotice {
+  const override = getNoticeText("pairingTakeover");
+  if (override) {
+    return convertConfigNotice(channel, override);
+  }
+  return buildStyledNotice(channel, [
+    styleBold(channel, "Paired successfully"),
+    "",
+    "Your previous connection was closed. You're now connected to a new assistant.",
+  ]);
+}
+
+function renderWhatsAppContactTip(channel: NoticeChannel): StyledNotice {
+  const override = getNoticeText("whatsappContactTip");
+  if (override) {
+    return convertConfigNotice(channel, override);
+  }
+  return buildStyledNotice(channel, [
+    `${styleBold(channel, "Tip:")} Save this number to your contacts and give it a custom name — like your assistant's name or anything you'd like!`,
   ]);
 }
 
@@ -3554,15 +3651,199 @@ function renderBotStatusNotice(params: {
   return buildStyledNotice(params.channel, lines);
 }
 
+function resolvePostPairingPrompt(channel: NoticeChannel): string {
+  const template =
+    getNoticeText("postPairingPrompt") ||
+    "You have a new user who just connected via {{channel}}. Introduce yourself briefly, mention your key capabilities, and let them know how to get started.";
+  const channelLabel =
+    channel === "telegram" ? "Telegram" : channel === "discord" ? "Discord" : "WhatsApp";
+  return template.replace(/\{\{channel\}\}/g, channelLabel);
+}
+
+async function sendPostPairingSyntheticInbound(params: {
+  channel: NoticeChannel;
+  tenantId: string;
+  sessionKey: string;
+  routeKey: string;
+  fromId: string;
+  chatId: string;
+  chatType: "direct" | "group";
+}): Promise<void> {
+  const target = resolveTenantInboundTarget(params.tenantId);
+  if (!target) {
+    log({
+      type: "post_pairing_synthetic_skip_no_target",
+      tenantId: params.tenantId,
+      channel: params.channel,
+    });
+    return;
+  }
+  const prompt = resolvePostPairingPrompt(params.channel);
+  const now = Date.now();
+  const syntheticId = `synth:pair:${randomUUID()}`;
+
+  let payload: Record<string, unknown>;
+  if (params.channel === "telegram") {
+    payload = buildTelegramInboundEnvelope({
+      updateId: 0,
+      sessionKey: params.sessionKey,
+      accountId: openclawMuxAccountId,
+      rawBody: prompt,
+      fromId: params.fromId,
+      chatId: params.chatId,
+      topicId: undefined,
+      chatType: params.chatType,
+      messageId: syntheticId,
+      timestampMs: now,
+      routeKey: params.routeKey,
+      rawMessage: {},
+      rawUpdate: {},
+      media: null,
+      attachments: [],
+    });
+  } else if (params.channel === "discord") {
+    payload = buildDiscordInboundEnvelope({
+      messageId: syntheticId,
+      sessionKey: params.sessionKey,
+      accountId: openclawMuxAccountId,
+      rawBody: prompt,
+      fromId: params.fromId,
+      channelId: params.chatId,
+      guildId: null,
+      routeKey: params.routeKey,
+      chatType: params.chatType,
+      timestampMs: now,
+      rawMessage: {},
+      media: null,
+      attachments: [],
+    });
+  } else {
+    payload = buildWhatsAppInboundEnvelope({
+      messageId: syntheticId,
+      sessionKey: params.sessionKey,
+      openclawAccountId: openclawMuxAccountId,
+      rawBody: prompt,
+      fromId: params.fromId,
+      chatJid: params.chatId,
+      routeKey: params.routeKey,
+      accountId: params.chatId,
+      chatType: params.chatType,
+      timestampMs: now,
+      rawMessage: {},
+      media: null,
+      attachments: [],
+    });
+  }
+
+  const payloadWithIdentity = {
+    ...payload,
+    openclawId: params.tenantId,
+  };
+
+  try {
+    const response = await fetch(target.url, {
+      method: "POST",
+      headers: {
+        ...(await buildInboundAuthHeaders(target)),
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(payloadWithIdentity),
+      signal: AbortSignal.timeout(target.timeoutMs),
+    });
+    if (!response.ok) {
+      const bodyText = await response.text();
+      log({
+        type: "post_pairing_synthetic_error",
+        tenantId: params.tenantId,
+        channel: params.channel,
+        status: response.status,
+        body: bodyText.slice(0, 200),
+      });
+    } else {
+      log({
+        type: "post_pairing_synthetic_sent",
+        tenantId: params.tenantId,
+        channel: params.channel,
+        sessionKey: params.sessionKey,
+      });
+    }
+  } catch (error) {
+    log({
+      type: "post_pairing_synthetic_error",
+      tenantId: params.tenantId,
+      channel: params.channel,
+      error: String(error),
+    });
+  }
+}
+
+function renderNoticeForClaimType(channel: NoticeChannel, claimType: ClaimType): StyledNotice {
+  if (claimType === "repaired") {
+    return renderPairingRepairedNotice(channel);
+  }
+  if (claimType === "takeover") {
+    return renderPairingTakeoverNotice(channel);
+  }
+  return renderPairingSuccessNotice(channel);
+}
+
+async function sendPostClaimNotices(params: {
+  channel: NoticeChannel;
+  claimed: ClaimResult;
+  send: (notice: StyledNotice) => Promise<void>;
+  fromId: string;
+  chatId: string;
+  chatType: "direct" | "group";
+}): Promise<void> {
+  const notice = renderNoticeForClaimType(params.channel, params.claimed.claimType);
+  await params.send(notice);
+
+  if (params.claimed.claimType === "repaired") {
+    return;
+  }
+
+  if (params.channel === "whatsapp") {
+    try {
+      const tip = renderWhatsAppContactTip(params.channel);
+      await params.send(tip);
+    } catch (error) {
+      log({
+        type: "whatsapp_contact_tip_error",
+        tenantId: params.claimed.tenantId,
+        error: String(error),
+      });
+    }
+  }
+
+  try {
+    await sendPostPairingSyntheticInbound({
+      channel: params.channel,
+      tenantId: params.claimed.tenantId,
+      sessionKey: params.claimed.sessionKey,
+      routeKey: params.claimed.routeKey,
+      fromId: params.fromId,
+      chatId: params.chatId,
+      chatType: params.chatType,
+    });
+  } catch (error) {
+    log({
+      type: "post_pairing_synthetic_error",
+      tenantId: params.claimed.tenantId,
+      channel: params.channel,
+      error: String(error),
+    });
+  }
+}
+
 function peekActivePairingToken(
   token: string,
-  _channel?: "telegram" | "discord" | "whatsapp",
+  channel: "telegram" | "discord" | "whatsapp",
 ): PairingTokenRow | null {
   const now = Date.now();
   purgeExpiredPairingTokens(now);
   const tokenHash = hashPairingToken(token);
   const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
-  if (!row) {
+  if (!row || String(row.channel) !== channel) {
     return null;
   }
   return row;
@@ -3646,7 +3927,7 @@ function claimTelegramPairingToken(params: {
   chatId: string;
   topicId?: number;
   chatType: "direct" | "group";
-}): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
+}): ClaimResult | null {
   return runTokenClaimTransaction(() => {
     const now = Date.now();
     purgeExpiredPairingTokens(now);
@@ -3654,7 +3935,7 @@ function claimTelegramPairingToken(params: {
     const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
       | PairingTokenRow
       | undefined;
-    if (!row) {
+    if (!row || String(row.channel) !== "telegram") {
       return null;
     }
 
@@ -3664,8 +3945,27 @@ function claimTelegramPairingToken(params: {
       params.chatType === "direct"
         ? buildTelegramRouteKey(params.chatId)
         : buildTelegramRouteKey(params.chatId, params.topicId);
-    if (isRouteBoundByAnotherTenant({ channel: "telegram", routeKey: boundRouteKey, tenantId })) {
-      return null;
+
+    let claimType: ClaimType = "fresh";
+    let previousTenantId: string | undefined;
+
+    const liveBinding = resolveLiveBindingByRouteKey("telegram", boundRouteKey);
+    if (liveBinding && liveBinding.tenant_id !== tenantId) {
+      // Takeover: different tenant owns this route
+      previousTenantId = liveBinding.tenant_id;
+      stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
+      stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
+      writeAuditLog(
+        liveBinding.tenant_id,
+        "pairing_unbound_by_route_takeover",
+        {
+          bindingId: liveBinding.binding_id,
+          routeKey: boundRouteKey,
+          takeoverTenantId: tenantId,
+        },
+        now,
+      );
+      claimType = "takeover";
     }
 
     const existing = stmtSelectActiveBindingByTenantAndRoute.get(
@@ -3673,6 +3973,40 @@ function claimTelegramPairingToken(params: {
       "telegram",
       boundRouteKey,
     ) as ExistingBindingRow | undefined;
+
+    if (existing?.binding_id && existing?.status === "active") {
+      // Same tenant already active — re-pair
+      const bindingId = String(existing.binding_id);
+      const preferredSessionKey = readNonEmptyString(row.session_key);
+      const sessionKey =
+        params.chatType === "direct" && params.topicId
+          ? buildThreadScopedSessionKey(
+              preferredSessionKey || deriveTelegramSessionKey(params.chatId),
+              params.chatId,
+              params.topicId,
+            )
+          : (preferredSessionKey ?? deriveTelegramSessionKey(params.chatId, params.topicId));
+      stmtUpsertSessionRoute.run(
+        tenantId,
+        "telegram",
+        sessionKey,
+        bindingId,
+        JSON.stringify({ routeKey: claimRouteKey }),
+        now,
+      );
+      const consumeRepaired = stmtConsumePairingToken.run(now, tokenHash, now);
+      if (consumeRepaired.changes === 0) {
+        return null;
+      }
+      stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
+      writeAuditLog(
+        tenantId,
+        "pairing_token_claimed",
+        { bindingId, routeKey: boundRouteKey, claimType: "repaired" },
+        now,
+      );
+      return { tenantId, bindingId, routeKey: boundRouteKey, sessionKey, claimType: "repaired" };
+    }
 
     const bindingId =
       (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
@@ -3713,9 +4047,30 @@ function claimTelegramPairingToken(params: {
       now,
     );
 
+    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+    if (consumeResult.changes === 0) {
+      return null;
+    }
     stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
-    writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey: boundRouteKey }, now);
-    return { tenantId, bindingId, routeKey: boundRouteKey, sessionKey };
+    writeAuditLog(
+      tenantId,
+      "pairing_token_claimed",
+      {
+        bindingId,
+        routeKey: boundRouteKey,
+        claimType,
+        ...(previousTenantId ? { previousTenantId } : {}),
+      },
+      now,
+    );
+    return {
+      tenantId,
+      bindingId,
+      routeKey: boundRouteKey,
+      sessionKey,
+      claimType,
+      ...(previousTenantId ? { previousTenantId } : {}),
+    };
   });
 }
 
@@ -3723,7 +4078,7 @@ function claimDiscordPairingToken(params: {
   token: string;
   route: DiscordBoundRoute;
   channelId: string;
-}): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
+}): ClaimResult | null {
   return runTokenClaimTransaction(() => {
     const now = Date.now();
     purgeExpiredPairingTokens(now);
@@ -3731,7 +4086,7 @@ function claimDiscordPairingToken(params: {
     const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
       | PairingTokenRow
       | undefined;
-    if (!row) {
+    if (!row || String(row.channel) !== "discord") {
       return null;
     }
     const tenantId = String(row.tenant_id);
@@ -3748,8 +4103,12 @@ function claimDiscordPairingToken(params: {
       return null;
     }
 
+    let claimType: ClaimType = "fresh";
+    let previousTenantId: string | undefined;
+
     const liveBinding = resolveLiveBindingByRouteKey("discord", boundRouteKey);
     if (liveBinding && liveBinding.tenant_id !== tenantId) {
+      previousTenantId = liveBinding.tenant_id;
       stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
       stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
       writeAuditLog(
@@ -3762,6 +4121,7 @@ function claimDiscordPairingToken(params: {
         },
         now,
       );
+      claimType = "takeover";
     }
 
     const existing = stmtSelectActiveBindingByTenantAndRoute.get(
@@ -3770,8 +4130,59 @@ function claimDiscordPairingToken(params: {
       boundRouteKey,
     ) as ExistingBindingRow | undefined;
     if (existing?.status === "active") {
-      return null;
+      // Same tenant already active — re-pair
+      const bindingId = String(existing.binding_id);
+      const preferredSessionKey = readNonEmptyString(row.session_key);
+      const sessionKey =
+        params.route.kind === "guild" && params.route.threadId
+          ? buildDiscordThreadScopedSessionKey(
+              preferredSessionKey ??
+                deriveDiscordSessionKey({
+                  route:
+                    boundRoute.kind === "guild"
+                      ? {
+                          kind: "guild",
+                          guildId: boundRoute.guildId,
+                          ...(boundRoute.channelId ? { channelId: boundRoute.channelId } : {}),
+                        }
+                      : boundRoute,
+                  channelId:
+                    boundRoute.kind === "guild"
+                      ? (boundRoute.channelId ??
+                        (params.route.kind === "guild"
+                          ? (params.route.channelId ?? params.channelId)
+                          : params.channelId))
+                      : params.channelId,
+                }),
+              params.route.threadId,
+            )
+          : (preferredSessionKey ??
+            deriveDiscordSessionKey({
+              route: params.route,
+              channelId: params.channelId,
+            }));
+      stmtUpsertSessionRoute.run(
+        tenantId,
+        "discord",
+        sessionKey,
+        bindingId,
+        JSON.stringify({ routeKey: claimRouteKey, channelId: params.channelId }),
+        now,
+      );
+      const consumeRepaired = stmtConsumePairingToken.run(now, tokenHash, now);
+      if (consumeRepaired.changes === 0) {
+        return null;
+      }
+      stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
+      writeAuditLog(
+        tenantId,
+        "pairing_token_claimed",
+        { bindingId, routeKey: boundRouteKey, claimType: "repaired" },
+        now,
+      );
+      return { tenantId, bindingId, routeKey: boundRouteKey, sessionKey, claimType: "repaired" };
     }
+
     const bindingId =
       (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
     if (!existing?.binding_id) {
@@ -3836,13 +4247,29 @@ function claimDiscordPairingToken(params: {
       now,
     );
 
+    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+    if (consumeResult.changes === 0) {
+      return null;
+    }
     stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
-    writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey: boundRouteKey }, now);
+    writeAuditLog(
+      tenantId,
+      "pairing_token_claimed",
+      {
+        bindingId,
+        routeKey: boundRouteKey,
+        claimType,
+        ...(previousTenantId ? { previousTenantId } : {}),
+      },
+      now,
+    );
     return {
       tenantId,
       bindingId,
       routeKey: boundRouteKey,
       sessionKey,
+      claimType,
+      ...(previousTenantId ? { previousTenantId } : {}),
     };
   });
 }
@@ -3853,7 +4280,7 @@ function claimWhatsAppPairingToken(params: {
   accountId: string;
   chatType: "direct" | "group";
   directPeerId?: string;
-}): { tenantId: string; bindingId: string; routeKey: string; sessionKey: string } | null {
+}): ClaimResult | null {
   return runTokenClaimTransaction(() => {
     const now = Date.now();
     purgeExpiredPairingTokens(now);
@@ -3861,19 +4288,76 @@ function claimWhatsAppPairingToken(params: {
     const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
       | PairingTokenRow
       | undefined;
-    if (!row) {
+    if (!row || String(row.channel) !== "whatsapp") {
       return null;
     }
 
     const tenantId = String(row.tenant_id);
     const routeKey = buildWhatsAppRouteKey(params.chatJid, params.accountId);
-    if (isRouteBoundByAnotherTenant({ channel: "whatsapp", routeKey, tenantId })) {
-      return null;
+
+    let claimType: ClaimType = "fresh";
+    let previousTenantId: string | undefined;
+
+    const liveBinding = resolveLiveBindingByRouteKey("whatsapp", routeKey);
+    if (liveBinding && liveBinding.tenant_id !== tenantId) {
+      // Takeover: different tenant owns this route
+      previousTenantId = liveBinding.tenant_id;
+      stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
+      stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
+      writeAuditLog(
+        liveBinding.tenant_id,
+        "pairing_unbound_by_route_takeover",
+        {
+          bindingId: liveBinding.binding_id,
+          routeKey,
+          takeoverTenantId: tenantId,
+        },
+        now,
+      );
+      claimType = "takeover";
     }
 
     const existing = stmtSelectActiveBindingByTenantAndRoute.get(tenantId, "whatsapp", routeKey) as
       | ExistingBindingRow
       | undefined;
+
+    if (existing?.binding_id && existing?.status === "active") {
+      // Same tenant already active — re-pair
+      const bindingId = String(existing.binding_id);
+      const preferredSessionKey = readNonEmptyString(row.session_key);
+      const sessionKey =
+        preferredSessionKey ||
+        deriveWhatsAppSessionKey({
+          chatJid: params.chatJid,
+          chatType: params.chatType,
+          directPeerId: params.directPeerId,
+        });
+      stmtUpsertSessionRoute.run(
+        tenantId,
+        "whatsapp",
+        sessionKey,
+        bindingId,
+        JSON.stringify({
+          routeKey,
+          accountId: params.accountId,
+          chatJid: params.chatJid,
+        }),
+        now,
+      );
+      const consumeRepaired = stmtConsumePairingToken.run(now, tokenHash, now);
+      if (consumeRepaired.changes === 0) {
+        return null;
+      }
+      stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+      writeAuditLog(
+        tenantId,
+        "pairing_token_claimed",
+        { bindingId, routeKey, claimType: "repaired" },
+        now,
+      );
+      return { tenantId, bindingId, routeKey, sessionKey, claimType: "repaired" };
+    }
+
     const bindingId =
       (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
     if (!existing?.binding_id) {
@@ -3916,9 +4400,25 @@ function claimWhatsAppPairingToken(params: {
       now,
     );
 
+    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
+    if (consumeResult.changes === 0) {
+      return null;
+    }
     stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
-    writeAuditLog(tenantId, "pairing_token_claimed", { bindingId, routeKey }, now);
-    return { tenantId, bindingId, routeKey, sessionKey };
+    writeAuditLog(
+      tenantId,
+      "pairing_token_claimed",
+      { bindingId, routeKey, claimType, ...(previousTenantId ? { previousTenantId } : {}) },
+      now,
+    );
+    return {
+      tenantId,
+      bindingId,
+      routeKey,
+      sessionKey,
+      claimType,
+      ...(previousTenantId ? { previousTenantId } : {}),
+    };
   });
 }
 
@@ -4750,14 +5250,30 @@ async function handleTelegramBotControlCommand(params: {
     topicId: params.topicId,
     chatType: params.chatType,
   });
-  const notice = claimed
-    ? renderPairingSuccessNotice("telegram")
-    : renderPairingInvalidNotice("telegram");
-  await sendTelegramPairingNotice({
+  if (!claimed) {
+    const notice = renderPairingInvalidNotice("telegram");
+    await sendTelegramPairingNotice({
+      chatId: params.chatId,
+      topicId: params.topicId,
+      text: notice.text,
+      parseMode: notice.parseMode,
+    });
+    return;
+  }
+  await sendPostClaimNotices({
+    channel: "telegram",
+    claimed,
+    send: async (notice) => {
+      await sendTelegramPairingNotice({
+        chatId: params.chatId,
+        topicId: params.topicId,
+        text: notice.text,
+        parseMode: notice.parseMode,
+      });
+    },
+    fromId: params.chatId,
     chatId: params.chatId,
-    topicId: params.topicId,
-    text: notice.text,
-    parseMode: notice.parseMode,
+    chatType: params.chatType,
   });
 }
 
@@ -4840,12 +5356,26 @@ async function handleDiscordBotControlCommand(params: {
     route,
     channelId: params.channelId,
   });
-  const notice = claimed
-    ? renderPairingSuccessNotice("discord")
-    : renderPairingInvalidNotice("discord");
-  await sendDiscordPairingNotice({
-    channelId: params.channelId,
-    text: notice.text,
+  if (!claimed) {
+    const notice = renderPairingInvalidNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return { routeReset: false };
+  }
+  await sendPostClaimNotices({
+    channel: "discord",
+    claimed,
+    send: async (notice) => {
+      await sendDiscordPairingNotice({
+        channelId: params.channelId,
+        text: notice.text,
+      });
+    },
+    fromId: route.kind === "dm" ? route.userId : params.channelId,
+    chatId: params.channelId,
+    chatType: route.kind === "dm" ? "direct" : "group",
   });
   return { routeReset: true, pending: false };
 }
@@ -4907,12 +5437,26 @@ async function handleDiscordBotControlCommandUnbound(params: {
     route,
     channelId: params.channelId,
   });
-  const notice = claimed
-    ? renderPairingSuccessNotice("discord")
-    : renderPairingInvalidNotice("discord");
-  await sendDiscordPairingNotice({
-    channelId: params.channelId,
-    text: notice.text,
+  if (!claimed) {
+    const notice = renderPairingInvalidNotice("discord");
+    await sendDiscordPairingNotice({
+      channelId: params.channelId,
+      text: notice.text,
+    });
+    return;
+  }
+  await sendPostClaimNotices({
+    channel: "discord",
+    claimed,
+    send: async (notice) => {
+      await sendDiscordPairingNotice({
+        channelId: params.channelId,
+        text: notice.text,
+      });
+    },
+    fromId: route.kind === "dm" ? route.userId : params.channelId,
+    chatId: params.channelId,
+    chatType: route.kind === "dm" ? "direct" : "group",
   });
 }
 
@@ -5011,13 +5555,28 @@ async function handleWhatsAppBotControlCommand(params: {
     chatType: params.chatType,
     directPeerId: params.directPeerId,
   });
-  const notice = claimed
-    ? renderPairingSuccessNotice("whatsapp")
-    : renderPairingInvalidNotice("whatsapp");
-  await sendWhatsAppPairingNotice({
-    chatJid: params.chatJid,
-    accountId: params.accountId,
-    text: notice.text,
+  if (!claimed) {
+    const notice = renderPairingInvalidNotice("whatsapp");
+    await sendWhatsAppPairingNotice({
+      chatJid: params.chatJid,
+      accountId: params.accountId,
+      text: notice.text,
+    });
+    return;
+  }
+  await sendPostClaimNotices({
+    channel: "whatsapp",
+    claimed,
+    send: async (notice) => {
+      await sendWhatsAppPairingNotice({
+        chatJid: params.chatJid,
+        accountId: params.accountId,
+        text: notice.text,
+      });
+    },
+    fromId: params.chatJid,
+    chatId: params.chatJid,
+    chatType: params.chatType,
   });
 }
 
@@ -5140,12 +5699,24 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     }
 
     try {
-      const notice = renderPairingSuccessNotice("telegram");
-      await sendTelegramPairingNotice({
+      const fromId =
+        typeof message.from?.id === "number" && Number.isFinite(message.from.id)
+          ? String(Math.trunc(message.from.id))
+          : chatId;
+      await sendPostClaimNotices({
+        channel: "telegram",
+        claimed,
+        send: async (notice) => {
+          await sendTelegramPairingNotice({
+            chatId,
+            topicId,
+            text: notice.text,
+            parseMode: notice.parseMode,
+          });
+        },
+        fromId,
         chatId,
-        topicId,
-        text: notice.text,
-        parseMode: notice.parseMode,
+        chatType,
       });
     } catch (error) {
       log({
@@ -5161,16 +5732,64 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
       updateId,
       routeKey: claimed.routeKey,
       sessionKey: claimed.sessionKey,
+      claimType: claimed.claimType,
+      ...(claimed.previousTenantId ? { previousTenantId: claimed.previousTenantId } : {}),
     });
     return;
   }
   if (pairingToken) {
-    log({
-      type: "telegram_pairing_token_ignored_bound_route",
-      tenantId: binding.tenantId,
-      updateId,
-      routeKey: binding.routeKey,
+    const reClaimed = claimTelegramPairingToken({
+      token: pairingToken,
+      chatId,
+      topicId,
+      chatType,
     });
+    if (reClaimed) {
+      try {
+        const fromId =
+          typeof message.from?.id === "number" && Number.isFinite(message.from.id)
+            ? String(Math.trunc(message.from.id))
+            : chatId;
+        await sendPostClaimNotices({
+          channel: "telegram",
+          claimed: reClaimed,
+          send: async (notice) => {
+            await sendTelegramPairingNotice({
+              chatId,
+              topicId,
+              text: notice.text,
+              parseMode: notice.parseMode,
+            });
+          },
+          fromId,
+          chatId,
+          chatType,
+        });
+      } catch (error) {
+        log({
+          type: "telegram_pairing_notice_error",
+          tenantId: reClaimed.tenantId,
+          updateId,
+          error: String(error),
+        });
+      }
+      log({
+        type: "telegram_pairing_token_claimed",
+        tenantId: reClaimed.tenantId,
+        updateId,
+        routeKey: reClaimed.routeKey,
+        sessionKey: reClaimed.sessionKey,
+        claimType: reClaimed.claimType,
+        ...(reClaimed.previousTenantId ? { previousTenantId: reClaimed.previousTenantId } : {}),
+      });
+    } else {
+      log({
+        type: "telegram_pairing_token_ignored_bound_route",
+        tenantId: binding.tenantId,
+        updateId,
+        routeKey: binding.routeKey,
+      });
+    }
     return;
   }
 
@@ -5496,10 +6115,18 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
         continue;
       }
       try {
-        const notice = renderPairingSuccessNotice("discord");
-        await sendDiscordPairingNotice({
-          channelId,
-          text: notice.text,
+        await sendPostClaimNotices({
+          channel: "discord",
+          claimed,
+          send: async (notice) => {
+            await sendDiscordPairingNotice({
+              channelId,
+              text: notice.text,
+            });
+          },
+          fromId,
+          chatId: channelId,
+          chatType: route.kind === "dm" ? "direct" : "group",
         });
       } catch (error) {
         log({
@@ -5516,6 +6143,8 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
         bindingId: claimed.bindingId,
         routeKey: claimed.routeKey,
         sessionKey: claimed.sessionKey,
+        claimType: claimed.claimType,
+        ...(claimed.previousTenantId ? { previousTenantId: claimed.previousTenantId } : {}),
         channelId,
         messageId,
       });
@@ -5525,13 +6154,55 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
     }
 
     if (pairingToken) {
-      log({
-        type: "discord_pairing_token_ignored_bound_route",
-        tenantId: params.tenant_id,
-        bindingId: params.binding_id,
-        routeKey: params.route_key,
-        messageId,
+      const reClaimed = claimDiscordPairingToken({
+        token: pairingToken,
+        route,
+        channelId,
       });
+      if (reClaimed) {
+        try {
+          await sendPostClaimNotices({
+            channel: "discord",
+            claimed: reClaimed,
+            send: async (notice) => {
+              await sendDiscordPairingNotice({
+                channelId,
+                text: notice.text,
+              });
+            },
+            fromId,
+            chatId: channelId,
+            chatType: route.kind === "dm" ? "direct" : "group",
+          });
+        } catch (error) {
+          log({
+            type: "discord_pairing_notice_error",
+            tenantId: reClaimed.tenantId,
+            bindingId: reClaimed.bindingId,
+            messageId,
+            error: String(error),
+          });
+        }
+        log({
+          type: "discord_pairing_token_claimed",
+          tenantId: reClaimed.tenantId,
+          bindingId: reClaimed.bindingId,
+          routeKey: reClaimed.routeKey,
+          sessionKey: reClaimed.sessionKey,
+          claimType: reClaimed.claimType,
+          ...(reClaimed.previousTenantId ? { previousTenantId: reClaimed.previousTenantId } : {}),
+          channelId,
+          messageId,
+        });
+      } else {
+        log({
+          type: "discord_pairing_token_ignored_bound_route",
+          tenantId: params.tenant_id,
+          bindingId: params.binding_id,
+          routeKey: params.route_key,
+          messageId,
+        });
+      }
       lastAckedMessageId = messageId;
       continue;
     }
@@ -5739,45 +6410,111 @@ async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
       route,
       channelId,
     });
+    if (!claimed) {
+      try {
+        const notice = renderPairingInvalidNotice("discord");
+        await sendDiscordPairingNotice({
+          channelId,
+          text: notice.text,
+        });
+      } catch (error) {
+        log({
+          type: "discord_pairing_notice_error",
+          tenantId: liveBinding?.tenantId,
+          bindingId: liveBinding?.bindingId,
+          messageId,
+          error: String(error),
+        });
+      }
+      return;
+    }
     try {
-      const notice = claimed
-        ? renderPairingSuccessNotice("discord")
-        : renderPairingInvalidNotice("discord");
-      await sendDiscordPairingNotice({
-        channelId,
-        text: notice.text,
+      await sendPostClaimNotices({
+        channel: "discord",
+        claimed,
+        send: async (notice) => {
+          await sendDiscordPairingNotice({
+            channelId,
+            text: notice.text,
+          });
+        },
+        fromId,
+        chatId: channelId,
+        chatType: route.kind === "dm" ? "direct" : "group",
       });
     } catch (error) {
       log({
         type: "discord_pairing_notice_error",
-        tenantId: claimed?.tenantId ?? liveBinding?.tenantId,
-        bindingId: claimed?.bindingId ?? liveBinding?.bindingId,
+        tenantId: claimed.tenantId,
+        bindingId: claimed.bindingId,
         messageId,
         error: String(error),
       });
     }
-    if (claimed) {
-      log({
-        type: "discord_pairing_token_claimed",
-        tenantId: claimed.tenantId,
-        bindingId: claimed.bindingId,
-        routeKey: claimed.routeKey,
-        sessionKey: claimed.sessionKey,
-        channelId,
-        messageId,
-      });
-    }
+    log({
+      type: "discord_pairing_token_claimed",
+      tenantId: claimed.tenantId,
+      bindingId: claimed.bindingId,
+      routeKey: claimed.routeKey,
+      sessionKey: claimed.sessionKey,
+      claimType: claimed.claimType,
+      ...(claimed.previousTenantId ? { previousTenantId: claimed.previousTenantId } : {}),
+      channelId,
+      messageId,
+    });
     return;
   }
 
   if (pairingToken) {
-    log({
-      type: "discord_pairing_token_ignored_bound_route",
-      tenantId: liveBinding.tenantId,
-      bindingId: liveBinding.bindingId,
-      routeKey: liveBinding.routeKey,
-      messageId,
+    const reClaimed = claimDiscordPairingToken({
+      token: pairingToken,
+      route,
+      channelId,
     });
+    if (reClaimed) {
+      try {
+        await sendPostClaimNotices({
+          channel: "discord",
+          claimed: reClaimed,
+          send: async (notice) => {
+            await sendDiscordPairingNotice({
+              channelId,
+              text: notice.text,
+            });
+          },
+          fromId,
+          chatId: channelId,
+          chatType: route.kind === "dm" ? "direct" : "group",
+        });
+      } catch (error) {
+        log({
+          type: "discord_pairing_notice_error",
+          tenantId: reClaimed.tenantId,
+          bindingId: reClaimed.bindingId,
+          messageId,
+          error: String(error),
+        });
+      }
+      log({
+        type: "discord_pairing_token_claimed",
+        tenantId: reClaimed.tenantId,
+        bindingId: reClaimed.bindingId,
+        routeKey: reClaimed.routeKey,
+        sessionKey: reClaimed.sessionKey,
+        claimType: reClaimed.claimType,
+        ...(reClaimed.previousTenantId ? { previousTenantId: reClaimed.previousTenantId } : {}),
+        channelId,
+        messageId,
+      });
+    } else {
+      log({
+        type: "discord_pairing_token_ignored_bound_route",
+        tenantId: liveBinding.tenantId,
+        bindingId: liveBinding.bindingId,
+        routeKey: liveBinding.routeKey,
+        messageId,
+      });
+    }
     return;
   }
 
@@ -6148,11 +6885,19 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     }
 
     try {
-      const notice = renderPairingSuccessNotice("whatsapp");
-      await sendWhatsAppPairingNotice({
-        chatJid,
-        accountId,
-        text: notice.text,
+      await sendPostClaimNotices({
+        channel: "whatsapp",
+        claimed,
+        send: async (notice) => {
+          await sendWhatsAppPairingNotice({
+            chatJid,
+            accountId,
+            text: notice.text,
+          });
+        },
+        fromId: message.from || chatJid,
+        chatId: chatJid,
+        chatType,
       });
     } catch (error) {
       log({
@@ -6167,6 +6912,8 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
       tenantId: claimed.tenantId,
       routeKey: claimed.routeKey,
       sessionKey: claimed.sessionKey,
+      claimType: claimed.claimType,
+      ...(claimed.previousTenantId ? { previousTenantId: claimed.previousTenantId } : {}),
       accountId,
       chatJid,
     });
@@ -6174,13 +6921,56 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
   }
 
   if (pairingToken) {
-    log({
-      type: "whatsapp_pairing_token_ignored_bound_route",
-      tenantId: binding.tenantId,
-      routeKey: binding.routeKey,
-      accountId,
+    const reClaimed = claimWhatsAppPairingToken({
+      token: pairingToken,
       chatJid,
+      accountId,
+      chatType,
+      directPeerId,
     });
+    if (reClaimed) {
+      try {
+        await sendPostClaimNotices({
+          channel: "whatsapp",
+          claimed: reClaimed,
+          send: async (notice) => {
+            await sendWhatsAppPairingNotice({
+              chatJid,
+              accountId,
+              text: notice.text,
+            });
+          },
+          fromId: message.from || chatJid,
+          chatId: chatJid,
+          chatType,
+        });
+      } catch (error) {
+        log({
+          type: "whatsapp_pairing_notice_error",
+          tenantId: reClaimed.tenantId,
+          chatJid,
+          error: String(error),
+        });
+      }
+      log({
+        type: "whatsapp_pairing_token_claimed",
+        tenantId: reClaimed.tenantId,
+        routeKey: reClaimed.routeKey,
+        sessionKey: reClaimed.sessionKey,
+        claimType: reClaimed.claimType,
+        ...(reClaimed.previousTenantId ? { previousTenantId: reClaimed.previousTenantId } : {}),
+        accountId,
+        chatJid,
+      });
+    } else {
+      log({
+        type: "whatsapp_pairing_token_ignored_bound_route",
+        tenantId: binding.tenantId,
+        routeKey: binding.routeKey,
+        accountId,
+        chatJid,
+      });
+    }
     return;
   }
 

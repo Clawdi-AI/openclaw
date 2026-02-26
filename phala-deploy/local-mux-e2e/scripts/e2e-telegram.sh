@@ -221,11 +221,282 @@ wait_for_outbound_fields() {
   done
 }
 
-# ---------- pairing (idempotent) ----------
+# Poll until a log line since the fence matches ALL given patterns.
+# Same as wait_for_outbound_fields but with a clearer name for general log entries.
+wait_for_log_entry() {
+  wait_for_outbound_fields "$@"
+}
+
+# Issue a fresh pairing token via the admin API.
+# Usage: issue_pairing_token <channel> [openclaw_id]
+# Prints the token string to stdout. Returns 1 on failure.
+issue_pairing_token() {
+  local channel="$1"
+  local oc_id="${2:-}"
+
+  if [[ -z "${oc_id}" ]]; then
+    oc_id="$(compose exec -T openclaw node -e "
+      const fs = require('fs');
+      const d = JSON.parse(fs.readFileSync('/root/.openclaw/identity/device.json','utf8'));
+      process.stdout.write(d.deviceId.trim());
+    " 2>/dev/null)" || true
+  fi
+  if [[ -z "${oc_id}" ]]; then
+    echo "[e2e] issue_pairing_token: failed to resolve openclawId" >&2
+    return 1
+  fi
+
+  local payload
+  payload="$(jq -nc \
+    --arg channel "${channel}" \
+    --arg openclawId "${oc_id}" \
+    --arg inboundUrl "http://openclaw:18789/v1/mux/inbound" \
+    --argjson ttlSec 900 \
+    --argjson inboundTimeoutMs 15000 \
+    '{channel:$channel,ttlSec:$ttlSec,openclawId:$openclawId,inboundUrl:$inboundUrl,inboundTimeoutMs:$inboundTimeoutMs}'
+  )"
+
+  local response
+  response="$(curl -sS -X POST "${MUX_BASE_URL}/v1/admin/pairings/token" \
+    -H "Authorization: Bearer ${MUX_ADMIN_TOKEN}" \
+    -H "Content-Type: application/json" \
+    --data "${payload}")" || true
+
+  local tok
+  tok="$(echo "${response}" | jq -r '.token // empty')" || true
+  if [[ -z "${tok}" ]]; then
+    echo "[e2e] issue_pairing_token: failed to issue token: ${response}" >&2
+    return 1
+  fi
+  echo "${tok}"
+}
+
+# Unbind all active pairings for the given runtime token.
+# Usage: unbind_all_pairings <runtime_token>
+unbind_all_pairings() {
+  local rt_token="$1"
+  local bindings
+  bindings="$(curl -sS "${MUX_BASE_URL}/v1/pairings" \
+    -H "Authorization: Bearer ${rt_token}")" || true
+  local ids
+  ids="$(echo "${bindings}" | jq -r '.items[]?.bindingId // empty' 2>/dev/null)" || true
+  for bid in ${ids}; do
+    curl -sS -X POST "${MUX_BASE_URL}/v1/pairings/unbind" \
+      -H "Authorization: Bearer ${rt_token}" \
+      -H "Content-Type: application/json" \
+      --data "{\"bindingId\":\"${bid}\"}" >/dev/null 2>&1 || true
+  done
+}
+
+# ==========================================================================
+# Onboarding polish tests
+#
+# These tests verify the pairing claim lifecycle: unpaired intro, fresh
+# pairing, re-pairing (same tenant), and takeover (different tenant).
+# They exercise the claim functions, notices, and post-pairing synthetic
+# inbound without requiring an LLM (except the synthetic inbound round-trip).
+# ==========================================================================
+
+# Resolve openclaw identity for token issuance and runtime auth.
+e2e_openclaw_id="$(compose exec -T openclaw node -e "
+  const fs = require('fs');
+  const d = JSON.parse(fs.readFileSync('/root/.openclaw/identity/device.json','utf8'));
+  process.stdout.write(d.deviceId.trim());
+" 2>/dev/null)" || true
+
+if [[ -z "${e2e_openclaw_id}" ]]; then
+  echo "[e2e] FATAL: cannot resolve openclaw device ID" >&2
+  exit 1
+fi
+
+# Register the instance so we have a runtime token for API calls.
+: "${MUX_REGISTER_KEY:=local-mux-e2e-register-key}"
+register_response="$(curl -sS -X POST "${MUX_BASE_URL}/v1/instances/register" \
+  -H "Authorization: Bearer ${MUX_REGISTER_KEY}" \
+  -H "Content-Type: application/json" \
+  --data "{\"openclawId\":\"${e2e_openclaw_id}\",\"inboundUrl\":\"http://openclaw:18789/v1/mux/inbound\"}" \
+  )" || true
+runtime_token="$(echo "${register_response}" | jq -r '.runtimeToken // empty')" || true
+
+if [[ -z "${runtime_token}" ]]; then
+  echo "[e2e] WARNING: no runtime token — some tests may be limited" >&2
+fi
+
+# ---------- unpair (clean slate for onboarding tests) ----------
+#
+# Ensure this chat starts fully unpaired.  Use both the API unbind
+# and the in-chat /bot_unpair command as a belt-and-suspenders approach.
+
+echo "[e2e] unpairing: clearing any existing bindings"
+
+if [[ -n "${runtime_token}" ]]; then
+  unbind_all_pairings "${runtime_token}"
+fi
+
+# Also send /bot_unpair via Telegram in case the API unbind missed anything
+# (e.g. stale binding from a different openclaw identity).
+tgcli send --to "${BOT_CHAT_ID}" --message "/bot_unpair"
+sleep 5
+
+fence
+
+# ---------- onboarding test 1: unpaired message shows Clawdi intro ----------
+#
+# Send a DM to the now-unpaired bot and verify it responds with the
+# Clawdi intro notice (not the old technical pairing steps).
+
+echo "[e2e] onboarding test 1: unpaired message shows Clawdi intro"
+
+tgcli send --to "${BOT_CHAT_ID}" --message "hello from unpaired user ${UUID}"
+
+# Wait for the bot to process and reply.  The unpaired hint goes through
+# sendTelegram("sendMessage", ...) which isn't logged as outbound_request.
+# Instead, poll tgcli for new messages from the bot containing "Clawdi".
+sleep 8
+tgcli sync >/dev/null 2>&1 || true
+recent_msgs="$(tgcli messages list --chat "${BOT_CHAT_ID}" --limit 5 --output json 2>/dev/null)" || true
+
+if echo "${recent_msgs}" | jq -e '.messages[] | select(.text != null) | select(.text | test("Clawdi"; "i"))' >/dev/null 2>&1; then
+  pass "unpaired hint — Clawdi intro received in chat"
+elif echo "${recent_msgs}" | jq -e '.messages[] | select(.text != null) | select(.text | test("clawdi\\.ai"; "i"))' >/dev/null 2>&1; then
+  pass "unpaired hint — Clawdi intro received in chat (clawdi.ai)"
+else
+  # Check if any bot reply was sent at all.
+  if echo "${recent_msgs}" | jq -e '.messages[] | select(.text != null) | select(.text | test("not paired|pair this chat"; "i"))' >/dev/null 2>&1; then
+    fail "unpaired hint — bot replied but with old text (not Clawdi intro)"
+  else
+    fail "unpaired hint — no Clawdi intro found in recent bot messages"
+  fi
+fi
+
+fence
+
+# ---------- onboarding test 2: fresh pairing (success + synthetic inbound) ----------
+#
+# Issue a new token, pair via /start, and verify:
+#   a) claimType is "fresh" in the structured log
+#   b) Synthetic inbound (post_pairing_synthetic_sent) is dispatched
+#   c) AI intro response arrives (full round-trip)
+#   d) "Paired successfully" text received in chat
+
+echo "[e2e] onboarding test 2: fresh pairing"
+
+fresh_token="$(issue_pairing_token telegram "${e2e_openclaw_id}")" || true
+
+if [[ -z "${fresh_token}" ]]; then
+  fail "fresh pairing — could not issue pairing token"
+else
+  tgcli send --to "${BOT_CHAT_ID}" --message "/start ${fresh_token}"
+
+  # a) Verify claimType=fresh in structured log.
+  if elapsed="$(wait_for_log_entry "${POLL_TIMEOUT}" \
+    '"telegram_pairing_token_claimed"' '"claimType":"fresh"')"; then
+    pass "fresh pairing — claimed with claimType=fresh in ${elapsed}s"
+  else
+    if mux_log_tail | grep -q '"telegram_pairing_token_claimed"'; then
+      actual_type="$(mux_log_tail | grep '"telegram_pairing_token_claimed"' | grep -oP '"claimType":"\K[^"]+' | tail -1)"
+      fail "fresh pairing — claimed but claimType='${actual_type}' (expected 'fresh')"
+    else
+      fail "fresh pairing — no telegram_pairing_token_claimed within ${POLL_TIMEOUT}s"
+    fi
+  fi
+
+  # b) Verify synthetic inbound was dispatched.
+  if elapsed="$(wait_for_log_entry "${POLL_TIMEOUT}" \
+    '"post_pairing_synthetic_sent"')"; then
+    pass "fresh pairing — synthetic inbound sent in ${elapsed}s"
+  else
+    if mux_log_tail | grep -q '"post_pairing_synthetic_error"'; then
+      fail "fresh pairing — synthetic inbound failed (post_pairing_synthetic_error)"
+    elif mux_log_tail | grep -q '"post_pairing_synthetic_skip_no_target"'; then
+      fail "fresh pairing — synthetic inbound skipped (no target)"
+    else
+      fail "fresh pairing — no post_pairing_synthetic_sent within ${POLL_TIMEOUT}s"
+    fi
+  fi
+
+  # c) Wait for the AI intro response triggered by the synthetic inbound.
+  # This proves the full round-trip: synthetic → openclaw → AI → mux outbound.
+  if elapsed="$(wait_for_outbound_method "sendMessage" "${LLM_TIMEOUT}")"; then
+    pass "fresh pairing — AI intro response via sendMessage in ${elapsed}s"
+  else
+    fail "fresh pairing — no AI intro sendMessage within ${LLM_TIMEOUT}s"
+  fi
+
+  # d) Verify "Paired successfully" text was received in chat.
+  sleep 3
+  tgcli sync >/dev/null 2>&1 || true
+  recent_msgs="$(tgcli messages list --chat "${BOT_CHAT_ID}" --limit 10 --output json 2>/dev/null)" || true
+  if echo "${recent_msgs}" | jq -e '.messages[] | select(.text != null) | select(.text | test("Paired successfully"; "i"))' >/dev/null 2>&1; then
+    pass "fresh pairing — 'Paired successfully' notice received in chat"
+  elif echo "${recent_msgs}" | jq -e '.messages[] | select(.text != null) | select(.text | test("Paired"; "i"))' >/dev/null 2>&1; then
+    pass "fresh pairing — pairing notice received in chat (text variant)"
+  else
+    fail "fresh pairing — no 'Paired successfully' notice in recent chat messages"
+  fi
+fi
+
+fence
+
+# ---------- onboarding test 3: re-pairing same tenant (reconnected, no synthetic) ----------
+#
+# Issue another token for the same openclaw, pair the same chat again.
+# Verify:
+#   a) claimType is "repaired"
+#   b) "Reconnected" notice received in chat
+#   c) No synthetic inbound (post_pairing_synthetic_sent should NOT appear)
+
+echo "[e2e] onboarding test 3: re-pairing same tenant"
+
+repaired_token="$(issue_pairing_token telegram "${e2e_openclaw_id}")" || true
+
+if [[ -z "${repaired_token}" ]]; then
+  fail "re-pairing — could not issue pairing token"
+else
+  tgcli send --to "${BOT_CHAT_ID}" --message "/start ${repaired_token}"
+
+  # a) Verify claimType=repaired in structured log.
+  if elapsed="$(wait_for_log_entry "${POLL_TIMEOUT}" \
+    '"telegram_pairing_token_claimed"' '"claimType":"repaired"')"; then
+    pass "re-pairing — claimed with claimType=repaired in ${elapsed}s"
+  else
+    if mux_log_tail | grep -q '"telegram_pairing_token_claimed"'; then
+      actual_type="$(mux_log_tail | grep '"telegram_pairing_token_claimed"' | grep -oP '"claimType":"\K[^"]+' | tail -1)"
+      fail "re-pairing — claimed but claimType='${actual_type}' (expected 'repaired')"
+    else
+      fail "re-pairing — no telegram_pairing_token_claimed within ${POLL_TIMEOUT}s"
+    fi
+  fi
+
+  # b) Verify "Reconnected" notice received in chat.
+  sleep 5
+  tgcli sync >/dev/null 2>&1 || true
+  recent_msgs="$(tgcli messages list --chat "${BOT_CHAT_ID}" --limit 5 --output json 2>/dev/null)" || true
+  if echo "${recent_msgs}" | jq -e '.messages[] | select(.text != null) | select(.text | test("Reconnected"; "i"))' >/dev/null 2>&1; then
+    pass "re-pairing — 'Reconnected successfully' notice received in chat"
+  else
+    fail "re-pairing — no 'Reconnected' notice in recent chat messages"
+  fi
+
+  # c) Verify NO synthetic inbound was sent (repaired claims skip the AI intro).
+  sleep 5
+  if mux_log_tail | grep -q '"post_pairing_synthetic_sent"'; then
+    fail "re-pairing — synthetic inbound was sent (should be skipped for repaired)"
+  else
+    pass "re-pairing — no synthetic inbound (correct for repaired)"
+  fi
+fi
+
+fence
+
+# ---------- pairing (restore for remaining tests) ----------
+#
+# Re-pair with the standard flow so the rest of the e2e tests (text
+# round-trip, photo, multi-action, etc.) have an active binding.
 
 echo "[e2e] pairing: issuing token for telegram"
 pair_response="$("${SCRIPT_DIR}/pair-token.sh" telegram 2>&1)" || true
-token="$(echo "${pair_response}" | grep -oP 'mpt_[A-Za-z0-9_-]+' | head -1)" || true
+token="$(echo "${pair_response}" | grep -oP 'mpt_[A-Za-z0-9a-f]+' | head -1)" || true
 
 if [[ -z "${token}" ]]; then
   echo "[e2e] pairing: no token extracted (may already be paired), continuing" >&2
@@ -369,23 +640,7 @@ fence
 
 echo "[e2e] test 4: file proxy"
 
-: "${MUX_REGISTER_KEY:=local-mux-e2e-register-key}"
-
-e2e_openclaw_id="$(compose exec -T openclaw node -e "
-  const fs = require('fs');
-  const d = JSON.parse(fs.readFileSync('/root/.openclaw/identity/device.json','utf8'));
-  process.stdout.write(d.deviceId.trim());
-" 2>/dev/null)" || true
-
-runtime_token=""
-if [[ -n "${e2e_openclaw_id}" ]]; then
-  register_response="$(curl -sS -X POST "${MUX_BASE_URL}/v1/instances/register" \
-    -H "Authorization: Bearer ${MUX_REGISTER_KEY}" \
-    -H "Content-Type: application/json" \
-    --data "{\"openclawId\":\"${e2e_openclaw_id}\",\"inboundUrl\":\"http://openclaw:18789/v1/mux/inbound\"}" \
-    )" || true
-  runtime_token="$(echo "${register_response}" | jq -r '.runtimeToken // empty')" || true
-fi
+# e2e_openclaw_id and runtime_token resolved earlier in the onboarding section.
 
 user_chat_id="$(compose exec -T mux-server grep -oP '"telegram_pairing_token_(claimed|ignored_bound_route)".*"routeKey":"telegram:default:chat:\K[0-9]+' \
   "${MUX_LOG}" 2>/dev/null | tail -1)" || true
