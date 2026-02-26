@@ -69,7 +69,6 @@ type PairingCodeRow = {
 
 type PairingTokenRow = {
   tenant_id: string;
-  channel: string;
   session_key: string | null;
 };
 
@@ -755,7 +754,6 @@ const stmtDeactivateStaleDiscordPendingBindings = db.prepare(`
       SELECT 1
       FROM pairing_tokens pt
       WHERE pt.tenant_id = bindings.tenant_id
-        AND pt.channel = 'discord'
         AND pt.consumed_at_ms IS NULL
         AND pt.expires_at_ms > ?
     )
@@ -773,11 +771,11 @@ const stmtInsertPairingToken = db.prepare(`
     consumed_binding_id,
     consumed_route_key
   )
-  VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+  VALUES (?, ?, NULL, ?, ?, ?, NULL, NULL, NULL)
 `);
 
 const stmtSelectActivePairingTokenByHash = db.prepare(`
-  SELECT tenant_id, channel, session_key
+  SELECT tenant_id, session_key
   FROM pairing_tokens
   WHERE token_hash = ? AND consumed_at_ms IS NULL AND expires_at_ms > ?
   LIMIT 1
@@ -1583,6 +1581,21 @@ function seedPairingCodes(database: DatabaseSync, codes: PairingCodeSeed[]) {
   }
 }
 
+/** Serialize an unknown error to a readable string (handles plain objects that stringify to [object Object]). */
+function errorString(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  if (typeof err === "string") {
+    return err;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 function log(entry: Record<string, unknown>) {
   fs.appendFileSync(logPath, `${new Date().toISOString()} ${JSON.stringify(entry)}\n`);
 }
@@ -2317,7 +2330,6 @@ function runTokenClaimTransaction<T>(claim: () => T | null): T | null {
 
 function issuePairingTokenForTenant(params: {
   tenant: TenantIdentity;
-  channel: string | null;
   sessionKey?: string;
   ttlSec?: number;
 }) {
@@ -2329,41 +2341,16 @@ function issuePairingTokenForTenant(params: {
   const expiresAtMs = nowMs + ttlSec * 1_000;
   const sessionKey = readNonEmptyString(params.sessionKey);
 
-  if (params.channel === "discord" && !discordGatewayDmEnabled && !discordGatewayGuildEnabled) {
-    return {
-      statusCode: 400,
-      payload: {
-        ok: false,
-        error: "discord token pairing requires gateway inbound enabled",
-      },
-    };
-  }
+  stmtInsertPairingToken.run(tokenHash, params.tenant.id, sessionKey, nowMs, expiresAtMs);
 
-  stmtInsertPairingToken.run(
-    tokenHash,
-    params.tenant.id,
-    params.channel,
-    sessionKey,
-    nowMs,
-    expiresAtMs,
-  );
-
-  // Build deep links: for channel-agnostic tokens, include all available platforms
   const telegramDeepLink = telegramBotUsername
     ? `https://t.me/${telegramBotUsername}?start=${encodeURIComponent(token)}`
     : null;
-  const deepLink =
-    params.channel === null
-      ? telegramDeepLink
-      : params.channel === "telegram"
-        ? telegramDeepLink
-        : null;
 
   writeAuditLog(
     params.tenant.id,
     "pairing_token_issued",
     {
-      channel: params.channel,
       expiresAtMs,
       hasSessionKey: Boolean(sessionKey),
     },
@@ -2374,12 +2361,10 @@ function issuePairingTokenForTenant(params: {
     statusCode: 200,
     payload: {
       ok: true,
-      channel: params.channel,
       token,
       expiresAtMs,
-      startCommand:
-        params.channel === null || params.channel === "telegram" ? `/start ${token}` : null,
-      deepLink,
+      startCommand: `/start ${token}`,
+      deepLink: telegramDeepLink,
     },
   };
 }
@@ -3654,7 +3639,7 @@ function renderBotStatusNotice(params: {
 function resolvePostPairingPrompt(channel: NoticeChannel): string {
   const template =
     getNoticeText("postPairingPrompt") ||
-    "You have a new user who just connected via {{channel}}. Introduce yourself briefly, mention your key capabilities, and let them know how to get started.";
+    "Hey, please introduce yourself in this way:\n- Understand who I am (user). If you don't know (e.g. it's called \"there\"), feel free to ask.\n- Then check what connector you have the access to using composio MCP tool (clawdi-mcp.COMPOSIO_SEARCH_TOOLS). It's ok to have no connection, but if there are some, you can tell me what I can do with the connectors.\n- If there are connectors, suggest me 3-4 compound multi-app automations. Each with one sentence, combining 2-3 apps to complete some potential useful tasks.\n- Otherwise, you can suggest me what the most popular connectors can do if I have them connected (Gmail, notion, drive, slack). Then it's a good opportunity to invite me to set up the connectors.\n- Ask me my background like name and role (occupation) if you don't know. Guide me to find out what I can do with you. You are so powerful. So you can do a lot of awesome things.\nReply me concisely and friendly within 100 words. Don't be verbose. We are in a conversation and feel free to explore it together with me.";
   const channelLabel =
     channel === "telegram" ? "Telegram" : channel === "discord" ? "Discord" : "WhatsApp";
   return template.replace(/\{\{channel\}\}/g, channelLabel);
@@ -3835,18 +3820,12 @@ async function sendPostClaimNotices(params: {
   }
 }
 
-function peekActivePairingToken(
-  token: string,
-  channel: "telegram" | "discord" | "whatsapp",
-): PairingTokenRow | null {
+function peekActivePairingToken(token: string): PairingTokenRow | null {
   const now = Date.now();
   purgeExpiredPairingTokens(now);
   const tokenHash = hashPairingToken(token);
   const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
-  if (!row || String(row.channel) !== channel) {
-    return null;
-  }
-  return row;
+  return row ?? null;
 }
 
 function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?: string) {
@@ -3935,7 +3914,7 @@ function claimTelegramPairingToken(params: {
     const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
       | PairingTokenRow
       | undefined;
-    if (!row || String(row.channel) !== "telegram") {
+    if (!row) {
       return null;
     }
 
@@ -4086,7 +4065,7 @@ function claimDiscordPairingToken(params: {
     const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
       | PairingTokenRow
       | undefined;
-    if (!row || String(row.channel) !== "discord") {
+    if (!row) {
       return null;
     }
     const tenantId = String(row.tenant_id);
@@ -4288,7 +4267,7 @@ function claimWhatsAppPairingToken(params: {
     const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
       | PairingTokenRow
       | undefined;
-    if (!row || String(row.channel) !== "whatsapp") {
+    if (!row) {
       return null;
     }
 
@@ -4958,6 +4937,28 @@ function clearTelegramPollConflictHealth() {
   telegramPollConflictHealth = null;
 }
 
+/** Extract the bound tenant ID for a Telegram update (if any). Used by background retry cap. */
+function resolveTenantIdForTelegramUpdate(update: TelegramUpdate): string | null {
+  const message = extractTelegramMessage(update);
+  if (!message) {
+    return null;
+  }
+  const chatId =
+    typeof message.chat?.id === "number" && Number.isFinite(message.chat.id)
+      ? String(Math.trunc(message.chat.id))
+      : "";
+  if (!chatId) {
+    return null;
+  }
+  const isForum = message.chat?.is_forum === true;
+  const topicId = resolveTelegramIncomingTopicId({
+    isForum,
+    messageThreadId: message.message_thread_id,
+  });
+  const binding = resolveTelegramBindingForIncoming(chatId, topicId);
+  return binding?.tenantId ?? null;
+}
+
 async function bootstrapTelegramOffsetIfNeeded() {
   if (!telegramBootstrapLatest) {
     return;
@@ -5226,7 +5227,7 @@ async function handleTelegramBotControlCommand(params: {
     });
     return;
   }
-  const tokenRow = peekActivePairingToken(params.command.token, "telegram");
+  const tokenRow = peekActivePairingToken(params.command.token);
   if (!tokenRow) {
     const notice = renderPairingInvalidNotice("telegram");
     await sendTelegramPairingNotice({
@@ -5336,7 +5337,7 @@ async function handleDiscordBotControlCommand(params: {
     });
     return { routeReset: false };
   }
-  const tokenRow = peekActivePairingToken(params.command.token, "discord");
+  const tokenRow = peekActivePairingToken(params.command.token);
   const route = parseDiscordRouteKey(params.routeKey);
   if (!route || !tokenRow) {
     const notice = renderPairingInvalidNotice("discord");
@@ -5422,7 +5423,7 @@ async function handleDiscordBotControlCommandUnbound(params: {
     });
     return;
   }
-  const tokenRow = peekActivePairingToken(params.command.token, "discord");
+  const tokenRow = peekActivePairingToken(params.command.token);
   const route = parseDiscordRouteKey(params.routeKey);
   if (!route || !tokenRow) {
     const notice = renderPairingInvalidNotice("discord");
@@ -5531,7 +5532,7 @@ async function handleWhatsAppBotControlCommand(params: {
     });
     return;
   }
-  const tokenRow = peekActivePairingToken(params.command.token, "whatsapp");
+  const tokenRow = peekActivePairingToken(params.command.token);
   if (!tokenRow) {
     const notice = renderPairingInvalidNotice("whatsapp");
     await sendWhatsAppPairingNotice({
@@ -6056,7 +6057,7 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
         lastAckedMessageId = messageId;
         continue;
       }
-      const tokenRow = peekActivePairingToken(pairingToken, "discord");
+      const tokenRow = peekActivePairingToken(pairingToken);
       if (!tokenRow) {
         try {
           const notice = renderPairingInvalidNotice("discord");
@@ -6292,6 +6293,12 @@ async function runDiscordInboundLoop() {
   }
 }
 
+// Background retry config for Discord gateway mode (same pattern as Telegram).
+const DISCORD_BG_RETRY_MAX_PER_TENANT = 3;
+const DISCORD_BG_RETRY_ATTEMPTS = 5;
+const DISCORD_BG_RETRY_INTERVAL_MS = 30_000;
+const discordBgRetryCount = new Map<string, number>();
+
 async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
   const messageId = readUnsignedNumericString(message.id);
   const author = asRecord(message.author);
@@ -6378,7 +6385,7 @@ async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
       return;
     }
 
-    const tokenRow = peekActivePairingToken(pairingToken, "discord");
+    const tokenRow = peekActivePairingToken(pairingToken);
     if (!tokenRow) {
       try {
         const notice = renderPairingInvalidNotice("discord");
@@ -6518,7 +6525,7 @@ async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
     return;
   }
 
-  await forwardDiscordMessageToTenant({
+  const forwardParams = {
     tenantId: liveBinding.tenantId,
     bindingId: liveBinding.bindingId,
     routeKey: incomingRouteKey,
@@ -6528,7 +6535,42 @@ async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
     messageId,
     fromId,
     body,
-  });
+  };
+  try {
+    await forwardDiscordMessageToTenant(forwardParams);
+  } catch (error) {
+    log({
+      type: "discord_inbound_forward_failed",
+      tenantId: liveBinding.tenantId,
+      messageId,
+      error: errorString(error),
+    });
+    const tid = liveBinding.tenantId;
+    const pending = discordBgRetryCount.get(tid) ?? 0;
+    if (pending < DISCORD_BG_RETRY_MAX_PER_TENANT) {
+      discordBgRetryCount.set(tid, pending + 1);
+      void (async () => {
+        try {
+          for (let attempt = 1; attempt <= DISCORD_BG_RETRY_ATTEMPTS; attempt++) {
+            await new Promise((r) => setTimeout(r, DISCORD_BG_RETRY_INTERVAL_MS * attempt));
+            try {
+              await forwardDiscordMessageToTenant(forwardParams);
+              log({ type: "discord_inbound_bg_retry_ok", messageId, attempt, tenantId: tid });
+              return;
+            } catch {
+              if (attempt === DISCORD_BG_RETRY_ATTEMPTS) {
+                log({ type: "discord_inbound_bg_retry_exhausted", messageId, tenantId: tid });
+              }
+            }
+          }
+        } finally {
+          discordBgRetryCount.set(tid, (discordBgRetryCount.get(tid) ?? 1) - 1);
+        }
+      })();
+    } else {
+      log({ type: "discord_inbound_bg_retry_skipped_cap", messageId, tenantId: tid, pending });
+    }
+  }
 }
 
 async function runDiscordGatewayDmSession(): Promise<void> {
@@ -7169,11 +7211,11 @@ async function runWhatsAppInboundLoop() {
       }
     } catch (error) {
       whatsappRuntimeHealth.lastListenerErrorAtMs = Date.now();
-      whatsappRuntimeHealth.lastListenerError = String(error);
+      whatsappRuntimeHealth.lastListenerError = errorString(error);
       whatsappRuntimeHealth.listenerActive = false;
       log({
         type: "whatsapp_inbound_listener_error",
-        error: String(error),
+        error: errorString(error),
       });
     } finally {
       if (listener) {
@@ -7215,6 +7257,17 @@ async function runTelegramInboundLoop() {
     log({ type: "telegram_inbound_bootstrap_error", error: String(error) });
   }
 
+  // Background retry config: cap concurrent retries per tenant to prevent snowball
+  // when a tenant stays offline. Each retry slot does up to TELEGRAM_BG_RETRY_ATTEMPTS
+  // with linear backoff (30s, 60s, 90s...).
+  const TELEGRAM_BG_RETRY_MAX_PER_TENANT = 3;
+  const TELEGRAM_BG_RETRY_ATTEMPTS = 5;
+  const TELEGRAM_BG_RETRY_INTERVAL_MS = Math.max(
+    100,
+    Number(process.env.MUX_TELEGRAM_BG_RETRY_INTERVAL_MS) || 30_000,
+  );
+  const telegramBgRetryCount = new Map<string, number>();
+
   let running = true;
   process.on("SIGINT", () => {
     running = false;
@@ -7238,17 +7291,58 @@ async function runTelegramInboundLoop() {
         }
         try {
           await forwardTelegramUpdateToTenant(update);
-          storeTelegramOffset(updateId);
-          // Avoid blocking the tight polling loop on sync IO (tests depend on quick follow-up polls).
-          queueMicrotask(() => log({ type: "telegram_inbound_ack_committed", updateId }));
         } catch (error) {
+          // Never block the poller — log and fire-and-forget background retries.
+          // Cap concurrent retries per tenant to avoid snowballing.
           log({
-            type: "telegram_inbound_retry_deferred",
+            type: "telegram_inbound_forward_failed",
             updateId,
-            error: String(error),
+            error: errorString(error),
           });
-          break;
+          const tenantId = resolveTenantIdForTelegramUpdate(update);
+          if (tenantId) {
+            const pending = telegramBgRetryCount.get(tenantId) ?? 0;
+            if (pending < TELEGRAM_BG_RETRY_MAX_PER_TENANT) {
+              telegramBgRetryCount.set(tenantId, pending + 1);
+              const capturedUpdate = update;
+              const capturedId = updateId;
+              void (async () => {
+                try {
+                  for (let attempt = 1; attempt <= TELEGRAM_BG_RETRY_ATTEMPTS; attempt++) {
+                    await new Promise((r) =>
+                      setTimeout(r, TELEGRAM_BG_RETRY_INTERVAL_MS * attempt),
+                    );
+                    try {
+                      await forwardTelegramUpdateToTenant(capturedUpdate);
+                      log({
+                        type: "telegram_inbound_bg_retry_ok",
+                        updateId: capturedId,
+                        attempt,
+                        tenantId,
+                      });
+                      return;
+                    } catch {
+                      if (attempt === TELEGRAM_BG_RETRY_ATTEMPTS) {
+                        log({
+                          type: "telegram_inbound_bg_retry_exhausted",
+                          updateId: capturedId,
+                          tenantId,
+                        });
+                      }
+                    }
+                  }
+                } finally {
+                  telegramBgRetryCount.set(tenantId, (telegramBgRetryCount.get(tenantId) ?? 1) - 1);
+                }
+              })();
+            } else {
+              log({ type: "telegram_inbound_bg_retry_skipped_cap", updateId, tenantId, pending });
+            }
+          }
         }
+        storeTelegramOffset(updateId);
+        // Avoid blocking the tight polling loop on sync IO (tests depend on quick follow-up polls).
+        queueMicrotask(() => log({ type: "telegram_inbound_ack_committed", updateId }));
       }
     } catch (error) {
       updateTelegramPollConflictHealth(error);
@@ -7335,7 +7429,6 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { ok: false, error: "openclawId required" });
         return;
       }
-      const channel = normalizeChannel(body.channel);
       const sessionKey = readNonEmptyString(body.sessionKey) ?? undefined;
       const ttlSec = readPositiveInt(body.ttlSec);
 
@@ -7370,7 +7463,6 @@ const server = http.createServer(async (req, res) => {
           authToken: muxAdminToken,
           authKind: "admin",
         },
-        channel,
         sessionKey,
         ttlSec,
       });
