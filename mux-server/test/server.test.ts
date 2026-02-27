@@ -271,6 +271,12 @@ function expectInboundJwtAuth(
   expect(toSafeString(payload.scope)).toContain("mux:inbound");
 }
 
+function expectMuxTraceIdHeader(value: unknown) {
+  const traceId = readHeaderString(value);
+  expect(traceId).toBeTruthy();
+  expect(traceId).toMatch(/^mux_[a-f0-9]{20}$/);
+}
+
 async function waitForCondition(
   condition: () => boolean,
   timeoutMs: number,
@@ -777,11 +783,13 @@ describe("mux server", () => {
     const inboundARequests: Array<{
       authorization: string | undefined;
       openclawIdHeader: string | undefined;
+      traceIdHeader: string | undefined;
       payload: Record<string, unknown>;
     }> = [];
     const inboundBRequests: Array<{
       authorization: string | undefined;
       openclawIdHeader: string | undefined;
+      traceIdHeader: string | undefined;
       payload: Record<string, unknown>;
     }> = [];
 
@@ -796,7 +804,11 @@ describe("mux server", () => {
         typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
       const openclawIdHeader =
         typeof req.headers["x-openclaw-id"] === "string" ? req.headers["x-openclaw-id"] : undefined;
-      inboundARequests.push({ authorization, openclawIdHeader, payload });
+      const traceIdHeader =
+        typeof req.headers["x-mux-trace-id"] === "string"
+          ? req.headers["x-mux-trace-id"]
+          : undefined;
+      inboundARequests.push({ authorization, openclawIdHeader, traceIdHeader, payload });
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -812,7 +824,11 @@ describe("mux server", () => {
         typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
       const openclawIdHeader =
         typeof req.headers["x-openclaw-id"] === "string" ? req.headers["x-openclaw-id"] : undefined;
-      inboundBRequests.push({ authorization, openclawIdHeader, payload });
+      const traceIdHeader =
+        typeof req.headers["x-mux-trace-id"] === "string"
+          ? req.headers["x-mux-trace-id"]
+          : undefined;
+      inboundBRequests.push({ authorization, openclawIdHeader, traceIdHeader, payload });
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -916,6 +932,7 @@ describe("mux server", () => {
       },
       "tenant-a",
     );
+    expectMuxTraceIdHeader(inboundARequests[0]?.traceIdHeader);
     expect(inboundARequests[0]?.payload.body).toBe("first target");
 
     const registeredB = await registerInstance({
@@ -940,6 +957,7 @@ describe("mux server", () => {
       },
       "tenant-a",
     );
+    expectMuxTraceIdHeader(inboundBRequests[0]?.traceIdHeader);
     expect(inboundBRequests[0]?.payload.body).toBe("second target");
     expect(inboundARequests.length).toBe(1);
   }, 20_000);

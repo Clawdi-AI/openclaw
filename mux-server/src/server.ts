@@ -18,6 +18,8 @@ import {
   readOutboundRaw,
   readOutboundText,
 } from "./mux-envelope.js";
+import { formatLogLine, normalizeLogEvent } from "./observability/log-event.js";
+import { createInboundTraceId } from "./observability/trace-id.js";
 import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
 
 type SendResult = {
@@ -1207,6 +1209,7 @@ async function mintRuntimeJwt(params: {
 
 async function buildInboundAuthHeaders(
   target: TenantInboundTarget,
+  traceId?: string,
 ): Promise<Record<string, string>> {
   const runtimeJwt = await mintRuntimeJwt({
     openclawId: target.openclawId,
@@ -1217,6 +1220,7 @@ async function buildInboundAuthHeaders(
   return {
     Authorization: `Bearer ${runtimeJwt}`,
     "X-OpenClaw-Id": target.openclawId,
+    ...(typeof traceId === "string" && traceId.trim() ? { "X-Mux-Trace-Id": traceId.trim() } : {}),
   };
 }
 
@@ -1597,7 +1601,7 @@ function errorString(err: unknown): string {
 }
 
 function log(entry: Record<string, unknown>) {
-  fs.appendFileSync(logPath, `${new Date().toISOString()} ${JSON.stringify(entry)}\n`);
+  fs.appendFileSync(logPath, formatLogLine(normalizeLogEvent(entry)));
 }
 
 function sendJson(res: ServerResponse, statusCode: number, payload: unknown): string {
@@ -4446,6 +4450,12 @@ async function forwardDiscordMessageToTenant(params: {
   fromId: string;
   body: string;
 }): Promise<"forwarded" | "ignored" | "deferred"> {
+  const traceId = createInboundTraceId({
+    channel: "discord",
+    tenantId: params.tenantId,
+    routeKey: params.routeKey,
+    messageId: params.messageId,
+  });
   const target = resolveTenantInboundTarget(params.tenantId);
   if (!target) {
     log({
@@ -4453,6 +4463,7 @@ async function forwardDiscordMessageToTenant(params: {
       tenantId: params.tenantId,
       bindingId: params.bindingId,
       routeKey: params.routeKey,
+      traceId,
     });
     return "deferred";
   }
@@ -4510,7 +4521,7 @@ async function forwardDiscordMessageToTenant(params: {
     response = await fetch(target.url, {
       method: "POST",
       headers: {
-        ...(await buildInboundAuthHeaders(target)),
+        ...(await buildInboundAuthHeaders(target, traceId)),
         "Content-Type": "application/json; charset=utf-8",
       },
       body: JSON.stringify(payloadWithIdentity),
@@ -4523,6 +4534,7 @@ async function forwardDiscordMessageToTenant(params: {
       bindingId: params.bindingId,
       messageId: params.messageId,
       error: String(error),
+      traceId,
     });
     return "deferred";
   }
@@ -4534,6 +4546,7 @@ async function forwardDiscordMessageToTenant(params: {
       bindingId: params.bindingId,
       messageId: params.messageId,
       error: `openclaw inbound failed (${response.status}): ${bodyText || "no body"}`,
+      traceId,
     });
     return "deferred";
   }
@@ -4545,6 +4558,7 @@ async function forwardDiscordMessageToTenant(params: {
     channelId: params.channelId,
     sessionKey,
     messageId: params.messageId,
+    traceId,
   });
   return "forwarded";
 }
@@ -5053,6 +5067,15 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     isForum,
     messageThreadId: callbackMessage.message_thread_id,
   });
+  const callbackMessageIdSeed =
+    typeof callbackMessage.message_id === "number" && Number.isFinite(callbackMessage.message_id)
+      ? String(Math.trunc(callbackMessage.message_id))
+      : undefined;
+  const traceId = createInboundTraceId({
+    channel: "telegram",
+    updateId: params.updateId,
+    messageId: callbackMessageIdSeed,
+  });
   const binding = resolveTelegramBindingForIncoming(chatId, topicId);
   if (!binding) {
     if (callbackQueryId) {
@@ -5066,6 +5089,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
           type: "telegram_callback_answer_error",
           updateId: params.updateId,
           error: String(error),
+          traceId,
         });
       }
     }
@@ -5079,6 +5103,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
       tenantId: binding.tenantId,
       updateId: params.updateId,
       routeKey: binding.routeKey,
+      traceId,
     });
     throw new Error(`telegram inbound target missing for tenant ${binding.tenantId}`);
   }
@@ -5136,11 +5161,18 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     ...payload,
     openclawId: binding.tenantId,
   };
+  const tenantTraceId = createInboundTraceId({
+    channel: "telegram",
+    tenantId: binding.tenantId,
+    routeKey: inboundRouteKey,
+    updateId: params.updateId,
+    messageId: callbackMessageId,
+  });
 
   const response = await fetch(target.url, {
     method: "POST",
     headers: {
-      ...(await buildInboundAuthHeaders(target)),
+      ...(await buildInboundAuthHeaders(target, tenantTraceId)),
       "Content-Type": "application/json; charset=utf-8",
     },
     body: JSON.stringify(payloadWithIdentity),
@@ -5159,6 +5191,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
         type: "telegram_callback_answer_error",
         updateId: params.updateId,
         error: String(error),
+        traceId: tenantTraceId,
       });
     }
   }
@@ -5170,6 +5203,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     updateId: params.updateId,
     messageId: callbackMessageId,
     callbackData,
+    traceId: tenantTraceId,
   });
 }
 
@@ -5815,6 +5849,19 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     return;
   }
 
+  const messageId =
+    typeof message.message_id === "number" && Number.isFinite(message.message_id)
+      ? String(Math.trunc(message.message_id))
+      : `tg-msg:${updateId}`;
+  const inboundRouteKey = buildTelegramRouteKey(chatId, topicId);
+  const traceId = createInboundTraceId({
+    channel: "telegram",
+    tenantId: binding.tenantId,
+    routeKey: inboundRouteKey,
+    updateId,
+    messageId,
+  });
+
   const target = resolveTenantInboundTarget(binding.tenantId);
   if (!target) {
     log({
@@ -5822,6 +5869,7 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
       tenantId: binding.tenantId,
       updateId,
       routeKey: binding.routeKey,
+      traceId,
     });
     throw new Error(`telegram inbound target missing for tenant ${binding.tenantId}`);
   }
@@ -5831,10 +5879,6 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   if (!forwardedBody && inboundMedia.attachments.length === 0) {
     return;
   }
-  const messageId =
-    typeof message.message_id === "number" && Number.isFinite(message.message_id)
-      ? String(Math.trunc(message.message_id))
-      : `tg-msg:${updateId}`;
   const fromId =
     typeof message.from?.id === "number" && Number.isFinite(message.from.id)
       ? String(Math.trunc(message.from.id))
@@ -5843,7 +5887,6 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     typeof message.date === "number" && Number.isFinite(message.date)
       ? Math.trunc(message.date) * 1_000
       : Date.now();
-  const inboundRouteKey = buildTelegramRouteKey(chatId, topicId);
   const sessionKey = resolveTelegramInboundSessionKey({
     tenantId: binding.tenantId,
     bindingId: binding.bindingId,
@@ -5905,7 +5948,7 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   const response = await fetch(target.url, {
     method: "POST",
     headers: {
-      ...(await buildInboundAuthHeaders(target)),
+      ...(await buildInboundAuthHeaders(target, traceId)),
       "Content-Type": "application/json; charset=utf-8",
     },
     body: JSON.stringify(payloadWithIdentity),
@@ -5923,6 +5966,7 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     sessionKey,
     updateId,
     messageId,
+    traceId,
   });
 }
 
@@ -7037,6 +7081,14 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     return;
   }
 
+  const messageId = readNonEmptyString(message.id) ?? `wa:${Date.now()}:${randomUUID()}`;
+  const traceId = createInboundTraceId({
+    channel: "whatsapp",
+    tenantId: binding.tenantId,
+    routeKey: binding.routeKey,
+    messageId,
+  });
+
   const target = resolveTenantInboundTarget(binding.tenantId);
   if (!target) {
     log({
@@ -7045,6 +7097,7 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
       routeKey: binding.routeKey,
       accountId,
       chatJid,
+      traceId,
     });
     throw new Error(`whatsapp inbound target missing for tenant ${binding.tenantId}`);
   }
@@ -7054,7 +7107,6 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     return;
   }
 
-  const messageId = readNonEmptyString(message.id) ?? `wa:${Date.now()}:${randomUUID()}`;
   const fromId =
     readNonEmptyString(message.senderE164) ??
     readNonEmptyString(message.senderJid) ??
@@ -7131,7 +7183,7 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
   const response = await fetch(target.url, {
     method: "POST",
     headers: {
-      ...(await buildInboundAuthHeaders(target)),
+      ...(await buildInboundAuthHeaders(target, traceId)),
       "Content-Type": "application/json; charset=utf-8",
     },
     body: JSON.stringify(payloadWithIdentity),
@@ -7149,6 +7201,7 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     messageId,
     accountId,
     chatJid,
+    traceId,
   });
 }
 
