@@ -464,7 +464,13 @@ async function runPerplexitySearch(params: {
   freshness?: string;
 }): Promise<{ content: string; citations: string[] }> {
   const baseUrl = params.baseUrl.trim().replace(/\/$/, "");
-  const endpoint = `${baseUrl}/chat/completions`;
+  // When using a proxy baseUrl (non-standard), post directly to it.
+  // Official Perplexity / OpenRouter endpoints always need /chat/completions.
+  const isProxyUrl =
+    baseUrl !== PERPLEXITY_DIRECT_BASE_URL &&
+    !baseUrl.startsWith("https://openrouter.ai") &&
+    !baseUrl.startsWith("https://api.perplexity.ai");
+  const endpoint = isProxyUrl ? baseUrl : `${baseUrl}/chat/completions`;
   const model = resolvePerplexityRequestModel(baseUrl, params.model);
 
   const body: Record<string, unknown> = {
