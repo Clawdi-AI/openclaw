@@ -1,0 +1,97 @@
+name: Docker Test Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag to publish (example: test-2026-02-27.1)"
+        required: true
+        type: string
+      target:
+        description: "Dockerfile target"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - base
+          - full
+      push:
+        description: "Push built image to GHCR"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-test-publish-${{ github.ref }}-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image name
+        id: image
+        run: |
+          echo "value=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build OpenClaw
+        run: pnpm build
+
+      - name: Build UI
+        run: pnpm ui:install && pnpm ui:build
+
+      - name: Pack tarball for Docker build context
+        run: |
+          PACK_OUT="$(npm pack --pack-destination phala-deploy)"
+          TGZ_NAME="$(printf '%s\n' "$PACK_OUT" | tail -n 1 | tr -d '[:space:]')"
+          mv -f "phala-deploy/$TGZ_NAME" phala-deploy/openclaw.tgz
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: ${{ inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and optionally publish image
+        id: docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: phala-deploy/Dockerfile
+          target: ${{ inputs.target }}
+          platforms: linux/amd64
+          push: ${{ inputs.push }}
+          tags: ${{ steps.image.outputs.value }}:${{ inputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Summary
+        run: |
+          echo "Image: ${{ steps.image.outputs.value }}:${{ inputs.image_tag }}"
+          echo "Published: ${{ inputs.push }}"
+          echo "Digest: ${{ steps.docker.outputs.digest }}"
