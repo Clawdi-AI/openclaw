@@ -23,6 +23,15 @@ type InlineProviderConfig = {
 
 export { buildModelAliasLines };
 
+function resolveDefaultModelApiForProvider(
+  provider: string,
+): ModelDefinitionConfig["api"] | undefined {
+  if (normalizeProviderId(provider) === "openai-codex") {
+    return "openai-codex-responses";
+  }
+  return undefined;
+}
+
 export function buildInlineProviderModels(
   providers: Record<string, InlineProviderConfig>,
 ): InlineModelEntry[] {
@@ -35,7 +44,7 @@ export function buildInlineProviderModels(
       ...model,
       provider: trimmed,
       baseUrl: entry?.baseUrl,
-      api: model.api ?? entry?.api,
+      api: model.api ?? entry?.api ?? resolveDefaultModelApiForProvider(trimmed),
     }));
   });
 }
@@ -81,7 +90,7 @@ export function resolveModel(
       const fallbackModel: Model<Api> = normalizeModelCompat({
         id: modelId,
         name: modelId,
-        api: providerCfg?.api ?? "openai-responses",
+        api: providerCfg?.api ?? resolveDefaultModelApiForProvider(provider) ?? "openai-responses",
         provider,
         baseUrl: providerCfg?.baseUrl,
         reasoning: false,
