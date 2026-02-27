@@ -84,6 +84,11 @@ Cardinality guardrails:
 1. Never label by `sessionKey`, `routeKey`, `tenantId`, `chatId`, `messageId`, or `traceId`.
 2. Only use bounded enums in labels.
 
+Auth model:
+
+1. Keep app-level `/metrics` unauthenticated.
+2. In production, enforce access via reverse proxy policy (mTLS/OIDC/IP allowlist).
+
 ### 3) Health Endpoints
 
 Keep `/health` as current-compatible, then add:
@@ -109,6 +114,12 @@ Example fields:
 - `channels.whatsapp.status`
 - `degraded[]`
 
+Best-practice decision:
+
+1. Keep `/health` as backward-compatible minimal health.
+2. Use `/health/live` for process liveness probes.
+3. Use `/health/ready` for readiness/degraded channel state.
+
 ### 4) Admin Observability Snapshot
 
 Add `GET /v1/admin/observability/snapshot` (admin token required):
@@ -119,6 +130,11 @@ Add `GET /v1/admin/observability/snapshot` (admin token required):
 - last N recent error events (bounded ring buffer)
 
 Use this for incident triage without parsing full logs.
+
+Tenant strategy:
+
+1. Do not emit tenant-cardinality metrics or default tenant breakdown in snapshot.
+2. Support explicit tenant-targeted debugging on demand (for example, `?tenantId=<id>` filter on recent events and counters).
 
 ### 5) Correlation / Trace IDs
 
@@ -162,6 +178,15 @@ Keep raw `error` text for debugging.
 2. Add admin snapshot endpoint.
 3. Add docs/examples for incident playbook.
 
+## Reverse Proxy Best Practices (Production)
+
+1. Bind mux-server to private network/loopback when possible; expose only via proxy.
+2. Terminate TLS at proxy and prefer mTLS for machine-to-machine observability access.
+3. Protect `/metrics` and `/v1/admin/*` with strong auth (OIDC or mTLS), plus IP allowlist.
+4. Apply rate limits and sane body/time limits on admin and observability endpoints.
+5. Strip untrusted forwarding headers and set trusted `X-Forwarded-*` consistently.
+6. Propagate a proxy request id to mux logs for cross-layer incident tracing.
+
 ## Testing Strategy
 
 1. Unit tests for log schema validation and error-code mapping.
@@ -179,9 +204,9 @@ Keep raw `error` text for debugging.
 2. Cross-process metric aggregation.
 3. Long-term metrics persistence across restarts.
 
-## Open Questions for Review
+## Defaults Chosen
 
-1. Should `/metrics` require admin auth, or remain network-only unauthenticated?
-2. Do you want `/health` to stay minimal forever, or eventually alias to `/health/ready`?
-3. Should admin snapshot include tenant-level breakdown, or keep global-only to avoid high cardinality?
-4. Do we want a default ring-buffer size of 200 or 1000 for recent error events?
+1. `/metrics` remains app-unauthenticated; production auth is enforced at reverse proxy.
+2. `/health` stays minimal/backward-compatible; `/health/live` and `/health/ready` are explicit.
+3. No tenant-level default breakdown; tenant-scoped debugging is explicit and on-demand.
+4. Recent error ring buffer default: `1000` events.
