@@ -2887,6 +2887,9 @@ async function sendTelegramPairingNotice(params: {
   text: string;
   parseMode?: TelegramParseMode;
 }) {
+  const isGeneralForumTopic =
+    params.topicId === TELEGRAM_GENERAL_TOPIC_ID && params.chatId.startsWith("-");
+  const canUseThreadId = Boolean(params.topicId) && !isGeneralForumTopic;
   const body: Record<string, unknown> = {
     chat_id: params.chatId,
     text: params.text,
@@ -2894,13 +2897,32 @@ async function sendTelegramPairingNotice(params: {
   if (params.parseMode) {
     body.parse_mode = params.parseMode;
   }
-  if (params.topicId) {
+  if (canUseThreadId && params.topicId) {
     body.message_thread_id = params.topicId;
   }
-  const { response, result } = await sendTelegram("sendMessage", body);
-  if (!response.ok || result.ok !== true) {
-    throw new Error(`telegram pairing notice failed (${response.status})`);
+  const firstAttempt = await sendTelegram("sendMessage", body);
+  if (firstAttempt.response.ok && firstAttempt.result.ok === true) {
+    return;
   }
+
+  // Topic IDs can become stale (or Telegram can reject edge-case topic IDs).
+  // Fall back to chat-level notices so bot-control commands still respond.
+  const description =
+    typeof firstAttempt.result.description === "string" ? firstAttempt.result.description : "";
+  const shouldRetryWithoutThread = canUseThreadId && /message thread not found/i.test(description);
+  if (shouldRetryWithoutThread) {
+    const retryBody: Record<string, unknown> = {
+      chat_id: params.chatId,
+      text: params.text,
+      ...(params.parseMode ? { parse_mode: params.parseMode } : {}),
+    };
+    const retryAttempt = await sendTelegram("sendMessage", retryBody);
+    if (retryAttempt.response.ok && retryAttempt.result.ok === true) {
+      return;
+    }
+    throw new Error(`telegram pairing notice failed (${retryAttempt.response.status})`);
+  }
+  throw new Error(`telegram pairing notice failed (${firstAttempt.response.status})`);
 }
 
 async function answerTelegramCallbackQuery(params: {

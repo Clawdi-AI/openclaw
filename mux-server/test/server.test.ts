@@ -3088,6 +3088,193 @@ describe("mux server", () => {
     });
   }, 10_000);
 
+  test("handles unpaired /bot_help in forum General without message_thread_id", async () => {
+    const pendingUpdates: Array<Record<string, unknown>> = [];
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      if (req.url === "/botdummy-token/getUpdates") {
+        const body = await readJsonBody(req);
+        const offset = typeof body.offset === "number" ? Number(body.offset) : 0;
+        const deliverable = pendingUpdates
+          .map((entry) => {
+            const updateId = Number(entry.update_id ?? 0);
+            return { entry, updateId };
+          })
+          .filter((entry) => Number.isFinite(entry.updateId) && entry.updateId >= offset)
+          .toSorted((a, b) => a.updateId - b.updateId);
+        const result = deliverable.map((entry) => entry.entry);
+        if (deliverable.length > 0) {
+          const maxDelivered = deliverable[deliverable.length - 1]?.updateId ?? 0;
+          for (let i = pendingUpdates.length - 1; i >= 0; i -= 1) {
+            const updateId = Number(pendingUpdates[i]?.update_id ?? 0);
+            if (Number.isFinite(updateId) && updateId <= maxDelivered) {
+              pendingUpdates.splice(i, 1);
+            }
+          }
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+      if (req.url === "/botdummy-token/sendMessage") {
+        const body = await readJsonBody(req);
+        sentMessages.push(body);
+        if (Number(body.message_thread_id) === 1) {
+          res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: "Bad Request: message thread not found",
+            }),
+          );
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9901, chat: { id: -100909, type: "supergroup" } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    await startServer({
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+        MUX_UNPAIRED_HINT_TEXT: "This chat is not paired.",
+      },
+    });
+
+    pendingUpdates.push({
+      update_id: 5101,
+      message: {
+        message_id: 9101,
+        text: "/bot_help",
+        date: 1_700_000_100,
+        from: { id: 1234 },
+        chat: { id: -100909, type: "supergroup", is_forum: true },
+      },
+    });
+
+    await waitForCondition(
+      () => sentMessages.length > 0,
+      5_000,
+      "timed out waiting for unpaired forum General notice",
+    );
+
+    expect(toSafeString(sentMessages[0]?.chat_id)).toBe("-100909");
+    expect(sentMessages[0]?.message_thread_id).toBeUndefined();
+    expect(toSafeString(sentMessages[0]?.text)).toContain("Bot control commands");
+    expect(sentMessages.some((message) => Number(message.message_thread_id) === 1)).toBe(false);
+  });
+
+  test("retries unpaired notice without topic thread when Telegram rejects thread ID", async () => {
+    const pendingUpdates: Array<Record<string, unknown>> = [];
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      if (req.url === "/botdummy-token/getUpdates") {
+        const body = await readJsonBody(req);
+        const offset = typeof body.offset === "number" ? Number(body.offset) : 0;
+        const deliverable = pendingUpdates
+          .map((entry) => {
+            const updateId = Number(entry.update_id ?? 0);
+            return { entry, updateId };
+          })
+          .filter((entry) => Number.isFinite(entry.updateId) && entry.updateId >= offset)
+          .toSorted((a, b) => a.updateId - b.updateId);
+        const result = deliverable.map((entry) => entry.entry);
+        if (deliverable.length > 0) {
+          const maxDelivered = deliverable[deliverable.length - 1]?.updateId ?? 0;
+          for (let i = pendingUpdates.length - 1; i >= 0; i -= 1) {
+            const updateId = Number(pendingUpdates[i]?.update_id ?? 0);
+            if (Number.isFinite(updateId) && updateId <= maxDelivered) {
+              pendingUpdates.splice(i, 1);
+            }
+          }
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+      if (req.url === "/botdummy-token/sendMessage") {
+        const body = await readJsonBody(req);
+        sentMessages.push(body);
+        if (Number(body.message_thread_id) === 2) {
+          res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: "Bad Request: message thread not found",
+            }),
+          );
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9902, chat: { id: -100910, type: "supergroup" } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    await startServer({
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+        MUX_UNPAIRED_HINT_TEXT: "This chat is not paired.",
+      },
+    });
+
+    pendingUpdates.push({
+      update_id: 5102,
+      message: {
+        message_id: 9102,
+        text: "/bot_help",
+        date: 1_700_000_101,
+        from: { id: 1234 },
+        chat: { id: -100910, type: "supergroup", is_forum: true },
+        message_thread_id: 2,
+      },
+    });
+
+    await waitForCondition(
+      () => sentMessages.length >= 2,
+      5_000,
+      "timed out waiting for thread-not-found fallback notice",
+    );
+
+    expect(toSafeString(sentMessages[0]?.chat_id)).toBe("-100910");
+    expect(sentMessages[0]?.message_thread_id).toBe(2);
+    expect(sentMessages[1]?.message_thread_id).toBeUndefined();
+    expect(toSafeString(sentMessages[1]?.text)).toContain("Bot control commands");
+  });
+
   test("pairs telegram DM threads once and isolates sessions per thread", async () => {
     const inboundRequests: Array<Record<string, unknown>> = [];
     const inbound = await startHttpServer(async (req, res) => {
