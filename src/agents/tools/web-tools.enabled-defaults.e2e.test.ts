@@ -170,11 +170,11 @@ describe("web_search perplexity baseUrl defaults", () => {
       expectedUrl: "https://api.perplexity.ai/chat/completions",
     },
     {
-      name: "uses configured baseUrl even when PERPLEXITY_API_KEY is set",
+      name: "uses configured baseUrl in proxy mode even when PERPLEXITY_API_KEY is set",
       env: { perplexity: "pplx-test" },
       query: "test-config-baseurl",
       perplexityConfig: { baseUrl: "https://example.com/pplx" },
-      expectedUrl: "https://example.com/pplx/chat/completions",
+      expectedUrl: "https://example.com/pplx/search",
     },
     {
       name: "defaults to Perplexity direct when apiKey looks like Perplexity",
@@ -203,6 +203,18 @@ describe("web_search perplexity baseUrl defaults", () => {
       const body = parseFirstRequestBody(mockFetch);
       expect(body.model).toBe(expectedModel);
     }
+  });
+
+  it("uses distinct cache entries for proxy mode when count differs", async () => {
+    vi.stubEnv("PERPLEXITY_API_KEY", "pplx-test");
+    const mockFetch = installMockFetch({ results: [] });
+    const tool = createPerplexitySearchTool({ baseUrl: "https://example.com/pplx" });
+    const query = "test-proxy-cache-count";
+
+    await tool?.execute?.("call-1", { query, count: 1 });
+    await tool?.execute?.("call-2", { query, count: 5 });
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });
 

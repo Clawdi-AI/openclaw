@@ -24,15 +24,103 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: docker-test-publish-${{ github.ref }}-${{ inputs.image_tag || 'auto' }}
   cancel-in-progress: false
 
 jobs:
-  build-and-publish:
+  build-only:
+    if: ${{ !inputs.push }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve image name and Docker-safe tag
+        id: image
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          image_name="ghcr.io/${GITHUB_REPOSITORY,,}-test"
+          raw_tag="${INPUT_IMAGE_TAG:-${GITHUB_REF_NAME}}"
+
+          safe_tag="$(printf '%s' "$raw_tag" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's#[^a-z0-9._-]+#-#g; s#^-+##; s#-+$##; s#-+#-#g')"
+          safe_tag="${safe_tag:0:120}"
+          [ -n "$safe_tag" ] || safe_tag="build"
+
+          case "$safe_tag" in
+            test-*) ;;
+            *) safe_tag="test-${safe_tag}" ;;
+          esac
+          safe_tag="${safe_tag:0:128}"
+
+          if ! printf '%s' "$safe_tag" | grep -Eq '^[a-z0-9_][a-z0-9_.-]{0,127}$'; then
+            echo "invalid docker tag after sanitize: $safe_tag" >&2
+            exit 1
+          fi
+
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
+          echo "tag=${safe_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@c5ba7f7862a0f64c1b1a05fbac13e0b8e86ba08c # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build OpenClaw
+        run: pnpm build
+
+      - name: Build UI
+        run: pnpm ui:install && pnpm ui:build
+
+      - name: Pack tarball for Docker build context
+        run: |
+          PACK_OUT="$(npm pack --pack-destination phala-deploy)"
+          TGZ_NAME="$(printf '%s\n' "$PACK_OUT" | tail -n 1 | tr -d '[:space:]')"
+          mv -f "phala-deploy/$TGZ_NAME" phala-deploy/openclaw.tgz
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build image
+        id: docker
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: phala-deploy/Dockerfile
+          target: ${{ inputs.target }}
+          platforms: linux/amd64
+          push: false
+          tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Summary
+        run: |
+          echo "Image: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}"
+          echo "Published: false"
+
+  build-and-publish:
+    if: ${{ inputs.push }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -95,14 +183,13 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GHCR
-        if: ${{ inputs.push }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and optionally publish image
+      - name: Build and publish image
         id: docker
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -110,7 +197,7 @@ jobs:
           file: phala-deploy/Dockerfile
           target: ${{ inputs.target }}
           platforms: linux/amd64
-          push: ${{ inputs.push }}
+          push: true
           tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -119,5 +206,5 @@ jobs:
       - name: Summary
         run: |
           echo "Image: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}"
-          echo "Published: ${{ inputs.push }}"
+          echo "Published: true"
           echo "Digest: ${{ steps.docker.outputs.digest }}"
