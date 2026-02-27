@@ -102,6 +102,10 @@ The e2e script auto-resolves all required values:
 - `TELEGRAM_E2E_BOT_CHAT_ID` — derived from the bot token (part before `:`)
 - `MODEL_PRIMARY` — from `.env.local`
 - `tgcli sync` — runs automatically before first send
+- `TELEGRAM_E2E_SEND_COOLDOWN_SEC` (optional, default `2`) — delay between outbound test sends to reduce burstiness
+- `TELEGRAM_E2E_FORUM_CHAT_ID` (optional) — forum group chat ID override for test 8
+- `TELEGRAM_E2E_FORUM_TOPIC_ID` (optional, default `1`) — forum topic ID used for test 8
+- `TELEGRAM_E2E_FORUM_SECOND_TOPIC_ID` (optional) — second forum topic ID for cross-topic test 8 coverage
 
 What the Telegram e2e tests cover:
 
@@ -117,7 +121,9 @@ What the Telegram e2e tests cover:
 5. **argsMenu inline buttons** — send `/reasoning`, verify outbound sendMessage contains `reply_markup`
 6. **Sticker inbound** — send sticker, verify mux-server forwards it (skips if no sticker packs in tgcli)
 7. **Document inbound** — send text file, verify mux-server forwards it
-8. **Threaded mode (forum topics)** — create topic in bot DM, send `/reasoning` in it, verify `message_thread_id` preserved in outbound, then delete topic
+8. **Forum group behavior (two topics)** — pair once in the primary forum topic (`/start <token>`), then send `/reasoning` in primary and second topics, verify inbound forwarding + args menu outbound for both topic-scoped group sessions without re-pairing
+
+For operational notes and quick takeover context, see `phala-deploy/local-mux-e2e/FORUM_GROUP_HANDOFF.md`.
 
 ## Smoke Flow (Manual)
 
