@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Tag to publish (example: test-2026-02-27.1)"
-        required: true
+        description: "Tag to publish (leave empty to use sanitized branch name)"
+        required: false
+        default: ""
         type: string
       target:
         description: "Dockerfile target"
@@ -26,7 +27,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: docker-test-publish-${{ github.ref }}-${{ inputs.image_tag }}
+  group: docker-test-publish-${{ github.ref }}-${{ inputs.image_tag || 'auto' }}
   cancel-in-progress: false
 
 jobs:
@@ -36,10 +37,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve image name
+      - name: Resolve image name and tag
         id: image
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
-          echo "value=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          image_name="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          raw_tag="${INPUT_IMAGE_TAG:-}"
+          if [ -z "$raw_tag" ]; then
+            raw_tag="${GITHUB_REF_NAME}"
+          fi
+
+          safe_tag="$(printf '%s' "$raw_tag" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's#[^a-z0-9._-]+#-#g; s#^-+##; s#-+$##; s#-+#-#g')"
+          safe_tag="${safe_tag:0:128}"
+          if [ -z "$safe_tag" ]; then
+            safe_tag="test-build"
+          fi
+
+          echo "value=${image_name}" >> "$GITHUB_OUTPUT"
+          echo "tag=${safe_tag}" >> "$GITHUB_OUTPUT"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -85,13 +104,13 @@ jobs:
           target: ${{ inputs.target }}
           platforms: linux/amd64
           push: ${{ inputs.push }}
-          tags: ${{ steps.image.outputs.value }}:${{ inputs.image_tag }}
+          tags: ${{ steps.image.outputs.value }}:${{ steps.image.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
 
       - name: Summary
         run: |
-          echo "Image: ${{ steps.image.outputs.value }}:${{ inputs.image_tag }}"
+          echo "Image: ${{ steps.image.outputs.value }}:${{ steps.image.outputs.tag }}"
           echo "Published: ${{ inputs.push }}"
           echo "Digest: ${{ steps.docker.outputs.digest }}"
