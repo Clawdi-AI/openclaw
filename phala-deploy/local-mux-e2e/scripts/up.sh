@@ -99,15 +99,23 @@ CONFIG_JSON=$(node -e "
   const codexEndpoint = process.env.CODEX_API_ENDPOINT || '';
   const codexApiKey   = process.env.CODEX_API_KEY || '';
   const codexMockJwt  = process.argv[6] || '';
+  const codexSwitchModels = [
+    { id: 'gpt-5.3-codex', name: 'gpt-5.3-codex', reasoning: true, input: ['text', 'image'] },
+    { id: 'gpt-5.1-codex-mini', name: 'gpt-5.1-codex-mini', reasoning: true, input: ['text', 'image'] },
+  ];
   if (modelPrimary && codexEndpoint && codexApiKey) {
     cfg.agents.defaults.model = { primary: modelPrimary };
+    cfg.agents.defaults.models = {
+      'openai-codex/gpt-5.3-codex': { alias: 'Codex' },
+      'openai-codex/gpt-5.1-codex-mini': { alias: 'Codex Mini' },
+    };
     cfg.models = {
       providers: {
         'openai-codex': {
           baseUrl: codexEndpoint,
           apiKey: codexMockJwt,
           headers: { 'x-api-key': codexApiKey },
-          models: [],
+          models: codexSwitchModels,
         },
       },
     };
