@@ -7,34 +7,73 @@ const ACTIVE_WINDOWS = [
 const ACTIVE_MAX_AGE_MS = ACTIVE_WINDOWS[ACTIVE_WINDOWS.length - 1]?.[1] ?? 0;
 
 type MetricsChannel = (typeof CHANNELS)[number];
-type InboundOutcome = "forwarded" | "deferred" | "dropped" | "error";
-type PairingOutcome = "success" | "invalid" | "ignored";
-type AuthSurface = "tenant" | "admin" | "register";
-type LabelValues = Record<string, string>;
+type Labels = Record<string, string>;
+type CounterRow = { labels: Labels; value: number };
 type LogLikeEvent = Record<string, unknown> & { type?: unknown; claimType?: unknown };
 
-function toMethod(value: unknown): string {
-  if (value === "typing" || value === "action") {
-    return value;
-  }
-  return "send";
+const OUTCOME_SUCCESS_MIN = 200;
+const OUTCOME_SUCCESS_MAX = 299;
+
+function labelsKey(labels: Labels): string {
+  return Object.entries(labels)
+    .toSorted(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("|");
 }
 
-function toChannel(value: unknown): MetricsChannel | "unknown" {
-  if (value === "telegram" || value === "discord" || value === "whatsapp") {
-    return value;
-  }
-  return "unknown";
+function labelsText(labels: Labels): string {
+  const body = Object.entries(labels)
+    .toSorted(([a], [b]) => a.localeCompare(b))
+    .map(
+      ([k, v]) =>
+        `${k}="${v.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"')}"`,
+    )
+    .join(",");
+  return body ? `{${body}}` : "";
 }
 
-function normalizeClaimType(value: unknown): string {
-  if (value === "fresh" || value === "repaired" || value === "takeover") {
-    return value;
+function inc(map: Map<string, CounterRow>, labels: Labels, by = 1) {
+  const key = labelsKey(labels);
+  const row = map.get(key);
+  if (row) {
+    row.value += by;
+    return;
   }
-  return "unknown";
+  map.set(key, { labels, value: by });
 }
 
-function eventChannelPrefix(type: string): MetricsChannel | null {
+function pushCounter(lines: string[], name: string, help: string, map: Map<string, CounterRow>) {
+  lines.push(`# HELP ${name} ${help}`);
+  lines.push(`# TYPE ${name} counter`);
+  for (const row of [...map.values()].toSorted((a, b) =>
+    labelsKey(a.labels).localeCompare(labelsKey(b.labels)),
+  )) {
+    lines.push(`${name}${labelsText(row.labels)} ${row.value}`);
+  }
+}
+
+function pushGauge(lines: string[], name: string, help: string, rows: CounterRow[]) {
+  lines.push(`# HELP ${name} ${help}`);
+  lines.push(`# TYPE ${name} gauge`);
+  for (const row of rows.toSorted((a, b) =>
+    labelsKey(a.labels).localeCompare(labelsKey(b.labels)),
+  )) {
+    lines.push(`${name}${labelsText(row.labels)} ${row.value}`);
+  }
+}
+
+function normalizeUserId(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  return null;
+}
+
+function channelFromEventType(type: string): MetricsChannel | null {
   if (type.startsWith("telegram_")) {
     return "telegram";
   }
@@ -47,87 +86,26 @@ function eventChannelPrefix(type: string): MetricsChannel | null {
   return null;
 }
 
-function escapeLabel(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"');
+function normalizePairingClaimType(value: unknown): string {
+  return value === "fresh" || value === "repaired" || value === "takeover" ? value : "unknown";
 }
 
-function labelsKey(labels: LabelValues): string {
-  return Object.entries(labels)
-    .toSorted(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}=${v}`)
-    .join("|");
+function normalizeMethod(value: unknown): string {
+  return value === "typing" || value === "action" ? value : "send";
 }
 
-function labelsText(labels: LabelValues): string {
-  const parts = Object.entries(labels)
-    .toSorted(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}="${escapeLabel(v)}"`);
-  return parts.length === 0 ? "" : `{${parts.join(",")}}`;
-}
-
-function pushCounter(
-  lines: string[],
-  name: string,
-  help: string,
-  map: Map<string, { labels: LabelValues; value: number }>,
-) {
-  lines.push(`# HELP ${name} ${help}`);
-  lines.push(`# TYPE ${name} counter`);
-  for (const { labels, value } of [...map.values()].toSorted((a, b) =>
-    labelsKey(a.labels).localeCompare(labelsKey(b.labels)),
-  )) {
-    lines.push(`${name}${labelsText(labels)} ${value}`);
-  }
-}
-
-function pushGauge(
-  lines: string[],
-  name: string,
-  help: string,
-  rows: Array<{ labels: LabelValues; value: number }>,
-) {
-  lines.push(`# HELP ${name} ${help}`);
-  lines.push(`# TYPE ${name} gauge`);
-  for (const row of rows.toSorted((a, b) =>
-    labelsKey(a.labels).localeCompare(labelsKey(b.labels)),
-  )) {
-    lines.push(`${name}${labelsText(row.labels)} ${row.value}`);
-  }
-}
-
-function inc(
-  map: Map<string, { labels: LabelValues; value: number }>,
-  labels: LabelValues,
-  by = 1,
-) {
-  const key = labelsKey(labels);
-  const prev = map.get(key);
-  if (prev) {
-    prev.value += by;
-    return;
-  }
-  map.set(key, { labels, value: by });
-}
-
-function normalizeUserId(value: unknown): string | null {
-  if (typeof value === "string") {
-    const v = value.trim();
-    return v ? v : null;
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return String(Math.trunc(value));
-  }
-  return null;
+function normalizeChannel(value: unknown): MetricsChannel | "unknown" {
+  return value === "telegram" || value === "discord" || value === "whatsapp" ? value : "unknown";
 }
 
 export function createMuxMetrics() {
-  const inbound = new Map<string, { labels: LabelValues; value: number }>();
-  const outbound = new Map<string, { labels: LabelValues; value: number }>();
-  const pairing = new Map<string, { labels: LabelValues; value: number }>();
-  const auth = new Map<string, { labels: LabelValues; value: number }>();
-  const retryScheduled = new Map<string, { labels: LabelValues; value: number }>();
-  const retryExhausted = new Map<string, { labels: LabelValues; value: number }>();
-  const active: Record<MetricsChannel, Map<string, number>> = {
+  const inbound = new Map<string, CounterRow>();
+  const outbound = new Map<string, CounterRow>();
+  const pairing = new Map<string, CounterRow>();
+  const auth = new Map<string, CounterRow>();
+  const retryScheduled = new Map<string, CounterRow>();
+  const retryExhausted = new Map<string, CounterRow>();
+  const activeUsers: Record<MetricsChannel, Map<string, number>> = {
     telegram: new Map(),
     discord: new Map(),
     whatsapp: new Map(),
@@ -137,16 +115,19 @@ export function createMuxMetrics() {
     recordActiveUser(channel: MetricsChannel, userId: unknown, nowMs = Date.now()) {
       const id = normalizeUserId(userId);
       if (id) {
-        active[channel].set(id, nowMs);
+        activeUsers[channel].set(id, nowMs);
       }
     },
 
-    recordInboundEvent(channel: MetricsChannel, outcome: InboundOutcome) {
+    recordInboundEvent(
+      channel: MetricsChannel,
+      outcome: "forwarded" | "deferred" | "dropped" | "error",
+    ) {
       inc(inbound, { channel, outcome });
     },
 
     observeInboundForwardDuration(_channel: MetricsChannel, _durationMs: number) {
-      // Kept for API compatibility; currently not exported as histogram metrics.
+      // Compatibility no-op; durations were dropped to keep this patch lean.
     },
 
     recordOutboundRequest(params: {
@@ -155,25 +136,30 @@ export function createMuxMetrics() {
       statusCode: number;
       durationMs: number;
     }) {
-      const channel = toChannel(params.channel);
-      const method = toMethod(params.method);
-      const outcome = params.statusCode >= 200 && params.statusCode < 300 ? "success" : "error";
-      inc(outbound, { channel, method, outcome });
+      const outcome =
+        params.statusCode >= OUTCOME_SUCCESS_MIN && params.statusCode <= OUTCOME_SUCCESS_MAX
+          ? "success"
+          : "error";
+      inc(outbound, {
+        channel: normalizeChannel(params.channel),
+        method: normalizeMethod(params.method),
+        outcome,
+      });
     },
 
     recordPairingClaim(params: {
       channel: MetricsChannel;
       claimType: unknown;
-      outcome: PairingOutcome;
+      outcome: "success" | "invalid" | "ignored";
     }) {
       inc(pairing, {
         channel: params.channel,
-        claim_type: normalizeClaimType(params.claimType),
+        claim_type: normalizePairingClaimType(params.claimType),
         outcome: params.outcome,
       });
     },
 
-    recordAuthFailure(surface: AuthSurface) {
+    recordAuthFailure(surface: "tenant" | "admin" | "register") {
       inc(auth, { surface });
     },
 
@@ -190,7 +176,7 @@ export function createMuxMetrics() {
       if (!type) {
         return;
       }
-      const channel = eventChannelPrefix(type);
+      const channel = channelFromEventType(type);
       if (channel && type.endsWith("_pairing_token_claimed")) {
         this.recordPairingClaim({ channel, claimType: event.claimType, outcome: "success" });
         return;
@@ -213,26 +199,26 @@ export function createMuxMetrics() {
     },
 
     renderPrometheus(queueDepthByChannel: Record<MetricsChannel, number>, nowMs = Date.now()) {
-      const cutoff = nowMs - ACTIVE_MAX_AGE_MS;
+      const activeCutoff = nowMs - ACTIVE_MAX_AGE_MS;
       for (const channel of CHANNELS) {
-        for (const [id, seenAt] of active[channel]) {
-          if (!Number.isFinite(seenAt) || seenAt < cutoff) {
-            active[channel].delete(id);
+        for (const [id, seenAt] of activeUsers[channel]) {
+          if (!Number.isFinite(seenAt) || seenAt < activeCutoff) {
+            activeUsers[channel].delete(id);
           }
         }
       }
 
-      const activeGauge: Array<{ labels: LabelValues; value: number }> = [];
+      const activeRows: CounterRow[] = [];
       for (const channel of CHANNELS) {
         for (const [window, ms] of ACTIVE_WINDOWS) {
-          const minTs = nowMs - ms;
+          const cutoff = nowMs - ms;
           let value = 0;
-          for (const seenAt of active[channel].values()) {
-            if (seenAt >= minTs) {
+          for (const seenAt of activeUsers[channel].values()) {
+            if (seenAt >= cutoff) {
               value += 1;
             }
           }
-          activeGauge.push({ labels: { channel, window }, value });
+          activeRows.push({ labels: { channel, window }, value });
         }
       }
 
@@ -286,7 +272,7 @@ export function createMuxMetrics() {
         lines,
         "mux_active_users",
         "Estimated active users by channel and rolling window.",
-        activeGauge,
+        activeRows,
       );
       return `${lines.join("\n")}\n`;
     },
