@@ -1,7 +1,7 @@
-# Mux Server Observability Design (Draft)
+# Mux Server Observability Design + Implementation Notes
 
-Status: draft for review (no implementation in this branch yet)
-Target branch for implementation: `phala-2026.2.17`
+Status: implemented in `feat/mux-observability-design` (target base: `phala-2026.2.17`)
+Last updated: 2026-02-28
 
 ## Goals
 
@@ -18,27 +18,97 @@ Target branch for implementation: `phala-2026.2.17`
 4. Are pairings/auth failures increasing?
 5. What changed recently (error spike, queue growth, degraded channel health)?
 
-## Current State (from code)
+## Implemented Surfaces
 
-1. Structured JSON-line logging exists via `log(...)`, written to `MUX_LOG_PATH`.
-2. `/health` exists, but only surfaces basic service state plus Telegram poll-conflict degradation.
-3. Admin WhatsApp health endpoint exists (`/v1/admin/whatsapp/health`).
-4. No metrics endpoint today.
-5. Event names are rich, but schema fields are not consistently enforced across events.
+1. Structured JSON-line logs now normalize envelope fields (`ts`, `level`, `component`) and infer `errorCode` when missing.
+2. Prometheus metrics endpoint is available at `GET /metrics` when `MUX_METRICS_ENABLED=true`.
+3. Liveness/readiness split is implemented:
 
-## Proposal Summary
+- `GET /health/live`
+- `GET /health/ready`
 
-1. Introduce a stable log event schema and a typed logging wrapper.
-2. Add Prometheus-style metrics endpoint (`/metrics`) with bounded label cardinality.
-3. Add readiness/liveness split: `/health/live` and `/health/ready`.
-4. Add admin debug snapshot endpoint for recent error counters and queue/channel status.
-5. Add end-to-end correlation id propagation (inbound -> tenant forward -> outbound).
+4. Admin observability snapshot is implemented:
+
+- `GET /v1/admin/observability/snapshot` (requires `MUX_ADMIN_TOKEN`)
+
+5. Trace correlation header is propagated on tenant-forward requests:
+
+- `X-Mux-Trace-Id`
+
+6. Runtime queue backlog and active user signals are exposed without high-cardinality labels.
+
+## Metrics (Implemented)
+
+Environment flag:
+
+- `MUX_METRICS_ENABLED` (default `false`)
+
+Metric families:
+
+- `mux_inbound_events_total{channel,outcome}`
+- `mux_inbound_forward_duration_ms_*{channel}`
+- `mux_outbound_requests_total{channel,method,outcome}`
+- `mux_outbound_duration_ms_*{channel,method}`
+- `mux_pairing_claims_total{channel,claim_type,outcome}`
+- `mux_auth_failures_total{surface}`
+- `mux_retry_scheduled_total{channel}`
+- `mux_retry_exhausted_total{channel}`
+- `mux_queue_depth{channel}`
+- `mux_active_users{channel,window}` where `window` is `5m`, `1h`, or `24h`
+
+Cardinality rules:
+
+1. No per-tenant labels in Prometheus metrics.
+2. No dynamic user/session/message labels.
+3. Tenant drill-down is done with snapshot query filtering (`tenantId`), not metric labels.
+
+## Health Endpoints (Implemented)
+
+1. `GET /health`
+
+- Backward-compatible lightweight status.
+
+2. `GET /health/live`
+
+- Process-level liveness, always `200` when server loop is alive.
+
+3. `GET /health/ready`
+
+- Channel readiness report and degraded reasons.
+- Includes queue depth and oldest queued age per channel.
+- Returns `503` when any enabled channel is not ready.
+
+## Admin Snapshot Endpoint (Implemented)
+
+`GET /v1/admin/observability/snapshot`
+
+Auth:
+
+- `Authorization: Bearer <MUX_ADMIN_TOKEN>`
+
+Query parameters:
+
+- `tenantId` (optional): scoped debug view
+- `recentErrorsLimit` (optional, bounded): trim error event payload volume
+
+Response includes:
+
+1. Channel health block (status/reason/timestamps).
+2. Counters for `last1m` and `last5m` windows.
+3. Queue backlog depth + oldest queued age.
+4. Top inferred `errorCode` counts.
+5. Recent error event list (bounded ring buffer).
+
+Buffer configuration:
+
+- `MUX_OBS_RECENT_ERRORS_MAX` (default `1000`)
+- `MUX_OBS_RECENT_EVENTS_MAX` (default `5000`)
 
 ## Detailed Design
 
 ### 1) Structured Logging V1
 
-Add `logEvent()` wrapper (internally still writes JSON lines) with mandatory envelope fields:
+`log(...)` now normalizes envelope fields while preserving existing event payload keys:
 
 - `ts`: unix ms
 - `type`: event type
@@ -55,7 +125,7 @@ Recommended optional fields (stage-dependent):
 - `durationMs`, `attempt`, `statusCode`
 - `errorCode`, `error`
 
-Compatibility rules:
+Compatibility rules (kept):
 
 1. Keep current event `type` values.
 2. Preserve existing fields; only add normalized envelope fields.
@@ -63,73 +133,20 @@ Compatibility rules:
 
 ### 2) Metrics Endpoint
 
-Add `GET /metrics` (Prometheus text format), controlled by env:
+Implemented exactly as above; see "Metrics (Implemented)".
 
-- `MUX_METRICS_ENABLED` (default `false`)
-
-Initial metric set:
-
-- `mux_inbound_events_total{channel,outcome}`
-- `mux_inbound_forward_duration_ms_bucket{channel}`
-- `mux_outbound_requests_total{channel,method,outcome}`
-- `mux_outbound_duration_ms_bucket{channel,method}`
-- `mux_pairing_claims_total{channel,claim_type,outcome}`
-- `mux_auth_failures_total{surface}`
-- `mux_retry_scheduled_total{channel}`
-- `mux_retry_exhausted_total{channel}`
-- `mux_queue_depth{channel}` (gauge)
-
-Cardinality guardrails:
-
-1. Never label by `sessionKey`, `routeKey`, `tenantId`, `chatId`, `messageId`, or `traceId`.
-2. Only use bounded enums in labels.
-
-Auth model:
+Auth model (unchanged):
 
 1. Keep app-level `/metrics` unauthenticated.
-2. In production, enforce access via reverse proxy policy (mTLS/OIDC/IP allowlist).
+2. Enforce protection at reverse proxy in production (mTLS/OIDC/IP allowlist).
 
 ### 3) Health Endpoints
 
-Keep `/health` as current-compatible, then add:
-
-1. `GET /health/live`
-
-- process liveness only (`200 { ok: true }`)
-
-2. `GET /health/ready`
-
-- readiness for serving traffic
-- includes per-channel readiness blocks:
-  - listener/poller active
-  - last success timestamp
-  - last error summary
-  - retry queue depth
-  - degraded reasons
-
-Example fields:
-
-- `channels.telegram.status`
-- `channels.discord.status`
-- `channels.whatsapp.status`
-- `degraded[]`
-
-Best-practice decision:
-
-1. Keep `/health` as backward-compatible minimal health.
-2. Use `/health/live` for process liveness probes.
-3. Use `/health/ready` for readiness/degraded channel state.
+Implemented as designed (`/health`, `/health/live`, `/health/ready`).
 
 ### 4) Admin Observability Snapshot
 
-Add `GET /v1/admin/observability/snapshot` (admin token required):
-
-- per-channel counters (last 1m/5m in-memory windows)
-- retry queue depth + oldest queued age
-- top error codes by count
-- last N recent error events (bounded ring buffer)
-
-Use this for incident triage without parsing full logs.
+Implemented as designed, with optional `tenantId` filter and bounded `recentErrorsLimit`.
 
 Tenant strategy:
 
@@ -138,16 +155,15 @@ Tenant strategy:
 
 ### 5) Correlation / Trace IDs
 
-Generate/propagate `traceId` at ingress:
+Implemented:
 
-1. Telegram/Discord/WhatsApp inbound items get a deterministic trace seed using channel + update/message ids.
-2. Include `traceId` in all logs for that message lifecycle.
-3. Send `x-mux-trace-id` header to OpenClaw inbound POST.
-4. Include `traceId` in outbound request logs.
+1. Ingress generates trace ids via `createInboundTraceId`.
+2. Logs carry `traceId`.
+3. Tenant-forward requests include `X-Mux-Trace-Id`.
 
 ### 6) Error Taxonomy
 
-Add normalized `errorCode` values for observability aggregation:
+Implemented normalized `errorCode` inference for observability aggregation:
 
 - `AUTH_UNAUTHORIZED`
 - `ROUTE_NOT_BOUND`
@@ -157,26 +173,39 @@ Add normalized `errorCode` values for observability aggregation:
 - `QUEUE_RETRY_EXHAUSTED`
 - `CHANNEL_POLL_CONFLICT`
 
-Keep raw `error` text for debugging.
+Raw `error` text is preserved for debugging.
 
-## Rollout Plan
+## Prometheus Integration Checklist
 
-### Phase 1 (low risk)
+1. Enable metrics on mux:
 
-1. Add logging wrapper + envelope fields.
-2. Add traceId propagation.
-3. Add tests ensuring event shape and redaction behavior.
+```bash
+MUX_METRICS_ENABLED=true
+```
 
-### Phase 2
+2. Scrape config example:
 
-1. Add metrics collector + `/metrics`.
-2. Add tests for counters/histograms and cardinality guardrails.
+```yaml
+scrape_configs:
+  - job_name: mux-server
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["mux-server:18891"]
+```
 
-### Phase 3
+3. Initial panels:
 
-1. Add `/health/live` + `/health/ready`.
-2. Add admin snapshot endpoint.
-3. Add docs/examples for incident playbook.
+- inbound/outbound error rate
+- queue depth by channel
+- active users by channel + window
+- auth failure counters
+- retry scheduled vs exhausted
+
+4. Initial alerts:
+
+- queue depth sustained above threshold
+- `mux_retry_exhausted_total` increase
+- readiness endpoint non-ready for enabled channels
 
 ## Reverse Proxy Best Practices (Production)
 
@@ -198,6 +227,14 @@ Keep raw `error` text for debugging.
 
 3. Backward-compat check: existing tests for current endpoints/log-dependent behavior must remain green.
 
+Recommended command set used during this rollout:
+
+```bash
+pnpm -C mux-server typecheck
+pnpm -C mux-server test test/observability.error-codes.test.ts test/observability.error-map.test.ts test/observability.log-event.test.ts test/observability.metrics.test.ts test/observability.snapshot.test.ts test/observability.trace-id.test.ts
+pnpm -C mux-server test test/server.test.ts -t "health live endpoint responds|health endpoint reports telegram poll conflict when getUpdates returns 409|admin observability snapshot endpoint requires admin auth and returns snapshot|advances Telegram offset on forward failure and retries in background"
+```
+
 ## Non-Goals
 
 1. Distributed tracing backend integration in this pass.
@@ -209,4 +246,4 @@ Keep raw `error` text for debugging.
 1. `/metrics` remains app-unauthenticated; production auth is enforced at reverse proxy.
 2. `/health` stays minimal/backward-compatible; `/health/live` and `/health/ready` are explicit.
 3. No tenant-level default breakdown; tenant-scoped debugging is explicit and on-demand.
-4. Recent error ring buffer default: `1000` events.
+4. Recent error ring buffer default: `1000` events (`MUX_OBS_RECENT_ERRORS_MAX`).
