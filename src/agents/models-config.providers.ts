@@ -17,6 +17,7 @@ import {
   buildHuggingfaceModelDefinition,
 } from "./huggingface-models.js";
 import { resolveAwsSdkEnvVarName, resolveEnvApiKey } from "./model-auth.js";
+import { normalizeProviderId } from "./model-selection.js";
 import { OLLAMA_NATIVE_BASE_URL } from "./ollama-stream.js";
 import { discoverRedpillModels, REDPILL_BASE_URL } from "./redpill-models.js";
 import {
@@ -359,7 +360,16 @@ export function normalizeProviders(params: {
 
   for (const [key, provider] of Object.entries(providers)) {
     const normalizedKey = key.trim();
+    const normalizedProviderId = normalizeProviderId(normalizedKey);
     let normalizedProvider = provider;
+
+    if (!normalizedProvider.api && normalizedProviderId === "openai-codex") {
+      mutated = true;
+      normalizedProvider = {
+        ...normalizedProvider,
+        api: "openai-codex-responses",
+      };
+    }
 
     // Fix common misconfig: apiKey set to "${ENV_VAR}" instead of "ENV_VAR".
     if (

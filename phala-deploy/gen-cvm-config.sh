@@ -67,10 +67,42 @@ CONFIG_JSON=$(node -e "
 
   // Model config — Codex via sub2api.
   // Preserve template-provided model definitions and only inject runtime auth/baseUrl.
+  cfg.agents = cfg.agents || {};
+  cfg.agents.defaults = cfg.agents.defaults || {};
   cfg.agents.defaults.model = { primary: process.argv[6] };
+  cfg.agents.defaults.models = cfg.agents.defaults.models || {};
+  if (!cfg.agents.defaults.models['openai-codex/gpt-5.3-codex']) {
+    cfg.agents.defaults.models['openai-codex/gpt-5.3-codex'] = { alias: 'Codex' };
+  }
+  if (!cfg.agents.defaults.models['openai-codex/gpt-5.1-codex-mini']) {
+    cfg.agents.defaults.models['openai-codex/gpt-5.1-codex-mini'] = { alias: 'Codex Mini' };
+  }
+
   cfg.models = cfg.models || {};
   cfg.models.providers = cfg.models.providers || {};
   const codexProvider = cfg.models.providers['openai-codex'] || {};
+  const requiredSwitchModels = [
+    { id: 'gpt-5.3-codex', name: 'gpt-5.3-codex', reasoning: true, input: ['text', 'image'] },
+    { id: 'gpt-5.1-codex-mini', name: 'gpt-5.1-codex-mini', reasoning: true, input: ['text', 'image'] },
+  ];
+  const existingModels = Array.isArray(codexProvider.models) ? codexProvider.models : [];
+  for (const model of requiredSwitchModels) {
+    const existingIndex = existingModels.findIndex((entry) => entry?.id === model.id);
+    if (existingIndex === -1) {
+      existingModels.push(model);
+      continue;
+    }
+    const current = existingModels[existingIndex] || {};
+    const currentInput = Array.isArray(current.input)
+      ? current.input.filter((value) => typeof value === 'string')
+      : [];
+    existingModels[existingIndex] = {
+      ...current,
+      ...model,
+      input: Array.from(new Set([...currentInput, ...model.input])),
+      reasoning: true,
+    };
+  }
   cfg.models.providers['openai-codex'] = {
     ...codexProvider,
     baseUrl: process.argv[7],
@@ -79,7 +111,7 @@ CONFIG_JSON=$(node -e "
       ...(codexProvider.headers || {}),
       'x-api-key': process.argv[9],
     },
-    models: Array.isArray(codexProvider.models) ? codexProvider.models : [],
+    models: existingModels,
   };
 
   // Brave Search web tool (optional)

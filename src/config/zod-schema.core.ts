@@ -6,6 +6,7 @@ import { sensitive } from "./zod-schema.sensitive.js";
 export const ModelApiSchema = z.union([
   z.literal("openai-completions"),
   z.literal("openai-responses"),
+  z.literal("openai-codex-responses"),
   z.literal("anthropic-messages"),
   z.literal("google-generative-ai"),
   z.literal("github-copilot"),
