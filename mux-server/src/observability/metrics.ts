@@ -1,3 +1,5 @@
+import { Counter, Gauge, Histogram, Registry } from "prom-client";
+
 const CHANNELS = ["telegram", "discord", "whatsapp"] as const;
 const ACTIVE_WINDOWS = [
   ["5m", 5 * 60_000],
@@ -5,62 +7,14 @@ const ACTIVE_WINDOWS = [
   ["24h", 24 * 60 * 60_000],
 ] as const;
 const ACTIVE_MAX_AGE_MS = ACTIVE_WINDOWS[ACTIVE_WINDOWS.length - 1]?.[1] ?? 0;
+const HISTOGRAM_BUCKETS_MS = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000];
 
 type MetricsChannel = (typeof CHANNELS)[number];
-type Labels = Record<string, string>;
-type CounterRow = { labels: Labels; value: number };
+type InboundOutcome = "forwarded" | "deferred" | "dropped" | "error";
+type PairingOutcome = "success" | "invalid" | "ignored";
+type PairingClaimType = "fresh" | "repaired" | "takeover" | "unknown";
+type AuthSurface = "tenant" | "admin" | "register";
 type LogLikeEvent = Record<string, unknown> & { type?: unknown; claimType?: unknown };
-
-const OUTCOME_SUCCESS_MIN = 200;
-const OUTCOME_SUCCESS_MAX = 299;
-
-function labelsKey(labels: Labels): string {
-  return Object.entries(labels)
-    .toSorted(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}=${v}`)
-    .join("|");
-}
-
-function labelsText(labels: Labels): string {
-  const body = Object.entries(labels)
-    .toSorted(([a], [b]) => a.localeCompare(b))
-    .map(
-      ([k, v]) =>
-        `${k}="${v.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"')}"`,
-    )
-    .join(",");
-  return body ? `{${body}}` : "";
-}
-
-function inc(map: Map<string, CounterRow>, labels: Labels, by = 1) {
-  const key = labelsKey(labels);
-  const row = map.get(key);
-  if (row) {
-    row.value += by;
-    return;
-  }
-  map.set(key, { labels, value: by });
-}
-
-function pushCounter(lines: string[], name: string, help: string, map: Map<string, CounterRow>) {
-  lines.push(`# HELP ${name} ${help}`);
-  lines.push(`# TYPE ${name} counter`);
-  for (const row of [...map.values()].toSorted((a, b) =>
-    labelsKey(a.labels).localeCompare(labelsKey(b.labels)),
-  )) {
-    lines.push(`${name}${labelsText(row.labels)} ${row.value}`);
-  }
-}
-
-function pushGauge(lines: string[], name: string, help: string, rows: CounterRow[]) {
-  lines.push(`# HELP ${name} ${help}`);
-  lines.push(`# TYPE ${name} gauge`);
-  for (const row of rows.toSorted((a, b) =>
-    labelsKey(a.labels).localeCompare(labelsKey(b.labels)),
-  )) {
-    lines.push(`${name}${labelsText(row.labels)} ${row.value}`);
-  }
-}
 
 function normalizeUserId(value: unknown): string | null {
   if (typeof value === "string") {
@@ -71,6 +25,18 @@ function normalizeUserId(value: unknown): string | null {
     return String(Math.trunc(value));
   }
   return null;
+}
+
+function normalizeMethod(value: unknown): "send" | "typing" | "action" {
+  return value === "typing" || value === "action" ? value : "send";
+}
+
+function normalizeChannel(value: unknown): MetricsChannel | "unknown" {
+  return value === "telegram" || value === "discord" || value === "whatsapp" ? value : "unknown";
+}
+
+function normalizePairingClaimType(value: unknown): PairingClaimType {
+  return value === "fresh" || value === "repaired" || value === "takeover" ? value : "unknown";
 }
 
 function channelFromEventType(type: string): MetricsChannel | null {
@@ -86,29 +52,96 @@ function channelFromEventType(type: string): MetricsChannel | null {
   return null;
 }
 
-function normalizePairingClaimType(value: unknown): string {
-  return value === "fresh" || value === "repaired" || value === "takeover" ? value : "unknown";
-}
-
-function normalizeMethod(value: unknown): string {
-  return value === "typing" || value === "action" ? value : "send";
-}
-
-function normalizeChannel(value: unknown): MetricsChannel | "unknown" {
-  return value === "telegram" || value === "discord" || value === "whatsapp" ? value : "unknown";
-}
-
 export function createMuxMetrics() {
-  const inbound = new Map<string, CounterRow>();
-  const outbound = new Map<string, CounterRow>();
-  const pairing = new Map<string, CounterRow>();
-  const auth = new Map<string, CounterRow>();
-  const retryScheduled = new Map<string, CounterRow>();
-  const retryExhausted = new Map<string, CounterRow>();
+  const registry = new Registry();
+
+  const inbound = new Counter({
+    name: "mux_inbound_events_total",
+    help: "Inbound events grouped by channel and outcome.",
+    labelNames: ["channel", "outcome"] as const,
+    registers: [registry],
+  });
+  const inboundDuration = new Histogram({
+    name: "mux_inbound_forward_duration_ms",
+    help: "Inbound tenant-forward duration in milliseconds.",
+    labelNames: ["channel"] as const,
+    buckets: HISTOGRAM_BUCKETS_MS,
+    registers: [registry],
+  });
+  const outbound = new Counter({
+    name: "mux_outbound_requests_total",
+    help: "Outbound requests grouped by channel, method and outcome.",
+    labelNames: ["channel", "method", "outcome"] as const,
+    registers: [registry],
+  });
+  const outboundDuration = new Histogram({
+    name: "mux_outbound_duration_ms",
+    help: "Outbound request duration in milliseconds.",
+    labelNames: ["channel", "method"] as const,
+    buckets: HISTOGRAM_BUCKETS_MS,
+    registers: [registry],
+  });
+  const pairing = new Counter({
+    name: "mux_pairing_claims_total",
+    help: "Pairing claim outcomes by channel and claim type.",
+    labelNames: ["channel", "claim_type", "outcome"] as const,
+    registers: [registry],
+  });
+  const auth = new Counter({
+    name: "mux_auth_failures_total",
+    help: "Authentication failures grouped by surface.",
+    labelNames: ["surface"] as const,
+    registers: [registry],
+  });
+  const retryScheduled = new Counter({
+    name: "mux_retry_scheduled_total",
+    help: "Retries scheduled by channel.",
+    labelNames: ["channel"] as const,
+    registers: [registry],
+  });
+  const retryExhausted = new Counter({
+    name: "mux_retry_exhausted_total",
+    help: "Retries exhausted by channel.",
+    labelNames: ["channel"] as const,
+    registers: [registry],
+  });
+  const queueDepth = new Gauge({
+    name: "mux_queue_depth",
+    help: "Current queue depth by channel.",
+    labelNames: ["channel"] as const,
+    registers: [registry],
+  });
+  const activeUsersGauge = new Gauge({
+    name: "mux_active_users",
+    help: "Estimated active users by channel and rolling window.",
+    labelNames: ["channel", "window"] as const,
+    registers: [registry],
+  });
+
   const activeUsers: Record<MetricsChannel, Map<string, number>> = {
     telegram: new Map(),
     discord: new Map(),
     whatsapp: new Map(),
+  };
+
+  const recordPairingClaim = (params: {
+    channel: MetricsChannel;
+    claimType: unknown;
+    outcome: PairingOutcome;
+  }) => {
+    pairing.inc({
+      channel: params.channel,
+      claim_type: normalizePairingClaimType(params.claimType),
+      outcome: params.outcome,
+    });
+  };
+
+  const recordRetryScheduled = (channel: MetricsChannel) => {
+    retryScheduled.inc({ channel });
+  };
+
+  const recordRetryExhausted = (channel: MetricsChannel) => {
+    retryExhausted.inc({ channel });
   };
 
   return {
@@ -119,15 +152,15 @@ export function createMuxMetrics() {
       }
     },
 
-    recordInboundEvent(
-      channel: MetricsChannel,
-      outcome: "forwarded" | "deferred" | "dropped" | "error",
-    ) {
-      inc(inbound, { channel, outcome });
+    recordInboundEvent(channel: MetricsChannel, outcome: InboundOutcome) {
+      inbound.inc({ channel, outcome });
     },
 
-    observeInboundForwardDuration(_channel: MetricsChannel, _durationMs: number) {
-      // Compatibility no-op; durations were dropped to keep this patch lean.
+    observeInboundForwardDuration(channel: MetricsChannel, durationMs: number) {
+      inboundDuration.observe(
+        { channel },
+        Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : 0,
+      );
     },
 
     recordOutboundRequest(params: {
@@ -136,40 +169,24 @@ export function createMuxMetrics() {
       statusCode: number;
       durationMs: number;
     }) {
-      const outcome =
-        params.statusCode >= OUTCOME_SUCCESS_MIN && params.statusCode <= OUTCOME_SUCCESS_MAX
-          ? "success"
-          : "error";
-      inc(outbound, {
-        channel: normalizeChannel(params.channel),
-        method: normalizeMethod(params.method),
-        outcome,
-      });
+      const channel = normalizeChannel(params.channel);
+      const method = normalizeMethod(params.method);
+      const outcome = params.statusCode >= 200 && params.statusCode < 300 ? "success" : "error";
+      outbound.inc({ channel, method, outcome });
+      outboundDuration.observe(
+        { channel, method },
+        Number.isFinite(params.durationMs) && params.durationMs >= 0 ? params.durationMs : 0,
+      );
     },
 
-    recordPairingClaim(params: {
-      channel: MetricsChannel;
-      claimType: unknown;
-      outcome: "success" | "invalid" | "ignored";
-    }) {
-      inc(pairing, {
-        channel: params.channel,
-        claim_type: normalizePairingClaimType(params.claimType),
-        outcome: params.outcome,
-      });
+    recordPairingClaim,
+
+    recordAuthFailure(surface: AuthSurface) {
+      auth.inc({ surface });
     },
 
-    recordAuthFailure(surface: "tenant" | "admin" | "register") {
-      inc(auth, { surface });
-    },
-
-    recordRetryScheduled(channel: MetricsChannel) {
-      inc(retryScheduled, { channel });
-    },
-
-    recordRetryExhausted(channel: MetricsChannel) {
-      inc(retryExhausted, { channel });
-    },
+    recordRetryScheduled,
+    recordRetryExhausted,
 
     observeLogEvent(event: LogLikeEvent) {
       const type = typeof event.type === "string" ? event.type : "";
@@ -178,27 +195,30 @@ export function createMuxMetrics() {
       }
       const channel = channelFromEventType(type);
       if (channel && type.endsWith("_pairing_token_claimed")) {
-        this.recordPairingClaim({ channel, claimType: event.claimType, outcome: "success" });
+        recordPairingClaim({ channel, claimType: event.claimType, outcome: "success" });
         return;
       }
       if (channel && type.endsWith("_pairing_token_invalid")) {
-        this.recordPairingClaim({ channel, claimType: "unknown", outcome: "invalid" });
+        recordPairingClaim({ channel, claimType: "unknown", outcome: "invalid" });
         return;
       }
       if (channel && type.endsWith("_pairing_token_ignored_bound_route")) {
-        this.recordPairingClaim({ channel, claimType: "unknown", outcome: "ignored" });
+        recordPairingClaim({ channel, claimType: "unknown", outcome: "ignored" });
         return;
       }
       if (type === "whatsapp_inbound_retry_deferred") {
-        this.recordRetryScheduled("whatsapp");
+        recordRetryScheduled("whatsapp");
         return;
       }
       if (channel && type.endsWith("_inbound_bg_retry_exhausted")) {
-        this.recordRetryExhausted(channel);
+        recordRetryExhausted(channel);
       }
     },
 
-    renderPrometheus(queueDepthByChannel: Record<MetricsChannel, number>, nowMs = Date.now()) {
+    async renderPrometheus(
+      queueDepthByChannel: Record<MetricsChannel, number>,
+      nowMs = Date.now(),
+    ) {
       const activeCutoff = nowMs - ACTIVE_MAX_AGE_MS;
       for (const channel of CHANNELS) {
         for (const [id, seenAt] of activeUsers[channel]) {
@@ -208,8 +228,8 @@ export function createMuxMetrics() {
         }
       }
 
-      const activeRows: CounterRow[] = [];
       for (const channel of CHANNELS) {
+        queueDepth.set({ channel }, Math.max(0, Math.trunc(queueDepthByChannel[channel] ?? 0)));
         for (const [window, ms] of ACTIVE_WINDOWS) {
           const cutoff = nowMs - ms;
           let value = 0;
@@ -218,63 +238,11 @@ export function createMuxMetrics() {
               value += 1;
             }
           }
-          activeRows.push({ labels: { channel, window }, value });
+          activeUsersGauge.set({ channel, window }, value);
         }
       }
 
-      const lines: string[] = [];
-      pushCounter(
-        lines,
-        "mux_inbound_events_total",
-        "Inbound events grouped by channel and outcome.",
-        inbound,
-      );
-      pushCounter(
-        lines,
-        "mux_outbound_requests_total",
-        "Outbound requests grouped by channel, method and outcome.",
-        outbound,
-      );
-      pushCounter(
-        lines,
-        "mux_pairing_claims_total",
-        "Pairing claim outcomes by channel and claim type.",
-        pairing,
-      );
-      pushCounter(
-        lines,
-        "mux_auth_failures_total",
-        "Authentication failures grouped by surface.",
-        auth,
-      );
-      pushCounter(
-        lines,
-        "mux_retry_scheduled_total",
-        "Retries scheduled by channel.",
-        retryScheduled,
-      );
-      pushCounter(
-        lines,
-        "mux_retry_exhausted_total",
-        "Retries exhausted by channel.",
-        retryExhausted,
-      );
-      pushGauge(
-        lines,
-        "mux_queue_depth",
-        "Current queue depth by channel.",
-        CHANNELS.map((channel) => ({
-          labels: { channel },
-          value: Math.max(0, Math.trunc(queueDepthByChannel[channel] ?? 0)),
-        })),
-      );
-      pushGauge(
-        lines,
-        "mux_active_users",
-        "Estimated active users by channel and rolling window.",
-        activeRows,
-      );
-      return `${lines.join("\n")}\n`;
+      return await registry.metrics();
     },
   };
 }

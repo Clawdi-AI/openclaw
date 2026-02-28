@@ -1276,9 +1276,9 @@ function countWhatsAppInboundQueueDepth(): number {
   return Math.trunc(count);
 }
 
-function renderMetricsPayload(): string {
+async function renderMetricsPayload(): Promise<string> {
   const queues = buildQueueSnapshot(Date.now());
-  return metrics.renderPrometheus(queues.depth);
+  return await metrics.renderPrometheus(queues.depth);
 }
 
 function resolveWhatsAppOldestQueuedAgeMs(nowMs = Date.now()): number | null {
@@ -7914,7 +7914,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && pathname === "/metrics") {
-      const body = renderMetricsPayload();
+      const body = await renderMetricsPayload();
       res.writeHead(200, {
         "content-type": "text/plain; version=0.0.4; charset=utf-8",
       });
