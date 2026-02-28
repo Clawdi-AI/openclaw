@@ -5,13 +5,9 @@ This directory contains a standalone TypeScript mux server for staged rollout an
 ## Scope
 
 - Implements `GET /health`
-- Implements `GET /health/live`
-- Implements `GET /health/ready`
-- Implements `GET /metrics` (when enabled)
 - Implements `GET /.well-known/jwks.json`
 - Implements `POST /v1/instances/register`
 - Implements `POST /v1/admin/pairings/token`
-- Implements `GET /v1/admin/observability/snapshot`
 - Implements `GET /v1/pairings`
 - Implements `POST /v1/pairings/claim`
 - Implements `POST /v1/pairings/unbind`
@@ -91,9 +87,6 @@ node --import tsx mux-server/src/server.ts
 - `MUX_REGISTER_KEY` (optional): enables instance-centric runtime auth via `POST /v1/instances/register`.
 - `MUX_JWT_PRIVATE_KEY` (optional): Ed25519 private key PEM for stable JWT signing across restarts.
 - `MUX_ADMIN_TOKEN` (optional): enables admin-only endpoints (for example `POST /v1/admin/pairings/token`, `GET /v1/admin/whatsapp/health`).
-- `MUX_METRICS_ENABLED` (default `false`): enables `GET /metrics` Prometheus endpoint.
-- `MUX_OBS_RECENT_ERRORS_MAX` (default `1000`): max in-memory recent error events for admin observability snapshot.
-- `MUX_OBS_RECENT_EVENTS_MAX` (default `5000`): max in-memory recent events window for admin observability snapshot counters.
 - `MUX_PUBLIC_URL` (optional): public base URL for proxy endpoints (e.g. `https://mux.example.com`). Defaults to `http://<MUX_HOST>:<MUX_PORT>`. Used to construct file proxy URLs in inbound attachment metadata.
 - `MUX_HOST` (default `127.0.0.1`)
 - `MUX_PORT` (default `18891`)
@@ -229,32 +222,6 @@ How this works:
 ### `GET /health`
 
 - Response: `200 {"ok":true}`
-
-### `GET /health/live`
-
-- Response: `200 {"ok":true,"live":true,"ts":<unix_ms>}`
-- Purpose: process liveness (safe for k8s/container liveness probes).
-
-### `GET /health/ready`
-
-- Response: `200` when all enabled channels are ready.
-- Response: `503` when one or more enabled channels are degraded.
-- Includes:
-  - `channels.<channel>.status|ready|reason`
-  - `queues.depth.<channel>`
-  - `queues.oldestQueuedAgeMs.<channel>`
-  - `degraded[]`
-
-### `GET /metrics`
-
-- Disabled by default.
-- When `MUX_METRICS_ENABLED=true`, returns Prometheus text format.
-- Includes low-cardinality channel-level counters/histograms/gauges:
-  - inbound/outbound events + latency
-  - auth failures
-  - retries scheduled/exhausted
-  - queue depth
-  - active users (`window=5m|1h|24h`)
 
 ### `POST /v1/mux/outbound/send`
 
@@ -586,51 +553,6 @@ Behavior:
 - Reports runtime listener state from the live mux process.
 - Requires `MUX_ADMIN_TOKEN` to be configured.
 
-### `GET /v1/admin/observability/snapshot`
-
-Headers:
-
-- `Authorization: Bearer <mux_admin_token>`
-
-Query parameters:
-
-- `tenantId` (optional): filter counters/recent errors for one tenant during debug.
-- `recentErrorsLimit` (optional): trims payload size for `recentErrors`.
-
-Response `200`:
-
-```json
-{
-  "ok": true,
-  "generatedAtMs": 1770931100000,
-  "channels": {
-    "telegram": { "status": "ready", "ready": true },
-    "discord": { "status": "ready", "ready": true },
-    "whatsapp": { "status": "degraded", "ready": false, "reason": "listener_not_active" }
-  },
-  "counters": {
-    "last1m": {
-      "telegram": { "events": 4, "errors": 0, "forwarded": 4, "deferred": 0, "dropped": 0 }
-    },
-    "last5m": {
-      "telegram": { "events": 18, "errors": 1, "forwarded": 16, "deferred": 1, "dropped": 0 }
-    }
-  },
-  "queues": {
-    "depth": { "telegram": 0, "discord": 0, "whatsapp": 2 },
-    "oldestQueuedAgeMs": { "telegram": null, "discord": null, "whatsapp": 28734 }
-  },
-  "topErrorCodes": [{ "code": "INBOUND_FORWARD_FAILED", "count": 1 }],
-  "recentErrors": []
-}
-```
-
-Behavior:
-
-- Provides incident snapshot without scanning full logs.
-- Keeps default output low-cardinality; tenant focus is opt-in via query filter.
-- Requires `MUX_ADMIN_TOKEN` to be configured.
-
 ### `GET /v1/mux/files/:channel`
 
 Auth: tenant runtime JWT (`Authorization: Bearer <runtime_jwt>`).
@@ -843,39 +765,6 @@ Constraints for this future work:
 - auth remains instance-scoped (openclawId + mux-issued runtime JWT)
 - no backward-compatibility layer is required before launch
 
-## Prometheus Integration
-
-1. Enable metrics on mux:
-
-```bash
-MUX_METRICS_ENABLED=true
-```
-
-2. Add scrape target:
-
-```yaml
-scrape_configs:
-  - job_name: mux-server
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - mux-server:18891
-```
-
-3. Recommended first dashboards:
-
-- `rate(mux_inbound_events_total{outcome="error"}[5m])` by `channel`
-- `rate(mux_outbound_requests_total{outcome="error"}[5m])` by `channel`
-- `mux_queue_depth` by `channel`
-- `mux_active_users{window="5m"}` by `channel`
-- `increase(mux_retry_exhausted_total[15m])` by `channel`
-
-4. Recommended first alerts:
-
-- queue depth sustained above threshold
-- retry exhausted increase over rolling window
-- readiness endpoint returns `503` for enabled channel
-
 ## Tests
 
 From repo root:
@@ -902,18 +791,13 @@ MUX_EXPECT_STATUS=200 \
 pnpm --dir mux-server smoke
 ```
 
-Current test coverage (`mux-server/test/server.test.ts`, 54 tests):
+Current test coverage (`mux-server/test/server.test.ts`, 48 tests):
 
 **Auth & infrastructure:**
 
 - health endpoint responds
-- health live endpoint responds
-- health endpoint reports telegram poll conflict when getUpdates returns 409
-- metrics endpoint is disabled by default
-- metrics endpoint exposes prom counters when enabled
 - instance register endpoint requires shared register key and returns runtime jwt metadata
 - admin pairing token endpoint requires admin auth and issues token (control-plane flow)
-- admin observability snapshot endpoint requires admin auth and returns snapshot
 - runtime jwt auth enforces openclaw identity on outbound endpoints
 - outbound endpoint rejects unauthorized requests
 - returns 400 for invalid JSON body

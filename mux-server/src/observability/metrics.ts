@@ -1,463 +1,294 @@
-const HISTOGRAM_BUCKETS_MS = [
-  10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000,
+const CHANNELS = ["telegram", "discord", "whatsapp"] as const;
+const ACTIVE_WINDOWS = [
+  ["5m", 5 * 60_000],
+  ["1h", 60 * 60_000],
+  ["24h", 24 * 60 * 60_000],
 ] as const;
-const ACTIVE_USER_WINDOWS = [
-  { key: "5m", ms: 5 * 60 * 1000 },
-  { key: "1h", ms: 60 * 60 * 1000 },
-  { key: "24h", ms: 24 * 60 * 60 * 1000 },
-] as const;
-const ACTIVE_USER_MAX_WINDOW_MS = ACTIVE_USER_WINDOWS[ACTIVE_USER_WINDOWS.length - 1]?.ms ?? 0;
+const ACTIVE_MAX_AGE_MS = ACTIVE_WINDOWS[ACTIVE_WINDOWS.length - 1]?.[1] ?? 0;
 
-const METRIC_CHANNELS = ["telegram", "discord", "whatsapp"] as const;
-
-type MetricsChannel = (typeof METRIC_CHANNELS)[number];
-type OutboundChannel = MetricsChannel | "unknown";
+type MetricsChannel = (typeof CHANNELS)[number];
 type InboundOutcome = "forwarded" | "deferred" | "dropped" | "error";
-type OutboundOutcome = "success" | "error";
-type OutboundMethod = "send" | "typing" | "action" | "unknown";
 type PairingOutcome = "success" | "invalid" | "ignored";
-type PairingClaimType = "fresh" | "repaired" | "takeover" | "unknown";
 type AuthSurface = "tenant" | "admin" | "register";
-type HistogramState = {
-  sum: number;
-  count: number;
-  buckets: number[];
-};
+type LabelValues = Record<string, string>;
+type LogLikeEvent = Record<string, unknown> & { type?: unknown; claimType?: unknown };
 
-type LogLikeEvent = Record<string, unknown> & {
-  type?: unknown;
-  claimType?: unknown;
-};
+function toMethod(value: unknown): string {
+  if (value === "typing" || value === "action") {
+    return value;
+  }
+  return "send";
+}
 
-function normalizeOutboundChannel(value: string | null | undefined): OutboundChannel {
+function toChannel(value: unknown): MetricsChannel | "unknown" {
   if (value === "telegram" || value === "discord" || value === "whatsapp") {
     return value;
   }
   return "unknown";
 }
 
-function normalizeOutboundMethod(value: string | null | undefined): OutboundMethod {
-  if (value === "send" || value === "typing" || value === "action") {
-    return value;
-  }
-  return "unknown";
-}
-
-function normalizePairingClaimType(value: unknown): PairingClaimType {
+function normalizeClaimType(value: unknown): string {
   if (value === "fresh" || value === "repaired" || value === "takeover") {
     return value;
   }
   return "unknown";
 }
 
-function key(parts: string[]): string {
-  return parts.join("|");
-}
-
-function escapeLabelValue(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"');
-}
-
-function labelsToText(labels: Record<string, string>): string {
-  const names = Object.keys(labels).toSorted();
-  if (names.length === 0) {
-    return "";
+function eventChannelPrefix(type: string): MetricsChannel | null {
+  if (type.startsWith("telegram_")) {
+    return "telegram";
   }
-  const body = names.map((name) => `${name}="${escapeLabelValue(labels[name] ?? "")}"`).join(",");
-  return `{${body}}`;
-}
-
-function renderCounterMetric(
-  lines: string[],
-  name: string,
-  help: string,
-  values: Map<string, { labels: Record<string, string>; value: number }>,
-): void {
-  lines.push(`# HELP ${name} ${help}`);
-  lines.push(`# TYPE ${name} counter`);
-  const entries = [...values.values()].toSorted((a, b) => {
-    const aKey = JSON.stringify(a.labels);
-    const bKey = JSON.stringify(b.labels);
-    return aKey.localeCompare(bKey);
-  });
-  for (const entry of entries) {
-    lines.push(`${name}${labelsToText(entry.labels)} ${entry.value}`);
+  if (type.startsWith("discord_")) {
+    return "discord";
   }
-}
-
-function renderGaugeMetric(
-  lines: string[],
-  name: string,
-  help: string,
-  values: Array<{ labels: Record<string, string>; value: number }>,
-): void {
-  lines.push(`# HELP ${name} ${help}`);
-  lines.push(`# TYPE ${name} gauge`);
-  const entries = [...values].toSorted((a, b) => {
-    const aKey = JSON.stringify(a.labels);
-    const bKey = JSON.stringify(b.labels);
-    return aKey.localeCompare(bKey);
-  });
-  for (const entry of entries) {
-    lines.push(`${name}${labelsToText(entry.labels)} ${entry.value}`);
-  }
-}
-
-function renderHistogramMetric(
-  lines: string[],
-  name: string,
-  help: string,
-  entries: Map<string, { labels: Record<string, string>; state: HistogramState }>,
-): void {
-  lines.push(`# HELP ${name} ${help}`);
-  lines.push(`# TYPE ${name} histogram`);
-  const sorted = [...entries.values()].toSorted((a, b) => {
-    const aKey = JSON.stringify(a.labels);
-    const bKey = JSON.stringify(b.labels);
-    return aKey.localeCompare(bKey);
-  });
-  for (const entry of sorted) {
-    for (let i = 0; i < HISTOGRAM_BUCKETS_MS.length; i += 1) {
-      const le = HISTOGRAM_BUCKETS_MS[i];
-      const labels = { ...entry.labels, le: String(le) };
-      lines.push(`${name}_bucket${labelsToText(labels)} ${entry.state.buckets[i] ?? 0}`);
-    }
-    lines.push(
-      `${name}_bucket${labelsToText({ ...entry.labels, le: "+Inf" })} ${entry.state.count}`,
-    );
-    lines.push(`${name}_sum${labelsToText(entry.labels)} ${entry.state.sum}`);
-    lines.push(`${name}_count${labelsToText(entry.labels)} ${entry.state.count}`);
-  }
-}
-
-function createHistogramState(): HistogramState {
-  return {
-    sum: 0,
-    count: 0,
-    buckets: Array.from({ length: HISTOGRAM_BUCKETS_MS.length }, () => 0),
-  };
-}
-
-function addToHistogram(state: HistogramState, durationMs: number): void {
-  const value = Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : 0;
-  state.sum += value;
-  state.count += 1;
-  for (let i = 0; i < HISTOGRAM_BUCKETS_MS.length; i += 1) {
-    if (value <= HISTOGRAM_BUCKETS_MS[i]) {
-      state.buckets[i] += 1;
-    }
-  }
-}
-
-function isStatusSuccess(statusCode: number): boolean {
-  return statusCode >= 200 && statusCode < 300;
-}
-
-function asChannelPrefix(eventType: string): MetricsChannel | null {
-  const idx = eventType.indexOf("_");
-  if (idx <= 0) {
-    return null;
-  }
-  const prefix = eventType.slice(0, idx);
-  if (prefix === "telegram" || prefix === "discord" || prefix === "whatsapp") {
-    return prefix;
+  if (type.startsWith("whatsapp_")) {
+    return "whatsapp";
   }
   return null;
 }
 
-export type MuxMetrics = {
-  recordActiveUser: (channel: MetricsChannel, userId: unknown, nowMs?: number) => void;
-  recordInboundEvent: (channel: MetricsChannel, outcome: InboundOutcome) => void;
-  observeInboundForwardDuration: (channel: MetricsChannel, durationMs: number) => void;
-  recordOutboundRequest: (params: {
-    channel: string | null | undefined;
-    method: string | null | undefined;
-    statusCode: number;
-    durationMs: number;
-  }) => void;
-  recordPairingClaim: (params: {
-    channel: MetricsChannel;
-    claimType: unknown;
-    outcome: PairingOutcome;
-  }) => void;
-  recordAuthFailure: (surface: AuthSurface) => void;
-  recordRetryScheduled: (channel: MetricsChannel) => void;
-  recordRetryExhausted: (channel: MetricsChannel) => void;
-  observeLogEvent: (event: LogLikeEvent) => void;
-  renderPrometheus: (queueDepthByChannel: Record<MetricsChannel, number>, nowMs?: number) => string;
-};
+function escapeLabel(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"');
+}
 
-export function createMuxMetrics(): MuxMetrics {
-  const inboundEvents = new Map<string, { labels: Record<string, string>; value: number }>();
-  const inboundForwardDuration = new Map<
-    string,
-    { labels: Record<string, string>; state: HistogramState }
-  >();
-  const outboundRequests = new Map<string, { labels: Record<string, string>; value: number }>();
-  const outboundDuration = new Map<
-    string,
-    { labels: Record<string, string>; state: HistogramState }
-  >();
-  const pairingClaims = new Map<string, { labels: Record<string, string>; value: number }>();
-  const authFailures = new Map<string, { labels: Record<string, string>; value: number }>();
-  const retryScheduled = new Map<string, { labels: Record<string, string>; value: number }>();
-  const retryExhausted = new Map<string, { labels: Record<string, string>; value: number }>();
-  const activeUsers: Record<MetricsChannel, Map<string, number>> = {
-    telegram: new Map<string, number>(),
-    discord: new Map<string, number>(),
-    whatsapp: new Map<string, number>(),
-  };
+function labelsKey(labels: LabelValues): string {
+  return Object.entries(labels)
+    .toSorted(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("|");
+}
 
-  const incCounter = (
-    target: Map<string, { labels: Record<string, string>; value: number }>,
-    labels: Record<string, string>,
-    step = 1,
-  ) => {
-    const id = key(
-      Object.keys(labels)
-        .toSorted()
-        .map((name) => `${name}=${labels[name] ?? ""}`),
-    );
-    const existing = target.get(id);
-    if (existing) {
-      existing.value += step;
-      return;
-    }
-    target.set(id, { labels, value: step });
-  };
+function labelsText(labels: LabelValues): string {
+  const parts = Object.entries(labels)
+    .toSorted(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}="${escapeLabel(v)}"`);
+  return parts.length === 0 ? "" : `{${parts.join(",")}}`;
+}
 
-  const observeHistogram = (
-    target: Map<string, { labels: Record<string, string>; state: HistogramState }>,
-    labels: Record<string, string>,
-    durationMs: number,
-  ) => {
-    const id = key(
-      Object.keys(labels)
-        .toSorted()
-        .map((name) => `${name}=${labels[name] ?? ""}`),
-    );
-    const existing = target.get(id);
-    if (existing) {
-      addToHistogram(existing.state, durationMs);
-      return;
-    }
-    const state = createHistogramState();
-    addToHistogram(state, durationMs);
-    target.set(id, { labels, state });
-  };
+function pushCounter(
+  lines: string[],
+  name: string,
+  help: string,
+  map: Map<string, { labels: LabelValues; value: number }>,
+) {
+  lines.push(`# HELP ${name} ${help}`);
+  lines.push(`# TYPE ${name} counter`);
+  for (const { labels, value } of [...map.values()].toSorted((a, b) =>
+    labelsKey(a.labels).localeCompare(labelsKey(b.labels)),
+  )) {
+    lines.push(`${name}${labelsText(labels)} ${value}`);
+  }
+}
 
-  const recordInboundEvent = (channel: MetricsChannel, outcome: InboundOutcome) => {
-    incCounter(inboundEvents, { channel, outcome });
-  };
+function pushGauge(
+  lines: string[],
+  name: string,
+  help: string,
+  rows: Array<{ labels: LabelValues; value: number }>,
+) {
+  lines.push(`# HELP ${name} ${help}`);
+  lines.push(`# TYPE ${name} gauge`);
+  for (const row of rows.toSorted((a, b) =>
+    labelsKey(a.labels).localeCompare(labelsKey(b.labels)),
+  )) {
+    lines.push(`${name}${labelsText(row.labels)} ${row.value}`);
+  }
+}
 
-  const recordActiveUser = (channel: MetricsChannel, userId: unknown, nowMs = Date.now()) => {
-    const normalizedId =
-      typeof userId === "string"
-        ? userId.trim()
-        : typeof userId === "number" && Number.isFinite(userId)
-          ? String(Math.trunc(userId))
-          : "";
-    if (!normalizedId) {
-      return;
-    }
-    activeUsers[channel].set(normalizedId, nowMs);
-  };
+function inc(
+  map: Map<string, { labels: LabelValues; value: number }>,
+  labels: LabelValues,
+  by = 1,
+) {
+  const key = labelsKey(labels);
+  const prev = map.get(key);
+  if (prev) {
+    prev.value += by;
+    return;
+  }
+  map.set(key, { labels, value: by });
+}
 
-  const observeInboundForwardDuration = (channel: MetricsChannel, durationMs: number) => {
-    observeHistogram(inboundForwardDuration, { channel }, durationMs);
-  };
+function normalizeUserId(value: unknown): string | null {
+  if (typeof value === "string") {
+    const v = value.trim();
+    return v ? v : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  return null;
+}
 
-  const recordOutboundRequest = (params: {
-    channel: string | null | undefined;
-    method: string | null | undefined;
-    statusCode: number;
-    durationMs: number;
-  }) => {
-    const channel = normalizeOutboundChannel(params.channel);
-    const method = normalizeOutboundMethod(params.method);
-    const outcome: OutboundOutcome = isStatusSuccess(params.statusCode) ? "success" : "error";
-    incCounter(outboundRequests, { channel, method, outcome });
-    observeHistogram(outboundDuration, { channel, method }, params.durationMs);
-  };
-
-  const recordPairingClaim = (params: {
-    channel: MetricsChannel;
-    claimType: unknown;
-    outcome: PairingOutcome;
-  }) => {
-    const claimType = normalizePairingClaimType(params.claimType);
-    incCounter(pairingClaims, {
-      channel: params.channel,
-      claim_type: claimType,
-      outcome: params.outcome,
-    });
-  };
-
-  const recordAuthFailure = (surface: AuthSurface) => {
-    incCounter(authFailures, { surface });
-  };
-
-  const recordRetryScheduled = (channel: MetricsChannel) => {
-    incCounter(retryScheduled, { channel });
-  };
-
-  const recordRetryExhausted = (channel: MetricsChannel) => {
-    incCounter(retryExhausted, { channel });
-  };
-
-  const observeLogEvent = (event: LogLikeEvent) => {
-    const type = typeof event.type === "string" ? event.type : "";
-    if (!type) {
-      return;
-    }
-    const channel = asChannelPrefix(type);
-
-    if (channel && type.endsWith("_pairing_token_claimed")) {
-      recordPairingClaim({
-        channel,
-        claimType: event.claimType,
-        outcome: "success",
-      });
-      return;
-    }
-
-    if (channel && type.endsWith("_pairing_token_invalid")) {
-      recordPairingClaim({
-        channel,
-        claimType: "unknown",
-        outcome: "invalid",
-      });
-      return;
-    }
-
-    if (channel && type.endsWith("_pairing_token_ignored_bound_route")) {
-      recordPairingClaim({
-        channel,
-        claimType: "unknown",
-        outcome: "ignored",
-      });
-      return;
-    }
-
-    if (type === "whatsapp_inbound_retry_deferred") {
-      recordRetryScheduled("whatsapp");
-      return;
-    }
-
-    if (channel && type.endsWith("_inbound_bg_retry_exhausted")) {
-      recordRetryExhausted(channel);
-    }
-  };
-
-  const renderPrometheus = (
-    queueDepthByChannel: Record<MetricsChannel, number>,
-    nowMs = Date.now(),
-  ): string => {
-    const activeCutoff = nowMs - ACTIVE_USER_MAX_WINDOW_MS;
-    for (const channel of METRIC_CHANNELS) {
-      for (const [userId, seenAtMs] of activeUsers[channel].entries()) {
-        if (!Number.isFinite(seenAtMs) || seenAtMs < activeCutoff) {
-          activeUsers[channel].delete(userId);
-        }
-      }
-    }
-
-    const activeUserGaugeValues: Array<{ labels: Record<string, string>; value: number }> = [];
-    for (const channel of METRIC_CHANNELS) {
-      for (const window of ACTIVE_USER_WINDOWS) {
-        const cutoff = nowMs - window.ms;
-        let count = 0;
-        for (const seenAtMs of activeUsers[channel].values()) {
-          if (seenAtMs >= cutoff) {
-            count += 1;
-          }
-        }
-        activeUserGaugeValues.push({
-          labels: { channel, window: window.key },
-          value: count,
-        });
-      }
-    }
-
-    const lines: string[] = [];
-
-    renderCounterMetric(
-      lines,
-      "mux_inbound_events_total",
-      "Inbound events grouped by channel and outcome.",
-      inboundEvents,
-    );
-    renderHistogramMetric(
-      lines,
-      "mux_inbound_forward_duration_ms",
-      "Inbound tenant-forward duration in milliseconds.",
-      inboundForwardDuration,
-    );
-    renderCounterMetric(
-      lines,
-      "mux_outbound_requests_total",
-      "Outbound requests grouped by channel, method and outcome.",
-      outboundRequests,
-    );
-    renderHistogramMetric(
-      lines,
-      "mux_outbound_duration_ms",
-      "Outbound request duration in milliseconds.",
-      outboundDuration,
-    );
-    renderCounterMetric(
-      lines,
-      "mux_pairing_claims_total",
-      "Pairing claim outcomes by channel and claim type.",
-      pairingClaims,
-    );
-    renderCounterMetric(
-      lines,
-      "mux_auth_failures_total",
-      "Authentication failures grouped by surface.",
-      authFailures,
-    );
-    renderCounterMetric(
-      lines,
-      "mux_retry_scheduled_total",
-      "Retries scheduled by channel.",
-      retryScheduled,
-    );
-    renderCounterMetric(
-      lines,
-      "mux_retry_exhausted_total",
-      "Retries exhausted by channel.",
-      retryExhausted,
-    );
-    renderGaugeMetric(
-      lines,
-      "mux_queue_depth",
-      "Current queue depth by channel.",
-      METRIC_CHANNELS.map((channel) => ({
-        labels: { channel },
-        value: Math.max(0, Math.trunc(queueDepthByChannel[channel] ?? 0)),
-      })),
-    );
-    renderGaugeMetric(
-      lines,
-      "mux_active_users",
-      "Estimated active users by channel and rolling window.",
-      activeUserGaugeValues,
-    );
-
-    return `${lines.join("\n")}\n`;
+export function createMuxMetrics() {
+  const inbound = new Map<string, { labels: LabelValues; value: number }>();
+  const outbound = new Map<string, { labels: LabelValues; value: number }>();
+  const pairing = new Map<string, { labels: LabelValues; value: number }>();
+  const auth = new Map<string, { labels: LabelValues; value: number }>();
+  const retryScheduled = new Map<string, { labels: LabelValues; value: number }>();
+  const retryExhausted = new Map<string, { labels: LabelValues; value: number }>();
+  const active: Record<MetricsChannel, Map<string, number>> = {
+    telegram: new Map(),
+    discord: new Map(),
+    whatsapp: new Map(),
   };
 
   return {
-    recordActiveUser,
-    recordInboundEvent,
-    observeInboundForwardDuration,
-    recordOutboundRequest,
-    recordPairingClaim,
-    recordAuthFailure,
-    recordRetryScheduled,
-    recordRetryExhausted,
-    observeLogEvent,
-    renderPrometheus,
+    recordActiveUser(channel: MetricsChannel, userId: unknown, nowMs = Date.now()) {
+      const id = normalizeUserId(userId);
+      if (id) {
+        active[channel].set(id, nowMs);
+      }
+    },
+
+    recordInboundEvent(channel: MetricsChannel, outcome: InboundOutcome) {
+      inc(inbound, { channel, outcome });
+    },
+
+    observeInboundForwardDuration(_channel: MetricsChannel, _durationMs: number) {
+      // Kept for API compatibility; currently not exported as histogram metrics.
+    },
+
+    recordOutboundRequest(params: {
+      channel: string | null | undefined;
+      method: string | null | undefined;
+      statusCode: number;
+      durationMs: number;
+    }) {
+      const channel = toChannel(params.channel);
+      const method = toMethod(params.method);
+      const outcome = params.statusCode >= 200 && params.statusCode < 300 ? "success" : "error";
+      inc(outbound, { channel, method, outcome });
+    },
+
+    recordPairingClaim(params: {
+      channel: MetricsChannel;
+      claimType: unknown;
+      outcome: PairingOutcome;
+    }) {
+      inc(pairing, {
+        channel: params.channel,
+        claim_type: normalizeClaimType(params.claimType),
+        outcome: params.outcome,
+      });
+    },
+
+    recordAuthFailure(surface: AuthSurface) {
+      inc(auth, { surface });
+    },
+
+    recordRetryScheduled(channel: MetricsChannel) {
+      inc(retryScheduled, { channel });
+    },
+
+    recordRetryExhausted(channel: MetricsChannel) {
+      inc(retryExhausted, { channel });
+    },
+
+    observeLogEvent(event: LogLikeEvent) {
+      const type = typeof event.type === "string" ? event.type : "";
+      if (!type) {
+        return;
+      }
+      const channel = eventChannelPrefix(type);
+      if (channel && type.endsWith("_pairing_token_claimed")) {
+        this.recordPairingClaim({ channel, claimType: event.claimType, outcome: "success" });
+        return;
+      }
+      if (channel && type.endsWith("_pairing_token_invalid")) {
+        this.recordPairingClaim({ channel, claimType: "unknown", outcome: "invalid" });
+        return;
+      }
+      if (channel && type.endsWith("_pairing_token_ignored_bound_route")) {
+        this.recordPairingClaim({ channel, claimType: "unknown", outcome: "ignored" });
+        return;
+      }
+      if (type === "whatsapp_inbound_retry_deferred") {
+        this.recordRetryScheduled("whatsapp");
+        return;
+      }
+      if (channel && type.endsWith("_inbound_bg_retry_exhausted")) {
+        this.recordRetryExhausted(channel);
+      }
+    },
+
+    renderPrometheus(queueDepthByChannel: Record<MetricsChannel, number>, nowMs = Date.now()) {
+      const cutoff = nowMs - ACTIVE_MAX_AGE_MS;
+      for (const channel of CHANNELS) {
+        for (const [id, seenAt] of active[channel]) {
+          if (!Number.isFinite(seenAt) || seenAt < cutoff) {
+            active[channel].delete(id);
+          }
+        }
+      }
+
+      const activeGauge: Array<{ labels: LabelValues; value: number }> = [];
+      for (const channel of CHANNELS) {
+        for (const [window, ms] of ACTIVE_WINDOWS) {
+          const minTs = nowMs - ms;
+          let value = 0;
+          for (const seenAt of active[channel].values()) {
+            if (seenAt >= minTs) {
+              value += 1;
+            }
+          }
+          activeGauge.push({ labels: { channel, window }, value });
+        }
+      }
+
+      const lines: string[] = [];
+      pushCounter(
+        lines,
+        "mux_inbound_events_total",
+        "Inbound events grouped by channel and outcome.",
+        inbound,
+      );
+      pushCounter(
+        lines,
+        "mux_outbound_requests_total",
+        "Outbound requests grouped by channel, method and outcome.",
+        outbound,
+      );
+      pushCounter(
+        lines,
+        "mux_pairing_claims_total",
+        "Pairing claim outcomes by channel and claim type.",
+        pairing,
+      );
+      pushCounter(
+        lines,
+        "mux_auth_failures_total",
+        "Authentication failures grouped by surface.",
+        auth,
+      );
+      pushCounter(
+        lines,
+        "mux_retry_scheduled_total",
+        "Retries scheduled by channel.",
+        retryScheduled,
+      );
+      pushCounter(
+        lines,
+        "mux_retry_exhausted_total",
+        "Retries exhausted by channel.",
+        retryExhausted,
+      );
+      pushGauge(
+        lines,
+        "mux_queue_depth",
+        "Current queue depth by channel.",
+        CHANNELS.map((channel) => ({
+          labels: { channel },
+          value: Math.max(0, Math.trunc(queueDepthByChannel[channel] ?? 0)),
+        })),
+      );
+      pushGauge(
+        lines,
+        "mux_active_users",
+        "Estimated active users by channel and rolling window.",
+        activeGauge,
+      );
+      return `${lines.join("\n")}\n`;
+    },
   };
 }

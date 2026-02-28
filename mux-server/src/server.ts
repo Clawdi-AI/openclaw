@@ -18,11 +18,7 @@ import {
   readOutboundRaw,
   readOutboundText,
 } from "./mux-envelope.js";
-import { inferErrorCodeFromLogEvent } from "./observability/error-map.js";
-import { formatLogLine, normalizeLogEvent } from "./observability/log-event.js";
 import { createMuxMetrics } from "./observability/metrics.js";
-import { createObservabilitySnapshotStore } from "./observability/snapshot.js";
-import { createInboundTraceId } from "./observability/trace-id.js";
 import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
 
 type SendResult = {
@@ -494,7 +490,6 @@ const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 const discordBotToken = process.env.DISCORD_BOT_TOKEN;
 const logPath =
   process.env.MUX_LOG_PATH || path.resolve(process.cwd(), "mux-server", "logs", "mux-server.log");
-const metricsEnabled = process.env.MUX_METRICS_ENABLED === "true";
 const dbPath =
   process.env.MUX_DB_PATH || path.resolve(process.cwd(), "mux-server", "data", "mux-server.sqlite");
 const idempotencyTtlMs = Number(process.env.MUX_IDEMPOTENCY_TTL_MS || 10 * 60 * 1000);
@@ -547,10 +542,6 @@ const whatsappQueueRetryMaxMs = Number(process.env.MUX_WHATSAPP_QUEUE_RETRY_MAX_
 const whatsappQueueBatchSize = Number(process.env.MUX_WHATSAPP_QUEUE_BATCH_SIZE || 20);
 const pairingTokenTtlSec = Number(process.env.MUX_PAIRING_TOKEN_TTL_SEC || 15 * 60);
 const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
-const observabilityRecentErrorsMax =
-  readPositiveInt(process.env.MUX_OBS_RECENT_ERRORS_MAX) ?? 1_000;
-const observabilityRecentEventsMax =
-  readPositiveInt(process.env.MUX_OBS_RECENT_EVENTS_MAX) ?? 5_000;
 let telegramBotUsername = readNonEmptyString(process.env.MUX_TELEGRAM_BOT_USERNAME);
 type NoticesConfigEntry = { text: string | null };
 type NoticesConfig = Partial<{
@@ -1060,10 +1051,6 @@ const discordDmChannelCache = new Map<string, { channelId: string; expiresAtMs: 
 const discordDmChannelCacheTtlMs = 10 * 60_000;
 let activeWhatsAppListener: ActiveWebListener | null = null;
 const metrics = createMuxMetrics();
-const observabilitySnapshot = createObservabilitySnapshotStore({
-  maxEvents: observabilityRecentEventsMax,
-  maxRecentErrors: observabilityRecentErrorsMax,
-});
 const telegramRuntimeHealth: TelegramRuntimeHealth = {
   loopStartedAtMs: null,
   lastPollSuccessAtMs: null,
@@ -1098,6 +1085,32 @@ let telegramPollConflictHealth: TelegramPollConflictHealth | null = null;
 
 function hashApiKey(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function createInboundTraceId(params: {
+  channel: "telegram" | "discord" | "whatsapp";
+  tenantId?: string;
+  routeKey?: string;
+  updateId?: number;
+  messageId?: string;
+}) {
+  const seed = [
+    "inbound",
+    params.channel,
+    params.tenantId?.trim() || "",
+    params.routeKey?.trim() || "",
+    typeof params.updateId === "number" && Number.isFinite(params.updateId)
+      ? String(Math.trunc(params.updateId))
+      : "",
+    params.messageId?.trim() || "",
+  ]
+    .filter(Boolean)
+    .join("|");
+  const digest = createHash("sha256")
+    .update(seed || `fallback|${Date.now()}`)
+    .digest("hex")
+    .slice(0, 20);
+  return `mux_${digest}`;
 }
 
 function resolveBearerToken(authHeader: unknown): string | null {
@@ -1462,22 +1475,26 @@ function buildReadinessReport(nowMs = Date.now()): {
   };
 }
 
-function renderObservabilitySnapshot(params: {
-  nowMs?: number;
-  tenantId?: string;
-  recentErrorsLimit?: number;
-}) {
+function renderObservabilitySnapshot(params: { nowMs?: number; tenantId?: string }) {
   const nowMs = params.nowMs ?? Date.now();
   const readiness = buildReadinessReport(nowMs);
-  const queues = buildQueueSnapshot(nowMs);
-  return observabilitySnapshot.snapshot({
-    nowMs,
-    tenantId: params.tenantId,
-    recentErrorsLimit: params.recentErrorsLimit,
+  const zeroCounters = {
+    telegram: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
+    discord: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
+    whatsapp: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
+  };
+  return {
+    generatedAtMs: nowMs,
+    ...(params.tenantId ? { tenantId: params.tenantId } : {}),
     channels: readiness.channels,
-    queueDepth: queues.depth,
-    oldestQueuedAgeMs: queues.oldestQueuedAgeMs,
-  });
+    counters: {
+      last1m: zeroCounters,
+      last5m: zeroCounters,
+    },
+    queues: readiness.queues,
+    topErrorCodes: [],
+    recentErrors: [],
+  };
 }
 
 async function mintRuntimeJwt(params: {
@@ -1889,18 +1906,43 @@ function errorString(err: unknown): string {
   }
 }
 
+function normalizeLogEvent(entry: Record<string, unknown>, nowMs = Date.now()) {
+  const type = typeof entry.type === "string" ? entry.type : "event";
+  const ts =
+    typeof entry.ts === "number" && Number.isFinite(entry.ts) ? Math.trunc(entry.ts) : nowMs;
+  const t = type.toLowerCase();
+  const level =
+    entry.level === "info" || entry.level === "warn" || entry.level === "error"
+      ? entry.level
+      : t.includes("error") || t.includes("fatal") || t.includes("failed")
+        ? "error"
+        : t.includes("warn") ||
+            t.includes("invalid") ||
+            t.includes("drop") ||
+            t.includes("deferred") ||
+            t.includes("degraded") ||
+            t.includes("exhausted") ||
+            t.includes("conflict")
+          ? "warn"
+          : "info";
+  return {
+    ...entry,
+    ts,
+    level,
+    component:
+      typeof entry.component === "string" && entry.component ? entry.component : "mux-server",
+  };
+}
+
+function formatLogLine(entry: Record<string, unknown>) {
+  const ts =
+    typeof entry.ts === "number" && Number.isFinite(entry.ts) ? Math.trunc(entry.ts) : Date.now();
+  return `${new Date(ts).toISOString()} ${JSON.stringify({ ...entry, ts })}\n`;
+}
+
 function log(entry: Record<string, unknown>) {
   const normalized = normalizeLogEvent(entry);
-  const inferredErrorCode = inferErrorCodeFromLogEvent(normalized);
-  if (
-    !readNonEmptyString(normalized.errorCode) &&
-    typeof inferredErrorCode === "string" &&
-    inferredErrorCode
-  ) {
-    normalized.errorCode = inferredErrorCode;
-  }
   metrics.observeLogEvent(normalized);
-  observabilitySnapshot.observe(normalized);
   fs.appendFileSync(logPath, formatLogLine(normalized));
 }
 
@@ -7872,10 +7914,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && pathname === "/metrics") {
-      if (!metricsEnabled) {
-        sendJson(res, 404, { ok: false, error: "not found" });
-        return;
-      }
       const body = renderMetricsPayload();
       res.writeHead(200, {
         "content-type": "text/plain; version=0.0.4; charset=utf-8",
@@ -7937,10 +7975,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const tenantId = readNonEmptyString(requestUrl.searchParams.get("tenantId"));
-      const recentErrorsLimit = readPositiveInt(requestUrl.searchParams.get("recentErrorsLimit"));
       const snapshot = renderObservabilitySnapshot({
         tenantId: tenantId ?? undefined,
-        recentErrorsLimit,
       });
       sendJson(res, 200, { ok: true, ...snapshot });
       return;

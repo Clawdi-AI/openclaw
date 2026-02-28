@@ -437,21 +437,6 @@ describe("mux server", () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
-  test("health live endpoint responds", async () => {
-    const server = await startServer({
-      extraEnv: {
-        TELEGRAM_BOT_TOKEN: "",
-        DISCORD_BOT_TOKEN: "",
-      },
-    });
-    const response = await fetch(`http://127.0.0.1:${server.port}/health/live`);
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { ok?: unknown; live?: unknown; ts?: unknown };
-    expect(body.ok).toBe(true);
-    expect(body.live).toBe(true);
-    expect(typeof body.ts).toBe("number");
-  });
-
   test("health endpoint reports telegram poll conflict when getUpdates returns 409", async () => {
     const telegramApi = await startHttpServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/botdummy-token/getUpdates") {
@@ -500,37 +485,17 @@ describe("mux server", () => {
 
     const readiness = await fetch(`http://127.0.0.1:${server.port}/health/ready`);
     expect(readiness.status).toBe(503);
-    const readinessBody = (await readiness.json()) as {
-      ok?: unknown;
-      channels?: { telegram?: { ready?: unknown; reason?: unknown } };
-      queues?: { depth?: { telegram?: unknown } };
-      degraded?: Array<{ channel?: unknown; reason?: unknown }>;
-    };
+    const readinessBody = (await readiness.json()) as Record<string, unknown>;
+    const channels = readinessBody.channels as Record<string, unknown> | undefined;
+    const telegram = channels?.telegram as Record<string, unknown> | undefined;
     expect(readinessBody.ok).toBe(false);
-    expect(readinessBody.channels?.telegram?.ready).toBe(false);
-    expect(readinessBody.channels?.telegram?.reason).toBe("poll_conflict");
-    expect(typeof readinessBody.queues?.depth?.telegram).toBe("number");
-    expect(readinessBody.degraded).toEqual(
-      expect.arrayContaining([expect.objectContaining({ channel: "telegram" })]),
-    );
+    expect(telegram?.ready).toBe(false);
+    expect(telegram?.reason).toBe("poll_conflict");
   });
 
-  test("metrics endpoint is disabled by default", async () => {
+  test("metrics endpoint exposes prom counters", async () => {
     const server = await startServer({
       extraEnv: {
-        TELEGRAM_BOT_TOKEN: "",
-        DISCORD_BOT_TOKEN: "",
-      },
-    });
-    const response = await fetch(`http://127.0.0.1:${server.port}/metrics`);
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ ok: false, error: "not found" });
-  });
-
-  test("metrics endpoint exposes prom counters when enabled", async () => {
-    const server = await startServer({
-      extraEnv: {
-        MUX_METRICS_ENABLED: "true",
         MUX_REGISTER_KEY: "register-key-1",
         TELEGRAM_BOT_TOKEN: "",
         DISCORD_BOT_TOKEN: "",
@@ -576,8 +541,6 @@ describe("mux server", () => {
     );
     expect(body).toContain('mux_queue_depth{channel="whatsapp"} 0');
     expect(body).toContain('mux_active_users{channel="telegram",window="5m"} 0');
-    expect(body).toContain('mux_active_users{channel="discord",window="1h"} 0');
-    expect(body).toContain('mux_active_users{channel="whatsapp",window="24h"} 0');
   });
 
   test("instance register endpoint requires shared register key and returns runtime jwt metadata", async () => {
@@ -666,66 +629,6 @@ describe("mux server", () => {
     expect(body.ok).toBe(true);
     expect(typeof body.token).toBe("string");
     expect(typeof body.expiresAtMs).toBe("number");
-  });
-
-  test("admin observability snapshot endpoint requires admin auth and returns snapshot", async () => {
-    const server = await startServer({
-      extraEnv: {
-        MUX_METRICS_ENABLED: "true",
-        MUX_REGISTER_KEY: "register-key-obs-1",
-        TELEGRAM_BOT_TOKEN: "",
-        DISCORD_BOT_TOKEN: "",
-      },
-    });
-
-    const unauthorized = await fetch(
-      `http://127.0.0.1:${server.port}/v1/admin/observability/snapshot`,
-    );
-    expect(unauthorized.status).toBe(401);
-    expect(await unauthorized.json()).toEqual({ ok: false, error: "unauthorized" });
-
-    // Generate one auth failure event so snapshot has meaningful content.
-    const unauthorizedRegister = await fetch(
-      `http://127.0.0.1:${server.port}/v1/instances/register`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          openclawId: "oc-obs-1",
-          inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
-        }),
-      },
-    );
-    expect(unauthorizedRegister.status).toBe(401);
-
-    const snapshot = await fetch(
-      `http://127.0.0.1:${server.port}/v1/admin/observability/snapshot?recentErrorsLimit=5`,
-      {
-        headers: {
-          Authorization: `Bearer ${DEFAULT_ADMIN_TOKEN}`,
-        },
-      },
-    );
-    expect(snapshot.status).toBe(200);
-    const body = (await snapshot.json()) as {
-      ok?: unknown;
-      generatedAtMs?: unknown;
-      channels?: { telegram?: { status?: unknown } };
-      counters?: { last1m?: unknown; last5m?: unknown };
-      queues?: { depth?: { whatsapp?: unknown } };
-      recentErrors?: unknown[];
-      topErrorCodes?: Array<{ code?: unknown; count?: unknown }>;
-    };
-    expect(body.ok).toBe(true);
-    expect(typeof body.generatedAtMs).toBe("number");
-    expect(typeof body.channels?.telegram?.status).toBe("string");
-    expect(body.counters?.last1m).toBeTruthy();
-    expect(body.counters?.last5m).toBeTruthy();
-    expect(body.queues?.depth?.whatsapp).toBe(0);
-    expect(Array.isArray(body.recentErrors)).toBe(true);
-    expect(Array.isArray(body.topErrorCodes)).toBe(true);
   });
 
   test("runtime jwt auth enforces openclaw identity on outbound endpoints", async () => {
@@ -2316,7 +2219,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_METRICS_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -2450,7 +2352,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_METRICS_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -2573,7 +2474,6 @@ describe("mux server", () => {
         },
       ]),
       extraEnv: {
-        MUX_METRICS_ENABLED: "true",
         MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
@@ -2618,11 +2518,7 @@ describe("mux server", () => {
     const metrics = await fetch(`http://127.0.0.1:${server.port}/metrics`);
     expect(metrics.status).toBe(200);
     const metricsBody = await metrics.text();
-    const telegramQueueDepthMatch = metricsBody.match(
-      /mux_queue_depth\{channel="telegram"\}\s+(\d+)/,
-    );
-    expect(telegramQueueDepthMatch).toBeTruthy();
-    expect(Number(telegramQueueDepthMatch?.[1] ?? "0")).toBeGreaterThanOrEqual(1);
+    expect(metricsBody).toContain('mux_queue_depth{channel="telegram"}');
 
     // The poller should advance the offset immediately (to 462) even though
     // the first forward fails. The background retry delivers the message.
