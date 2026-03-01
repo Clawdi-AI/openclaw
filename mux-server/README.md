@@ -62,6 +62,8 @@ In short: OpenClaw inbound/outbound adapters are in `src/`; the standalone mux s
 For production wiring, see:
 
 - `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`
+- `mux-server/OBSERVABILITY_GRAFANA_PLAN.md`
+- `mux-server/grafana/mux-observability-dashboard.json`
 - `phala-deploy/UPDATE_RUNBOOK.md`
 
 ## Run
