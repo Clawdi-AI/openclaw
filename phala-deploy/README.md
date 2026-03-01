@@ -192,44 +192,11 @@ The `inboundUrl` uses `${DSTACK_APP_ID}` and `${DSTACK_GATEWAY_DOMAIN}` placehol
 
 Runtime JWT contract details: `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`.
 
-### Pair channels
+### Pair channels and mux operations
 
-Once the CVM is running, generate a pairing token to link a chat to your instance:
+For all mux-server deployment, pairing-token, and access-control operations, use:
 
-```sh
-./phala-deploy/mux-pair-token.sh \
-  --openclaw-cvm openclaw-dev \
-  --mux-cvm openclaw-mux-dev \
-  telegram
-```
-
-This calls `POST /v1/admin/pairings/token` on the mux-server. Send the returned token as a message in the Telegram bot to complete pairing.
-
-### Manual pairing (without mux-pair-token.sh)
-
-If you want to issue tokens directly, use:
-
-```sh
-# 1. Get the device ID from the OpenClaw CVM
-phala ssh <openclaw-cvm-name> -- \
-  'docker exec openclaw cat /root/.openclaw/identity/device.json' \
-  | jq -r .deviceId
-
-# 2. Build the payload (telegram example — change channel for whatsapp/discord)
-jq -nc \
-  --arg oid "<deviceId>" \
-  --arg iu "https://<openclaw-app-id>-18789.<gateway>/v1/mux/inbound" \
-  '{openclawId:$oid, inboundUrl:$iu, inboundTimeoutMs:15000, channel:"telegram", ttlSec:900}' \
-  > /tmp/pair.json
-
-# 3. Issue the token
-curl -sS -X POST "https://<mux-app-id>-18891.<gateway>/v1/admin/pairings/token" \
-  -H "Authorization: Bearer <MUX_ADMIN_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d @/tmp/pair.json | jq .
-```
-
-The response includes `token` (and `startCommand` for Telegram). Send the token as a message in the chat to complete pairing.
+- `mux-server/deploy/README.md`
 
 ### Modifying config on an existing CVM
 
@@ -403,9 +370,8 @@ The entrypoint keeps SSH available even if the gateway crashes and restarts it w
 Two commands: build, then deploy.
 
 ```sh
-# Build and push images
+# Build and push OpenClaw image
 ./phala-deploy/build-pin-openclaw.sh
-./phala-deploy/build-pin-mux.sh        # only when mux changed
 
 # Deploy OpenClaw CVM (set env vars first)
 export MASTER_KEY=replace-with-master-key
@@ -420,21 +386,11 @@ export MUX_REGISTER_KEY=replace-with-shared-register-key
 bash phala-deploy/deploy-openclaw.sh \
   --openclaw-cvm openclaw-dev \
   --mux-cvm openclaw-mux-dev
-
-# Deploy mux-server CVM (set env vars first)
-export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
-export TELEGRAM_BOT_TOKEN=replace-with-telegram-token
-export DISCORD_BOT_TOKEN=replace-with-discord-token
-bash phala-deploy/deploy-mux.sh \
-  --openclaw-cvm openclaw-dev \
-  --mux-cvm openclaw-mux-dev
 ```
 
-Both deploy scripts accept `--dry-run`, `--test-only` (smoke tests without deploying), and `--skip-test`.
-Pass CVM names directly to scripts.
+For mux-server deploy/update/pairing flows, see:
 
-- `deploy-openclaw.sh`: requires `--openclaw-cvm` and `--mux-cvm`
-- `deploy-mux.sh`: requires `--mux-cvm`; `--openclaw-cvm` is required when smoke tests run (default and `--test-only`), optional with `--skip-test`
+- `mux-server/deploy/README.md`
 
 > **Optional:** If you already store secrets in Redpill Vault, you can still wrap deploy commands with `rv-exec` to set env vars before running the scripts.
 
@@ -501,14 +457,11 @@ If your CVM is destroyed (S3 mode only):
 | `docker-compose.yml`                 | Compose file for `phala deploy`                                                                           |
 | `image-refs/openclaw-base-image.ref` | Canonical pinned OpenClaw base image ref (`repo:tag@sha256:...`)                                          |
 | `image-refs/openclaw-full-image.ref` | Canonical pinned OpenClaw full image ref (`repo:tag@sha256:...`)                                          |
-| `mux-server-compose.yml`             | Compose file for mux-server CVM deployment                                                                |
 | `build-pin-openclaw.sh`              | Rebuild tarball, build/push full then base target images, pin compose full image digest, write image refs |
-| `build-pin-mux.sh`                   | Rebuild mux image, push, and pin mux compose digest                                                       |
 | `deploy-openclaw.sh`                 | Deploy OpenClaw CVM, wait for health, run smoke tests                                                     |
-| `deploy-mux.sh`                      | Deploy mux-server CVM, wait for health, run smoke tests                                                   |
 | `migrate-openclaw.sh`                | Apply config migrations to a running CVM via SSH                                                          |
 | `gen-cvm-config.sh`                  | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)                                           |
-| `mux-pair-token.sh`                  | Mint mux pairing token for a tenant OpenClaw instance (admin API)                                         |
+| `../mux-server/deploy/README.md`     | Canonical mux-server deployment guide (prod compose, build/pin, deploy, pairing, access control)          |
 | `UPDATE_RUNBOOK.md`                  | Detailed update runbook with fallback procedures                                                          |
 | `S3_STORAGE.md`                      | Detailed S3 encryption documentation                                                                      |
 

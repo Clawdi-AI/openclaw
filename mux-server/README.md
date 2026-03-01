@@ -61,10 +61,10 @@ In short: OpenClaw inbound/outbound adapters are in `src/`; the standalone mux s
 
 For production wiring, see:
 
+- `mux-server/deploy/README.md`
 - `mux-server/JWT_INSTANCE_RUNTIME_DESIGN.md`
 - `mux-server/OBSERVABILITY_GRAFANA_PLAN.md`
 - `mux-server/grafana/mux-observability-dashboard.json`
-- `phala-deploy/UPDATE_RUNBOOK.md`
 
 ## Run
 
@@ -95,6 +95,7 @@ node --import tsx mux-server/src/server.ts
 - `MUX_LOG_PATH` (default `./mux-server/logs/mux-server.log`)
 - `MUX_DB_PATH` (default `./mux-server/data/mux-server.sqlite`)
 - `MUX_IDEMPOTENCY_TTL_MS` (default `600000`)
+- `MUX_MAX_BODY_BYTES` (default `52428800`): max accepted JSON request body size for mux HTTP APIs.
 - `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
 - `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events (recommended: `mux`).

@@ -2,11 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 IMAGE_REPO="${PHALA_MUX_IMAGE_REPO:-h4x3rotab/openclaw-mux}"
 IMAGE_TAG="${PHALA_MUX_IMAGE_TAG:-latest}"
-COMPOSE_FILE="${PHALA_MUX_COMPOSE_FILE:-${SCRIPT_DIR}/mux-server-compose.yml}"
+COMPOSE_FILE="${PHALA_MUX_COMPOSE_FILE:-${SCRIPT_DIR}/mux-server-prod-compose.yml}"
 NO_PUSH=0
 DRY_RUN=0
 
@@ -27,7 +27,7 @@ Usage:
 Options:
   --image-repo <repo>     Docker image repo (default: h4x3rotab/openclaw-mux)
   --image-tag <tag>       Docker image tag (default: latest)
-  --compose <path>        Compose file path (default: phala-deploy/mux-server-compose.yml)
+  --compose <path>        Compose file path (default: mux-server/deploy/mux-server-prod-compose.yml)
   --no-push               Build image only (skip push and compose digest update)
   --dry-run               Print commands without executing
   -h, --help              Show this help

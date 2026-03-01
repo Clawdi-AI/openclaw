@@ -6,17 +6,19 @@
 #   --mux-cvm <name>
 #
 # Usage:
-#   ./phala-deploy/mux-pair-token.sh \
+#   ./mux-server/deploy/mux-pair-token.sh \
 #     --openclaw-cvm openclaw-dev \
 #     --mux-cvm openclaw-mux-dev \
 #     telegram
 #
-#   ./phala-deploy/mux-pair-token.sh \
+#   ./mux-server/deploy/mux-pair-token.sh \
 #     --openclaw-cvm openclaw-dev \
 #     --mux-cvm openclaw-mux-dev \
 #     telegram agent:main:main
 #
 # Requires MUX_ADMIN_TOKEN in the environment.
+# Optional proxy auth:
+#   MUX_PROXY_BASIC_USER / MUX_PROXY_BASIC_PASSWORD
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,7 +114,15 @@ pair_payload="$(jq -nc \
   '{openclawId:$openclawId,inboundUrl:$inboundUrl,inboundTimeoutMs:$inboundTimeoutMs,channel:$channel,ttlSec:$ttlSec}
    + (if $sessionKey == "" then {} else {sessionKey:$sessionKey} end)')"
 
+proxy_auth_args=()
+if [[ -n "${MUX_PROXY_BASIC_USER:-}" || -n "${MUX_PROXY_BASIC_PASSWORD:-}" ]]; then
+  [[ -n "${MUX_PROXY_BASIC_USER:-}" && -n "${MUX_PROXY_BASIC_PASSWORD:-}" ]] \
+    || die "set both MUX_PROXY_BASIC_USER and MUX_PROXY_BASIC_PASSWORD"
+  proxy_auth_args=(-u "${MUX_PROXY_BASIC_USER}:${MUX_PROXY_BASIC_PASSWORD}")
+fi
+
 pair_response="$(curl -fsS -X POST "${MUX_BASE_URL}/v1/admin/pairings/token" \
+  "${proxy_auth_args[@]}" \
   -H "Authorization: Bearer ${MUX_ADMIN_TOKEN}" \
   -H "Content-Type: application/json" \
   --data "$pair_payload" 2>/dev/null)" || die "pairing token request failed"

@@ -603,10 +603,11 @@ const botSwitchUsageTextOverride =
   readNonEmptyString(process.env.MUX_BOT_SWITCH_USAGE_TEXT) || getNoticeText("botSwitchUsage");
 const configuredUnpairedHintText =
   readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT) || getNoticeText("clawdiIntro");
+const DEFAULT_REQUEST_BODY_MAX_BYTES = 50 * 1024 * 1024;
 const requestBodyMaxBytes = (() => {
-  const parsed = Number(process.env.MUX_MAX_BODY_BYTES || 10 * 1024 * 1024);
+  const parsed = Number(process.env.MUX_MAX_BODY_BYTES || DEFAULT_REQUEST_BODY_MAX_BYTES);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    return 10 * 1024 * 1024;
+    return DEFAULT_REQUEST_BODY_MAX_BYTES;
   }
   return Math.trunc(parsed);
 })();
