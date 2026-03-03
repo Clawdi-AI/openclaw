@@ -19,6 +19,11 @@ import {
   readOutboundText,
 } from "./mux-envelope.js";
 import { createMuxMetrics } from "./observability/metrics.js";
+import {
+  buildObservabilityQueueSnapshot,
+  buildObservabilityReadinessReport,
+  buildObservabilitySnapshot,
+} from "./observability/snapshot.js";
 import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
 
 type SendResult = {
@@ -1293,49 +1298,19 @@ function resolveWhatsAppOldestQueuedAgeMs(nowMs = Date.now()): number | null {
   return Math.max(0, Math.trunc(nowMs - oldestCreatedAtMs));
 }
 
-function countPendingRetries(map: Map<string, number>): number {
-  let total = 0;
-  for (const value of map.values()) {
-    if (Number.isFinite(value) && value > 0) {
-      total += Math.trunc(value);
-    }
-  }
-  return total;
-}
-
-function resolveOldestRetryAgeMs(
-  queuedAtByTenant: Map<string, number>,
-  nowMs = Date.now(),
-): number | null {
-  let oldest: number | null = null;
-  for (const queuedAtMs of queuedAtByTenant.values()) {
-    if (!Number.isFinite(queuedAtMs) || queuedAtMs <= 0) {
-      continue;
-    }
-    oldest = oldest == null ? queuedAtMs : Math.min(oldest, queuedAtMs);
-  }
-  if (oldest == null) {
-    return null;
-  }
-  return Math.max(0, Math.trunc(nowMs - oldest));
-}
-
 function buildQueueSnapshot(nowMs = Date.now()): {
   depth: Record<"telegram" | "discord" | "whatsapp", number>;
   oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp", number | null>;
 } {
-  return {
-    depth: {
-      telegram: countPendingRetries(telegramBgRetryCount),
-      discord: countPendingRetries(discordBgRetryCount),
-      whatsapp: countWhatsAppInboundQueueDepth(),
-    },
-    oldestQueuedAgeMs: {
-      telegram: resolveOldestRetryAgeMs(telegramBgRetryQueuedAtMs, nowMs),
-      discord: resolveOldestRetryAgeMs(discordBgRetryQueuedAtMs, nowMs),
-      whatsapp: resolveWhatsAppOldestQueuedAgeMs(nowMs),
-    },
-  };
+  return buildObservabilityQueueSnapshot({
+    nowMs,
+    telegramBgRetryCount,
+    telegramBgRetryQueuedAtMs,
+    discordBgRetryCount,
+    discordBgRetryQueuedAtMs,
+    whatsappQueueDepth: countWhatsAppInboundQueueDepth(),
+    whatsappOldestQueuedAgeMs: resolveWhatsAppOldestQueuedAgeMs(nowMs),
+  });
 }
 
 function buildReadinessReport(nowMs = Date.now()): {
@@ -1358,144 +1333,30 @@ function buildReadinessReport(nowMs = Date.now()): {
   };
   degraded: Array<{ channel: "telegram" | "discord" | "whatsapp"; reason: string }>;
 } {
-  const telegram = (() => {
-    if (!telegramInboundEnabled) {
-      return { status: "disabled", ready: true } as const;
-    }
-    if (telegramPollConflictHealth) {
-      return {
-        status: "degraded",
-        ready: false,
-        reason: "poll_conflict",
-        lastErrorAtMs: telegramPollConflictHealth.lastConflictAtMs,
-        lastError: telegramPollConflictHealth.lastError,
-        lastSuccessAtMs: telegramRuntimeHealth.lastPollSuccessAtMs,
-        lastInboundSeenAtMs: telegramRuntimeHealth.lastInboundSeenAtMs,
-      } as const;
-    }
-    if (!telegramRuntimeHealth.loopStartedAtMs) {
-      return { status: "starting", ready: false, reason: "loop_not_started" } as const;
-    }
-    if (!telegramRuntimeHealth.lastPollSuccessAtMs) {
-      if (telegramRuntimeHealth.lastPollErrorAtMs) {
-        return {
-          status: "degraded",
-          ready: false,
-          reason: "poll_error",
-          lastErrorAtMs: telegramRuntimeHealth.lastPollErrorAtMs,
-          lastError: telegramRuntimeHealth.lastPollError,
-          lastInboundSeenAtMs: telegramRuntimeHealth.lastInboundSeenAtMs,
-        } as const;
-      }
-      return { status: "starting", ready: false, reason: "waiting_first_poll" } as const;
-    }
-    return {
-      status: "ready",
-      ready: true,
-      lastSuccessAtMs: telegramRuntimeHealth.lastPollSuccessAtMs,
-      lastErrorAtMs: telegramRuntimeHealth.lastPollErrorAtMs,
-      lastError: telegramRuntimeHealth.lastPollError,
-      lastInboundSeenAtMs: telegramRuntimeHealth.lastInboundSeenAtMs,
-    } as const;
-  })();
-
-  const discord = (() => {
-    if (!discordInboundEnabled) {
-      return { status: "disabled", ready: true } as const;
-    }
-    if (!discordRuntimeHealth.pollLoopStartedAtMs) {
-      return { status: "starting", ready: false, reason: "poll_loop_not_started" } as const;
-    }
-    if (!discordRuntimeHealth.lastPollSuccessAtMs) {
-      if (discordRuntimeHealth.lastPollErrorAtMs) {
-        return {
-          status: "degraded",
-          ready: false,
-          reason: "poll_error",
-          lastErrorAtMs: discordRuntimeHealth.lastPollErrorAtMs,
-          lastError: discordRuntimeHealth.lastPollError,
-          lastInboundSeenAtMs: discordRuntimeHealth.lastInboundSeenAtMs,
-        } as const;
-      }
-      return { status: "starting", ready: false, reason: "waiting_first_poll" } as const;
-    }
-    return {
-      status: "ready",
-      ready: true,
-      lastSuccessAtMs: discordRuntimeHealth.lastPollSuccessAtMs,
-      lastErrorAtMs: discordRuntimeHealth.lastPollErrorAtMs,
-      lastError: discordRuntimeHealth.lastPollError,
-      lastInboundSeenAtMs: discordRuntimeHealth.lastInboundSeenAtMs,
-    } as const;
-  })();
-
-  const whatsapp = (() => {
-    const health = getWhatsAppCredentialHealth();
-    if (!whatsappInboundEnabled) {
-      return { status: "disabled", ready: true } as const;
-    }
-    if (whatsappRuntimeHealth.listenerActive) {
-      return {
-        status: "ready",
-        ready: true,
-        lastSuccessAtMs: whatsappRuntimeHealth.lastListenerStartAtMs,
-        lastErrorAtMs: whatsappRuntimeHealth.lastListenerErrorAtMs,
-        lastError: whatsappRuntimeHealth.lastListenerError,
-        lastInboundSeenAtMs: whatsappRuntimeHealth.lastInboundSeenAtMs,
-      } as const;
-    }
-    const reason =
-      health.status === "missing_credentials" ? "missing_credentials" : "listener_not_active";
-    return {
-      status: "degraded",
-      ready: false,
-      reason,
-      lastErrorAtMs: whatsappRuntimeHealth.lastListenerErrorAtMs,
-      lastError: whatsappRuntimeHealth.lastListenerError,
-      lastInboundSeenAtMs: whatsappRuntimeHealth.lastInboundSeenAtMs,
-    } as const;
-  })();
-
-  const channels = { telegram, discord, whatsapp };
-  const degraded = (
-    Object.entries(channels) as Array<
-      ["telegram" | "discord" | "whatsapp", { ready: boolean; reason?: string }]
-    >
-  )
-    .filter(([, value]) => !value.ready)
-    .map(([channel, value]) => ({
-      channel,
-      reason: value.reason ?? "not_ready",
-    }));
   const queues = buildQueueSnapshot(nowMs);
-  return {
-    ready: degraded.length === 0,
-    channels,
+  const whatsAppCredentialHealth = getWhatsAppCredentialHealth();
+  return buildObservabilityReadinessReport({
+    nowMs,
     queues,
-    degraded,
-  };
+    telegramInboundEnabled,
+    telegramPollConflictHealth,
+    telegramRuntimeHealth,
+    discordInboundEnabled,
+    discordRuntimeHealth,
+    whatsappInboundEnabled,
+    whatsappRuntimeHealth,
+    whatsappCredentialStatus: whatsAppCredentialHealth.status,
+  });
 }
 
 function renderObservabilitySnapshot(params: { nowMs?: number; tenantId?: string }) {
   const nowMs = params.nowMs ?? Date.now();
   const readiness = buildReadinessReport(nowMs);
-  const zeroCounters = {
-    telegram: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
-    discord: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
-    whatsapp: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
-  };
-  return {
-    generatedAtMs: nowMs,
-    ...(params.tenantId ? { tenantId: params.tenantId } : {}),
-    channels: readiness.channels,
-    counters: {
-      last1m: zeroCounters,
-      last5m: zeroCounters,
-    },
-    queues: readiness.queues,
-    topErrorCodes: [],
-    recentErrors: [],
-  };
+  return buildObservabilitySnapshot({
+    nowMs,
+    tenantId: params.tenantId,
+    readiness,
+  });
 }
 
 async function mintRuntimeJwt(params: {

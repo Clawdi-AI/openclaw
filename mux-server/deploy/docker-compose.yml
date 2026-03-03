@@ -44,8 +44,7 @@ services:
       mux-server:
         condition: service_healthy
     ports:
-      # Bind loopback by default to avoid accidental internet exposure.
-      - "${MUX_PROXY_BIND_IP:-127.0.0.1}:18891:18891"
+      - "18891:18891"
     environment:
       # Bcrypt/htpasswd hash for /metrics (username: prometheus).
       MUX_PROXY_PROMETHEUS_PASSWORD_HASH: ${MUX_PROXY_PROMETHEUS_PASSWORD_HASH:?set MUX_PROXY_PROMETHEUS_PASSWORD_HASH}
@@ -58,70 +57,10 @@ services:
         cat >/etc/nginx/htpasswd-prometheus <<EOF_PROM
         prometheus:${MUX_PROXY_PROMETHEUS_PASSWORD_HASH}
         EOF_PROM
-        cat >/etc/nginx/nginx.conf <<'EOF_NGINX'
-        events {}
-        http {
-          limit_req_zone $$binary_remote_addr zone=mux_public:10m rate=20r/s;
-          limit_req_zone $$binary_remote_addr zone=mux_admin:10m rate=5r/s;
-
-          server {
-            listen 18891;
-            # Align with mux-server default MUX_MAX_BODY_BYTES (50 MiB).
-            client_max_body_size 50m;
-            client_body_timeout 15s;
-            client_header_timeout 15s;
-            send_timeout 35s;
-            keepalive_timeout 30s;
-            proxy_http_version 1.1;
-            # OpenClaw outbound mux client defaults to ~30s timeout. Keep proxy slightly above it.
-            proxy_connect_timeout 5s;
-            proxy_send_timeout 35s;
-            proxy_read_timeout 35s;
-
-            proxy_set_header Host $$host;
-            proxy_set_header X-Real-IP $$remote_addr;
-            proxy_set_header X-Forwarded-For $$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $$scheme;
-
-            location = /health {
-              allow 127.0.0.1;
-              allow ::1;
-              deny all;
-              proxy_pass http://mux-server:18891;
-            }
-            location = /health/live {
-              allow 127.0.0.1;
-              allow ::1;
-              deny all;
-              proxy_pass http://mux-server:18891;
-            }
-            location = /health/ready {
-              allow 127.0.0.1;
-              allow ::1;
-              deny all;
-              proxy_pass http://mux-server:18891;
-            }
-
-            location = /metrics {
-              auth_basic "mux-metrics";
-              auth_basic_user_file /etc/nginx/htpasswd-prometheus;
-              limit_req zone=mux_admin burst=10 nodelay;
-              proxy_pass http://mux-server:18891;
-            }
-
-            location ^~ /v1/admin/ {
-              limit_req zone=mux_admin burst=20 nodelay;
-              proxy_pass http://mux-server:18891;
-            }
-
-            location / {
-              limit_req zone=mux_public burst=60 nodelay;
-              proxy_pass http://mux-server:18891;
-            }
-          }
-        }
-        EOF_NGINX
         exec nginx -g 'daemon off;'
+    configs:
+      - source: mux_proxy_nginx_conf
+        target: /etc/nginx/nginx.conf
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18891/health >/dev/null || exit 1"]
@@ -138,3 +77,7 @@ services:
 volumes:
   mux_data:
   mux_credentials:
+
+configs:
+  mux_proxy_nginx_conf:
+    file: ./nginx.conf

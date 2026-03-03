@@ -22,7 +22,6 @@ Do not use a separate "basic" compose for production.
 - `TELEGRAM_BOT_TOKEN`
 - `DISCORD_BOT_TOKEN`
 - `MUX_PROXY_PROMETHEUS_PASSWORD_HASH`
-- `MUX_PROXY_BIND_IP` (optional; default `127.0.0.1`)
 
 Generate metrics password hash:
 
@@ -80,13 +79,8 @@ export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
 ## Health Check
 
 ```bash
-phala ssh <mux-cvm-name> -- "curl -fsS http://127.0.0.1:18891/health | jq ."
+curl -fsS https://<mux-app-id>-18891.<gateway-domain>/health | jq .
 ```
-
-Notes:
-
-- Health endpoints are localhost-only in the default compose.
-- Port binding defaults to loopback (`MUX_PROXY_BIND_IP=127.0.0.1`) to reduce accidental public exposure.
 
 ## Troubleshooting
 
