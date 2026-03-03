@@ -18,12 +18,19 @@ import {
   readOutboundRaw,
   readOutboundText,
 } from "./mux-envelope.js";
+import {
+  normalizeObservabilityLogEvent,
+  formatObservabilityLogLine,
+} from "./observability/logging.js";
 import { createMuxMetrics } from "./observability/metrics.js";
 import {
   buildObservabilityQueueSnapshot,
   buildObservabilityReadinessReport,
   buildObservabilitySnapshot,
+  readNonNegativeCount,
+  readOldestQueuedAgeMs,
 } from "./observability/snapshot.js";
+import { createInboundTraceId } from "./observability/tracing.js";
 import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
 
 type SendResult = {
@@ -1093,32 +1100,6 @@ function hashApiKey(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function createInboundTraceId(params: {
-  channel: "telegram" | "discord" | "whatsapp";
-  tenantId?: string;
-  routeKey?: string;
-  updateId?: number;
-  messageId?: string;
-}) {
-  const seed = [
-    "inbound",
-    params.channel,
-    params.tenantId?.trim() || "",
-    params.routeKey?.trim() || "",
-    typeof params.updateId === "number" && Number.isFinite(params.updateId)
-      ? String(Math.trunc(params.updateId))
-      : "",
-    params.messageId?.trim() || "",
-  ]
-    .filter(Boolean)
-    .join("|");
-  const digest = createHash("sha256")
-    .update(seed || `fallback|${Date.now()}`)
-    .digest("hex")
-    .slice(0, 20);
-  return `mux_${digest}`;
-}
-
 function resolveBearerToken(authHeader: unknown): string | null {
   if (typeof authHeader !== "string") {
     return null;
@@ -1266,20 +1247,12 @@ function isSqliteUniqueConstraintError(error: unknown): boolean {
 
 function countActiveTenantInboundTargets(): number {
   const row = stmtCountActiveTenantInboundTargets.get() as { count?: unknown } | undefined;
-  const count = Number(row?.count);
-  if (!Number.isFinite(count) || count < 0) {
-    return 0;
-  }
-  return Math.trunc(count);
+  return readNonNegativeCount(row?.count);
 }
 
 function countWhatsAppInboundQueueDepth(): number {
   const row = stmtCountWhatsAppInboundQueue.get() as { count?: unknown } | undefined;
-  const count = Number(row?.count);
-  if (!Number.isFinite(count) || count < 0) {
-    return 0;
-  }
-  return Math.trunc(count);
+  return readNonNegativeCount(row?.count);
 }
 
 async function renderMetricsPayload(): Promise<string> {
@@ -1291,11 +1264,7 @@ function resolveWhatsAppOldestQueuedAgeMs(nowMs = Date.now()): number | null {
   const row = stmtSelectOldestWhatsAppInboundQueue.get() as
     | { oldest_created_at_ms?: unknown }
     | undefined;
-  const oldestCreatedAtMs = Number(row?.oldest_created_at_ms);
-  if (!Number.isFinite(oldestCreatedAtMs) || oldestCreatedAtMs <= 0) {
-    return null;
-  }
-  return Math.max(0, Math.trunc(nowMs - oldestCreatedAtMs));
+  return readOldestQueuedAgeMs(row?.oldest_created_at_ms, nowMs);
 }
 
 function buildQueueSnapshot(nowMs = Date.now()): {
@@ -1768,44 +1737,10 @@ function errorString(err: unknown): string {
   }
 }
 
-function normalizeLogEvent(entry: Record<string, unknown>, nowMs = Date.now()) {
-  const type = typeof entry.type === "string" ? entry.type : "event";
-  const ts =
-    typeof entry.ts === "number" && Number.isFinite(entry.ts) ? Math.trunc(entry.ts) : nowMs;
-  const t = type.toLowerCase();
-  const level =
-    entry.level === "info" || entry.level === "warn" || entry.level === "error"
-      ? entry.level
-      : t.includes("error") || t.includes("fatal") || t.includes("failed")
-        ? "error"
-        : t.includes("warn") ||
-            t.includes("invalid") ||
-            t.includes("drop") ||
-            t.includes("deferred") ||
-            t.includes("degraded") ||
-            t.includes("exhausted") ||
-            t.includes("conflict")
-          ? "warn"
-          : "info";
-  return {
-    ...entry,
-    ts,
-    level,
-    component:
-      typeof entry.component === "string" && entry.component ? entry.component : "mux-server",
-  };
-}
-
-function formatLogLine(entry: Record<string, unknown>) {
-  const ts =
-    typeof entry.ts === "number" && Number.isFinite(entry.ts) ? Math.trunc(entry.ts) : Date.now();
-  return `${new Date(ts).toISOString()} ${JSON.stringify({ ...entry, ts })}\n`;
-}
-
 function log(entry: Record<string, unknown>) {
-  const normalized = normalizeLogEvent(entry);
+  const normalized = normalizeObservabilityLogEvent(entry);
   metrics.observeLogEvent(normalized);
-  fs.appendFileSync(logPath, formatLogLine(normalized));
+  fs.appendFileSync(logPath, formatObservabilityLogLine(normalized));
 }
 
 function sendJson(res: ServerResponse, statusCode: number, payload: unknown): string {

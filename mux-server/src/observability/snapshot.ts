@@ -44,6 +44,22 @@ export type WhatsAppRuntimeSnapshot = {
   lastInboundSeenAtMs: number | null;
 };
 
+export function readNonNegativeCount(value: unknown): number {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count < 0) {
+    return 0;
+  }
+  return Math.trunc(count);
+}
+
+export function readOldestQueuedAgeMs(value: unknown, nowMs: number): number | null {
+  const oldestCreatedAtMs = Number(value);
+  if (!Number.isFinite(oldestCreatedAtMs) || oldestCreatedAtMs <= 0) {
+    return null;
+  }
+  return Math.max(0, Math.trunc(nowMs - oldestCreatedAtMs));
+}
+
 function countPendingRetries(map: Map<string, number>): number {
   let total = 0;
   for (const value of map.values()) {
