@@ -80,6 +80,14 @@ exec_in_openclaw() {
   phala ssh "$OPENCLAW_CVM" -- "docker exec openclaw sh -lc '$escaped'"
 }
 
+# Execute a shell command on the mux CVM host.
+exec_in_mux() {
+  local cmd="$1"
+  local escaped
+  escaped=${cmd//\'/\'\"\'\"\'}
+  phala ssh "$MUX_CVM" -- "sh -lc '$escaped'"
+}
+
 # ── parse args ───────────────────────────────────────────────────────────────
 
 while [[ $# -gt 0 ]]; do
@@ -159,9 +167,6 @@ if [[ "$NEED_OPENCLAW" -eq 1 ]]; then
   ok "OpenClaw endpoint: ${OPENCLAW_APP_ID}.${OPENCLAW_GATEWAY_DOMAIN}"
 fi
 
-MUX_HEALTH_URL="https://${MUX_APP_ID}-18891.${MUX_GATEWAY_DOMAIN}/health"
-MUX_BASE_URL="https://${MUX_APP_ID}-18891.${MUX_GATEWAY_DOMAIN}"
-
 # ── preflight: validate secrets ──────────────────────────────────────────────
 
 preflight_secrets() {
@@ -219,10 +224,11 @@ EOF_PROXY
 # ── wait for health ──────────────────────────────────────────────────────────
 
 wait_for_mux_health() {
-  log "Waiting for mux-server health (${MUX_HEALTH_URL})..."
+  log "Waiting for mux-server health (local /health/live on CVM)..."
   local elapsed=0
   while [[ $elapsed -lt $HEALTH_TIMEOUT ]]; do
-    if curl -fsS --max-time 5 "$MUX_HEALTH_URL" >/dev/null 2>&1; then
+    if exec_in_mux "curl -fsS --max-time 5 http://127.0.0.1:18891/health/live >/dev/null" \
+      >/dev/null 2>&1; then
       ok "mux-server healthy"
       return 0
     fi
@@ -238,10 +244,10 @@ smoke_test() {
   log "Running smoke tests..."
 
   # 1. mux-server /health
-  log "  mux-server /health..."
+  log "  mux-server /health (local)..."
   local mux_body
-  mux_body="$(curl -fsS --max-time 10 "$MUX_HEALTH_URL" 2>&1)" \
-    || die "mux-server /health request failed"
+  mux_body="$(exec_in_mux "curl -fsS --max-time 10 http://127.0.0.1:18891/health" 2>&1)" \
+    || die "mux-server /health request failed (local)"
   [[ "$mux_body" == *'"ok":true'* ]] || die "mux-server /health failed: ${mux_body}"
   ok "  mux-server /health -> ok"
 
@@ -258,16 +264,19 @@ smoke_test() {
   "' 2>/dev/null)" || die "could not read device ID from openclaw CVM"
   [[ -n "$device_id" ]] || die "device ID is empty"
 
-  local register_url="${MUX_BASE_URL}/v1/instances/register"
+  local register_url="http://127.0.0.1:18891/v1/instances/register"
   local inbound_url="https://${OPENCLAW_APP_ID}-18789.${OPENCLAW_GATEWAY_DOMAIN}/v1/mux/inbound"
+  local register_payload
+  register_payload="$(printf '{"openclawId":"%s","inboundUrl":"%s"}' "$device_id" "$inbound_url")"
+  local register_payload_escaped
+  register_payload_escaped=${register_payload//\'/\'\"\'\"\'}
   local register_code
-  register_code="$(curl -o /dev/null -sS -w "%{http_code}" --max-time 10 \
-    "$register_url" \
+  register_code="$(exec_in_mux "curl -o /dev/null -sS -w '%{http_code}' --max-time 10 \
+    '${register_url}' \
     -X POST \
-    -H "Authorization: Bearer ${MUX_REGISTER_KEY}" \
-    -H "Content-Type: application/json" \
-    -d "{\"openclawId\":\"${device_id}\",\"inboundUrl\":\"${inbound_url}\"}" 2>/dev/null)" \
-    || die "mux registration request failed"
+    -H 'Authorization: Bearer ${MUX_REGISTER_KEY}' \
+    -H 'Content-Type: application/json' \
+    -d '${register_payload_escaped}'" 2>/dev/null)" || die "mux registration request failed"
   [[ "$register_code" == "200" ]] || die "mux registration failed: HTTP ${register_code}"
   ok "  mux registration: device ${device_id:0:12}... registered (HTTP 200)"
   ok "All smoke tests passed"

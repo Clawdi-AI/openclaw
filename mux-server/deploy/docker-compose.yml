@@ -22,7 +22,6 @@ services:
       MUX_WHATSAPP_ACCOUNT_ID: "default"
       MUX_WHATSAPP_AUTH_DIR: "/root/.openclaw/credentials/whatsapp/default"
     volumes:
-      - /home/root/.ssh:/root/.ssh:ro
       - mux_data:/data
       - mux_credentials:/root/.openclaw/credentials
     restart: unless-stopped
@@ -45,7 +44,8 @@ services:
       mux-server:
         condition: service_healthy
     ports:
-      - "18891:18891"
+      # Bind loopback by default to avoid accidental internet exposure.
+      - "${MUX_PROXY_BIND_IP:-127.0.0.1}:18891:18891"
     environment:
       # Bcrypt/htpasswd hash for /metrics (username: prometheus).
       MUX_PROXY_PROMETHEUS_PASSWORD_HASH: ${MUX_PROXY_PROMETHEUS_PASSWORD_HASH:?set MUX_PROXY_PROMETHEUS_PASSWORD_HASH}
@@ -84,12 +84,21 @@ services:
             proxy_set_header X-Forwarded-Proto $$scheme;
 
             location = /health {
+              allow 127.0.0.1;
+              allow ::1;
+              deny all;
               proxy_pass http://mux-server:18891;
             }
             location = /health/live {
+              allow 127.0.0.1;
+              allow ::1;
+              deny all;
               proxy_pass http://mux-server:18891;
             }
             location = /health/ready {
+              allow 127.0.0.1;
+              allow ::1;
+              deny all;
               proxy_pass http://mux-server:18891;
             }
 
