@@ -877,6 +877,120 @@ describe("handleMuxInboundHttpRequest", () => {
     expect(mocks.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
   });
 
+  test("resolves text alias commands for Telegram argsMenu buttons", async () => {
+    const jwtFixture = createJwtFixture();
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      if (url === "http://mux.local/v1/instances/register") {
+        return new Response(
+          JSON.stringify({
+            runtimeToken: "rt-token-1",
+            expiresAtMs: Date.now() + 86_400_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } },
+        );
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return new Response(JSON.stringify({ messageId: "mx-reason-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      void init;
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        to: "telegram:123",
+        from: "telegram:456",
+        body: "/reason",
+        accountId: "default",
+        chatType: "direct",
+        messageId: "789",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+    await waitForAsyncDispatch();
+
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    const sendCall = fetchMock.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const [, init] = sendCall as [string | URL | Request, RequestInit];
+    const body = parseJsonRequestBody(init);
+    expect(body).toMatchObject({
+      channel: "telegram",
+      sessionKey: "tg:dm:123",
+      accountId: "default",
+      raw: {
+        telegram: {
+          method: "sendMessage",
+          body: {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "on", callback_data: "/reasoning on" },
+                  { text: "off", callback_data: "/reasoning off" },
+                ],
+                [{ text: "stream", callback_data: "/reasoning stream" }],
+              ],
+            },
+          },
+        },
+      },
+    });
+  });
+
   test("handles telegram callback edit actions via mux raw outbound", async () => {
     const jwtFixture = createJwtFixture();
     const token = await jwtFixture.mintToken({
