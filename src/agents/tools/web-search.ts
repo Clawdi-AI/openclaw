@@ -579,7 +579,7 @@ async function runWebSearch(params: {
 }): Promise<Record<string, unknown>> {
   const cacheKey = normalizeCacheKey(
     params.provider === "brave"
-      ? `${params.provider}:${params.query}:${params.count}:${params.country || "default"}:${params.search_lang || "default"}:${params.ui_lang || "default"}:${params.freshness || "default"}`
+      ? `${params.provider}:${params.query}:${params.count}:${params.country || "default"}:${params.search_lang || "default"}:${params.ui_lang || "default"}:${params.freshness || "default"}:${params.braveBaseUrl || DEFAULT_BRAVE_BASE_URL}`
       : params.provider === "perplexity"
         ? `${params.provider}:${params.query}:${params.count}:${params.perplexityBaseUrl ?? DEFAULT_PERPLEXITY_BASE_URL}:${params.perplexityModel ?? DEFAULT_PERPLEXITY_MODEL}:${params.freshness || "default"}`
         : `${params.provider}:${params.query}:${params.grokModel ?? DEFAULT_GROK_MODEL}:${String(params.grokInlineCitations ?? false)}`,
@@ -605,6 +605,10 @@ async function runWebSearch(params: {
         query: params.query,
         max_results: params.count,
       };
+      const recency = freshnessToPerplexityRecency(params.freshness);
+      if (recency) {
+        searchBody.search_recency_filter = recency;
+      }
       const searchRes = await fetch(`${resolvedBase}/search`, {
         method: "POST",
         headers: {
