@@ -3,14 +3,14 @@
 #
 # Required args:
 #   --mux-cvm <name>
-#   --compose-file <path>   (optional, default: mux-server/deploy/mux-server-prod-compose.yml)
+#   --compose-file <path>   (optional, default: mux-server/deploy/docker-compose.yml)
 #
 # Required for smoke tests (default and --test-only):
 #   --openclaw-cvm <name>
 #
 # Required env vars:
 #   MUX_REGISTER_KEY MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN
-#   MUX_PROXY_BASIC_USER MUX_PROXY_BASIC_PASSWORD_HASH (only when compose contains proxy auth)
+#   MUX_PROXY_PROMETHEUS_PASSWORD_HASH (only when compose contains metrics proxy auth)
 # Accepted aliases:
 #   TELEGRAM_BOT_TOKEN_PROD -> TELEGRAM_BOT_TOKEN
 #   DISCORD_BOT_TOKEN_PROD  -> DISCORD_BOT_TOKEN
@@ -22,9 +22,8 @@
 #       --openclaw-cvm openclaw-dev \
 #       --mux-cvm openclaw-mux-dev
 #
-#   # Production compose with reverse-proxy access control:
-#   MUX_PROXY_BASIC_USER=admin \
-#   MUX_PROXY_BASIC_PASSWORD_HASH='$2y$05$replace.with.bcrypt.hash' \
+#   # Production compose with /metrics basic auth:
+#   MUX_PROXY_PROMETHEUS_PASSWORD_HASH='$2y$05$replace.with.bcrypt.hash' \
 #   bash mux-server/deploy/deploy-mux.sh \
 #     --openclaw-cvm openclaw-dev \
 #     --mux-cvm openclaw-mux-dev
@@ -50,7 +49,7 @@ OPENCLAW_GATEWAY_DOMAIN=""
 MUX_APP_ID=""
 MUX_GATEWAY_DOMAIN=""
 
-COMPOSE_FILE="${SCRIPT_DIR}/mux-server-prod-compose.yml"
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 DEPLOY_ENV_FILE="/tmp/mux-phala-deploy.env"
 NEEDS_PROXY_CREDS=0
 
@@ -120,7 +119,7 @@ require_cmd curl
 require_cmd node
 
 [[ -f "$COMPOSE_FILE" ]] || die "compose file not found: $COMPOSE_FILE"
-if grep -q "MUX_PROXY_BASIC_USER" "$COMPOSE_FILE"; then
+if grep -q "MUX_PROXY_PROMETHEUS_PASSWORD_HASH" "$COMPOSE_FILE"; then
   NEEDS_PROXY_CREDS=1
 fi
 
@@ -174,7 +173,7 @@ preflight_secrets() {
     fi
   done
   if [[ "$NEEDS_PROXY_CREDS" -eq 1 ]]; then
-    for key in MUX_PROXY_BASIC_USER MUX_PROXY_BASIC_PASSWORD_HASH; do
+    for key in MUX_PROXY_PROMETHEUS_PASSWORD_HASH; do
       if [[ -z "${!key:-}" ]]; then
         missing+=("$key")
       fi
@@ -202,8 +201,7 @@ DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
 EOF_ENV
   if [[ "$NEEDS_PROXY_CREDS" -eq 1 ]]; then
     cat >>"$DEPLOY_ENV_FILE" <<EOF_PROXY
-MUX_PROXY_BASIC_USER=${MUX_PROXY_BASIC_USER}
-MUX_PROXY_BASIC_PASSWORD_HASH=${MUX_PROXY_BASIC_PASSWORD_HASH}
+MUX_PROXY_PROMETHEUS_PASSWORD_HASH=${MUX_PROXY_PROMETHEUS_PASSWORD_HASH}
 EOF_PROXY
   fi
   chmod 600 "$DEPLOY_ENV_FILE"
