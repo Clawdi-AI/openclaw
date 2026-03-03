@@ -2972,7 +2972,7 @@ describe("mux server", () => {
         text: `/start ${tokenBody.token}`,
         date: 1_700_000_000,
         from: { id: 1234 },
-        chat: { id: -100777, type: "supergroup" },
+        chat: { id: -100777, type: "supergroup", is_forum: true },
         message_thread_id: 2,
       },
     });
@@ -2983,8 +2983,19 @@ describe("mux server", () => {
         text: "/help",
         date: 1_700_000_001,
         from: { id: 1234 },
-        chat: { id: -100777, type: "supergroup" },
+        chat: { id: -100777, type: "supergroup", is_forum: true },
         message_thread_id: 2,
+      },
+    });
+    pendingUpdates.push({
+      update_id: 3005,
+      message: {
+        message_id: 8005,
+        text: "/reasoning",
+        date: 1_700_000_001,
+        from: { id: 1234 },
+        chat: { id: -100777, type: "supergroup", is_forum: true },
+        message_thread_id: 3,
       },
     });
     pendingUpdates.push({
@@ -3009,25 +3020,41 @@ describe("mux server", () => {
     });
 
     await waitForCondition(
-      () => filterRealInbound(inboundRequests).length >= 1 && sentMessages.length >= 3,
+      () => filterRealInbound(inboundRequests).length >= 2 && sentMessages.length >= 3,
       5_000,
-      "timed out waiting for post-pair inbound forward and notices",
+      "timed out waiting for post-pair inbound forwards and notices",
     );
 
     const realInbound = filterRealInbound(inboundRequests);
-    expect(realInbound).toHaveLength(1);
-    expect(realInbound[0]).toMatchObject({
-      channel: "telegram",
-      sessionKey: "agent:main:telegram:group:-100777:topic:2",
-      body: "/help",
-      messageId: "8002",
-      threadId: 2,
-      channelData: {
-        chatId: "-100777",
-        topicId: 2,
-        routeKey: "telegram:default:chat:-100777:topic:2",
-      },
-    });
+    expect(realInbound).toHaveLength(2);
+    expect(realInbound).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100777:topic:2",
+          body: "/help",
+          messageId: "8002",
+          threadId: 2,
+          channelData: expect.objectContaining({
+            chatId: "-100777",
+            topicId: 2,
+            routeKey: "telegram:default:chat:-100777:topic:2",
+          }),
+        }),
+        expect.objectContaining({
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100777:topic:3",
+          body: "/reasoning",
+          messageId: "8005",
+          threadId: 3,
+          channelData: expect.objectContaining({
+            chatId: "-100777",
+            topicId: 3,
+            routeKey: "telegram:default:chat:-100777:topic:3",
+          }),
+        }),
+      ]),
+    );
 
     expect(sentMessages.some((message) => toSafeString(message.text).includes("Paired"))).toBe(
       true,
@@ -3054,8 +3081,8 @@ describe("mux server", () => {
         {
           bindingId: expect.stringContaining("bind_"),
           channel: "telegram",
-          scope: "topic",
-          routeKey: "telegram:default:chat:-100777:topic:2",
+          scope: "chat",
+          routeKey: "telegram:default:chat:-100777",
         },
       ],
     });

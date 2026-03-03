@@ -3920,10 +3920,9 @@ function claimTelegramPairingToken(params: {
 
     const tenantId = String(row.tenant_id);
     const claimRouteKey = buildTelegramRouteKey(params.chatId, params.topicId);
-    const boundRouteKey =
-      params.chatType === "direct"
-        ? buildTelegramRouteKey(params.chatId)
-        : buildTelegramRouteKey(params.chatId, params.topicId);
+    // Telegram pairing is chat-scoped for both DMs and groups (including forum groups).
+    // We still keep topic-specific session routes via claimRouteKey + inbound session mapping.
+    const boundRouteKey = buildTelegramRouteKey(params.chatId);
 
     let claimType: ClaimType = "fresh";
     let previousTenantId: string | undefined;

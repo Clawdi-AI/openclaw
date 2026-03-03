@@ -8,6 +8,10 @@ COMPOSE_FILE="${STACK_DIR}/docker-compose.yml"
 : "${MUX_BASE_URL:=http://127.0.0.1:18891}"
 : "${POLL_TIMEOUT:=60}"
 : "${LLM_TIMEOUT:=60}"
+: "${TELEGRAM_E2E_SEND_COOLDOWN_SEC:=2}"
+: "${TELEGRAM_E2E_FORUM_CHAT_ID:=}"
+: "${TELEGRAM_E2E_FORUM_TOPIC_ID:=1}"
+: "${TELEGRAM_E2E_FORUM_SECOND_TOPIC_ID:=}"
 
 compose() {
   docker compose -f "${COMPOSE_FILE}" "$@"
@@ -123,6 +127,15 @@ fail() {
   ((FAIL++)) || true
 }
 
+# Gentle pacing between outbound test messages to reduce burstiness/rate limits.
+cooldown_send() {
+  local seconds="${TELEGRAM_E2E_SEND_COOLDOWN_SEC:-0}"
+  if [[ "${seconds}" == "0" || "${seconds}" == "0.0" ]]; then
+    return 0
+  fi
+  sleep "${seconds}"
+}
+
 # Line count in the mux-server structured log file (/data/mux-server.log
 # inside the container).  Updated by fence() so that wait helpers only
 # look at entries produced after the fence.
@@ -225,6 +238,48 @@ wait_for_outbound_fields() {
 # Same as wait_for_outbound_fields but with a clearer name for general log entries.
 wait_for_log_entry() {
   wait_for_outbound_fields "$@"
+}
+
+# Resolve the forum group used for local group behavior tests.
+# Priority:
+#   1) TELEGRAM_E2E_FORUM_CHAT_ID (explicit override)
+#   2) tgcli chats list lookup by name ("Forum Testbed"/"Forum Testbench")
+resolve_forum_chat_id() {
+  if [[ -n "${TELEGRAM_E2E_FORUM_CHAT_ID:-}" ]]; then
+    echo "${TELEGRAM_E2E_FORUM_CHAT_ID}"
+    return 0
+  fi
+  tgcli chats list --output json 2>/dev/null \
+    | jq -r '
+        [ .[]
+          | select((.is_forum == true) or (.kind == "group"))
+          | select((.name // "") | test("Forum Testbed|Forum Testbench"; "i"))
+          | .id
+        ]
+        | first // empty
+      ' 2>/dev/null || true
+}
+
+# Resolve a second forum topic used to validate cross-topic pairing/routing.
+# Priority:
+#   1) TELEGRAM_E2E_FORUM_SECOND_TOPIC_ID (explicit override)
+#   2) first topic from tgcli topics list that is not the primary topic
+resolve_forum_second_topic_id() {
+  local chat_id="$1"
+  local primary_topic_id="$2"
+  if [[ -n "${TELEGRAM_E2E_FORUM_SECOND_TOPIC_ID:-}" ]]; then
+    echo "${TELEGRAM_E2E_FORUM_SECOND_TOPIC_ID}"
+    return 0
+  fi
+  tgcli topics list --chat "${chat_id}" --output json 2>/dev/null \
+    | jq -r --arg primary "${primary_topic_id}" '
+        [ .topics[]?
+          | .topic_id
+          | tostring
+          | select(. != $primary)
+        ]
+        | first // empty
+      ' 2>/dev/null || true
 }
 
 # Issue a fresh pairing token via the admin API.
@@ -336,6 +391,7 @@ fi
 # Also send /bot_unpair via Telegram in case the API unbind missed anything
 # (e.g. stale binding from a different openclaw identity).
 tgcli send --to "${BOT_CHAT_ID}" --message "/bot_unpair"
+cooldown_send
 sleep 5
 
 fence
@@ -348,6 +404,7 @@ fence
 echo "[e2e] onboarding test 1: unpaired message shows Clawdi intro"
 
 tgcli send --to "${BOT_CHAT_ID}" --message "hello from unpaired user ${UUID}"
+cooldown_send
 
 # Wait for the bot to process and reply.  The unpaired hint goes through
 # sendTelegram("sendMessage", ...) which isn't logged as outbound_request.
@@ -387,6 +444,7 @@ if [[ -z "${fresh_token}" ]]; then
   fail "fresh pairing — could not issue pairing token"
 else
   tgcli send --to "${BOT_CHAT_ID}" --message "/start ${fresh_token}"
+  cooldown_send
 
   # a) Verify claimType=fresh in structured log.
   if elapsed="$(wait_for_log_entry "${POLL_TIMEOUT}" \
@@ -454,6 +512,7 @@ if [[ -z "${repaired_token}" ]]; then
   fail "re-pairing — could not issue pairing token"
 else
   tgcli send --to "${BOT_CHAT_ID}" --message "/start ${repaired_token}"
+  cooldown_send
 
   # a) Verify claimType=repaired in structured log.
   if elapsed="$(wait_for_log_entry "${POLL_TIMEOUT}" \
@@ -489,26 +548,6 @@ fi
 
 fence
 
-# ---------- pairing (restore for remaining tests) ----------
-#
-# Re-pair with the standard flow so the rest of the e2e tests (text
-# round-trip, photo, multi-action, etc.) have an active binding.
-
-echo "[e2e] pairing: issuing token for telegram"
-pair_response="$("${SCRIPT_DIR}/pair-token.sh" telegram 2>&1)" || true
-token="$(echo "${pair_response}" | grep -oP 'mpt_[A-Za-z0-9a-f]+' | head -1)" || true
-
-if [[ -z "${token}" ]]; then
-  echo "[e2e] pairing: no token extracted (may already be paired), continuing" >&2
-else
-  echo "[e2e] pairing: sending /start ${token} to bot"
-  tgcli send --to "${BOT_CHAT_ID}" --message "/start ${token}"
-  sleep 5
-  echo "[e2e] pairing: confirmed (token sent)"
-fi
-
-fence
-
 # ==========================================================================
 # Full round-trip tests
 #
@@ -521,6 +560,7 @@ fence
 
 echo "[e2e] test 1: text round-trip"
 tgcli send --to "${BOT_CHAT_ID}" --message "e2e-text-${UUID}. Reply with exactly: CONFIRMED_${UUID}"
+cooldown_send
 
 if elapsed="$(wait_for_inbound "${POLL_TIMEOUT}")"; then
   pass "text inbound — forwarded in ${elapsed}s"
@@ -570,6 +610,7 @@ fi
 
 echo "[e2e] test 2: photo round-trip"
 tgcli send --to "${BOT_CHAT_ID}" --photo "$PHOTO" --caption "e2e-photo-${UUID}. Describe what you see in this image. What color is it?"
+cooldown_send
 
 if elapsed="$(wait_for_inbound "${POLL_TIMEOUT}")"; then
   pass "photo inbound — forwarded in ${elapsed}s"
@@ -602,6 +643,7 @@ Please do all three of these things:
 PROMPT_EOF
 
 tgcli send --to "${BOT_CHAT_ID}" --message "${PROMPT}"
+cooldown_send
 
 if elapsed="$(wait_for_inbound "${POLL_TIMEOUT}")"; then
   pass "multi-action inbound — forwarded in ${elapsed}s"
@@ -696,6 +738,7 @@ fence
 
 echo "[e2e] test 5: argsMenu inline keyboard buttons (no AI)"
 tgcli send --to "${BOT_CHAT_ID}" --message "/reasoning"
+cooldown_send
 
 if elapsed="$(wait_for_inbound "${POLL_TIMEOUT}")"; then
   pass "argsMenu inbound — forwarded in ${elapsed}s"
@@ -736,6 +779,7 @@ if [[ -z "${sticker_file_id}" ]]; then
   echo "[e2e] SKIP: sticker inbound — no sticker packs found via tgcli"
 else
   tgcli send --to "${BOT_CHAT_ID}" --sticker "${sticker_file_id}"
+  cooldown_send
 
   if elapsed="$(wait_for_inbound "${POLL_TIMEOUT}")"; then
     pass "sticker inbound — forwarded in ${elapsed}s"
@@ -758,6 +802,7 @@ TMPFILES+=("$DOC_FILE")
 printf 'e2e document test %s\n' "${UUID}" > "$DOC_FILE"
 
 tgcli send --to "${BOT_CHAT_ID}" --file "$DOC_FILE" --caption "e2e-doc-${UUID}"
+cooldown_send
 
 if elapsed="$(wait_for_inbound "${POLL_TIMEOUT}")"; then
   pass "document inbound — forwarded in ${elapsed}s"
@@ -767,73 +812,115 @@ fi
 
 fence
 
-# ---------- test 8: threaded mode (forum topics) ----------
+# ---------- test 8: forum group behavior ----------
 #
-# Creates a forum topic in the bot DM via Bot API, sends /reasoning in
-# that topic, and verifies message_thread_id is preserved in outbound.
-# No separate group or manual setup needed — the bot has topics enabled.
-# Old e2e topics from previous runs are cleaned up automatically.
+# Pairs once inside a real forum group and verifies command round-trips in two topics:
+#   1) /start token + /reasoning in primary topic
+#   2) /reasoning in second topic without re-pairing
+#
+# This validates group+topic routing in the same local stack used for DM tests.
 
-echo "[e2e] test 8: threaded mode (forum topics, no AI)"
+echo "[e2e] test 8: forum group behavior (chat-wide pairing + two topics, no AI)"
 
-if [[ -z "${user_chat_id}" ]]; then
-  echo "[e2e] SKIP: threaded mode — user_chat_id not resolved (test 4 dependency)"
+forum_chat_id="$(resolve_forum_chat_id)"
+forum_topic_id="${TELEGRAM_E2E_FORUM_TOPIC_ID}"
+
+if [[ -z "${forum_chat_id}" ]]; then
+  echo "[e2e] SKIP: forum group test — set TELEGRAM_E2E_FORUM_CHAT_ID or create a forum group named 'Forum Testbed'/'Forum Testbench' in tgcli"
 else
-  # Clean up topics left over from previous e2e runs.
-  E2E_THREADS_FILE="${STACK_DIR}/state/e2e-thread-ids.txt"
-  if [[ -f "${E2E_THREADS_FILE}" ]]; then
-    echo "[e2e] cleaning up old e2e topics..."
-    while IFS= read -r old_thread_id; do
-      if [[ -n "${old_thread_id}" ]]; then
-        curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteForumTopic" \
-          -H "Content-Type: application/json" \
-          --data "{\"chat_id\":\"${user_chat_id}\",\"message_thread_id\":${old_thread_id}}" >/dev/null 2>&1 || true
-      fi
-    done < "${E2E_THREADS_FILE}"
-    rm -f "${E2E_THREADS_FILE}"
+  forum_second_topic_id="$(resolve_forum_second_topic_id "${forum_chat_id}" "${forum_topic_id}")"
+  if [[ -z "${forum_second_topic_id}" ]]; then
+    echo "[e2e] SKIP: forum second-topic test — set TELEGRAM_E2E_FORUM_SECOND_TOPIC_ID or create another topic in ${forum_chat_id}"
   fi
 
-  # Create a fresh topic for this run.
-  topic_response="$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/createForumTopic" \
-    -H "Content-Type: application/json" \
-    --data "{\"chat_id\":\"${user_chat_id}\",\"name\":\"e2e-thread-${UUID}\"}")"
-  E2E_TOPIC_ID="$(echo "${topic_response}" | jq -r '.result.message_thread_id // empty')"
-
-  if [[ -z "${E2E_TOPIC_ID}" ]]; then
-    echo "[e2e] SKIP: threaded mode — createForumTopic failed: ${topic_response}"
+  forum_token="$(issue_pairing_token telegram "${e2e_openclaw_id}")" || true
+  if [[ -z "${forum_token}" ]]; then
+    fail "forum group pairing — could not issue pairing token"
   else
-    # Persist topic ID so next run can clean it up if this run crashes.
-    mkdir -p "${STACK_DIR}/state"
-    echo "${E2E_TOPIC_ID}" >> "${E2E_THREADS_FILE}"
-
-    echo "[e2e] created topic ${E2E_TOPIC_ID} in bot DM"
-
     fence
+    tgcli send --to "${forum_chat_id}" --topic "${forum_topic_id}" --message "/start ${forum_token}"
+    cooldown_send
 
-    # Send /reasoning in the topic.  Command interception responds with
-    # inline buttons — no AI needed.  The outbound must include
-    # message_thread_id (topic preservation through the mux path).
-    tgcli send --to "${BOT_CHAT_ID}" --topic "${E2E_TOPIC_ID}" \
-      --message "/reasoning"
-
-    if elapsed="$(wait_for_inbound "${POLL_TIMEOUT}")"; then
-      pass "threaded inbound — forwarded in ${elapsed}s"
+    if elapsed="$(wait_for_log_entry "${POLL_TIMEOUT}" \
+      '"telegram_pairing_token_claimed"' "topic:${forum_topic_id}\"")"; then
+      pass "forum group pairing — token claimed in topic ${forum_topic_id} in ${elapsed}s"
     else
-      fail "threaded inbound — no telegram_inbound_forwarded within ${POLL_TIMEOUT}s"
+      fail "forum group pairing — no telegram_pairing_token_claimed for topic ${forum_topic_id} within ${POLL_TIMEOUT}s"
     fi
 
-    if elapsed="$(wait_for_outbound_fields "${POLL_TIMEOUT}" \
-      '"outbound_request"' '"method":"sendMessage"' '"message_thread_id"')"; then
-      pass "threaded outbound — sendMessage with message_thread_id in ${elapsed}s"
+    forum_session_key="$(mux_log_tail \
+      | grep '"telegram_pairing_token_claimed"' \
+      | grep "topic:${forum_topic_id}\"" \
+      | grep -oP '"sessionKey":"\K[^"]+' \
+      | tail -1)" || true
+
+    if [[ -z "${forum_session_key}" ]]; then
+      fail "forum group pairing — could not resolve sessionKey from claim log"
+    elif [[ "${forum_session_key}" == *":telegram:group:"* ]]; then
+      pass "forum group pairing — resolved group session key ${forum_session_key}"
     else
-      fail "threaded outbound — no sendMessage with message_thread_id within ${POLL_TIMEOUT}s"
+      fail "forum group pairing — unexpected non-group session key ${forum_session_key}"
     fi
 
-    # Clean up — delete the topic so it doesn't accumulate.
-    curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteForumTopic" \
-      -H "Content-Type: application/json" \
-      --data "{\"chat_id\":\"${user_chat_id}\",\"message_thread_id\":${E2E_TOPIC_ID}}" >/dev/null 2>&1 || true
-    sed -i "/${E2E_TOPIC_ID}/d" "${E2E_THREADS_FILE}" 2>/dev/null || true
+    if [[ -n "${forum_session_key}" && "${forum_session_key}" == *":telegram:group:"* ]]; then
+      fence
+      tgcli send --to "${forum_chat_id}" --topic "${forum_topic_id}" --message "/reasoning"
+      cooldown_send
+
+      if elapsed="$(wait_for_log_entry "${POLL_TIMEOUT}" \
+        '"telegram_inbound_forwarded"' "\"sessionKey\":\"${forum_session_key}\"")"; then
+        pass "forum group inbound — /reasoning forwarded in ${elapsed}s"
+      else
+        fail "forum group inbound — no forwarded /reasoning for ${forum_session_key} within ${POLL_TIMEOUT}s"
+      fi
+
+      if elapsed="$(wait_for_outbound_fields "${POLL_TIMEOUT}" \
+        '"outbound_request"' "\"sessionKey\":\"${forum_session_key}\"" '"method":"sendMessage"' '"reply_markup"')"; then
+        pass "forum group outbound — args menu sendMessage for ${forum_session_key} in ${elapsed}s"
+      else
+        fail "forum group outbound — no args menu sendMessage for ${forum_session_key} within ${POLL_TIMEOUT}s"
+      fi
+    fi
+  fi
+
+  if [[ -n "${forum_second_topic_id}" ]]; then
+    fence
+    tgcli send --to "${forum_chat_id}" --topic "${forum_second_topic_id}" --message "/reasoning"
+    cooldown_send
+
+    if elapsed="$(wait_for_log_entry "${POLL_TIMEOUT}" \
+      '"telegram_inbound_forwarded"' "topic:${forum_second_topic_id}\"")"; then
+      pass "forum group second-topic inbound — /reasoning forwarded without re-pairing in ${elapsed}s"
+    else
+      fail "forum group second-topic inbound — no forwarded /reasoning for topic ${forum_second_topic_id} within ${POLL_TIMEOUT}s"
+    fi
+
+    forum_session_key_2="$(mux_log_tail \
+      | grep '"telegram_inbound_forwarded"' \
+      | grep "topic:${forum_second_topic_id}\"" \
+      | grep -oP '"sessionKey":"\K[^"]+' \
+      | tail -1)" || true
+
+    if [[ -z "${forum_session_key_2}" ]]; then
+      fail "forum group second-topic inbound — could not resolve sessionKey from forward log"
+    elif [[ "${forum_session_key_2}" == *":telegram:group:"* ]]; then
+      pass "forum group second-topic inbound — resolved group session key ${forum_session_key_2}"
+    else
+      fail "forum group second-topic inbound — unexpected non-group session key ${forum_session_key_2}"
+    fi
+
+    if [[ -n "${forum_session_key:-}" && -n "${forum_session_key_2:-}" && "${forum_session_key}" != "${forum_session_key_2}" ]]; then
+      pass "forum group second-topic inbound — distinct session keys across topics"
+    fi
+
+    if [[ -n "${forum_session_key_2}" && "${forum_session_key_2}" == *":telegram:group:"* ]]; then
+      if elapsed="$(wait_for_outbound_fields "${POLL_TIMEOUT}" \
+        '"outbound_request"' "\"sessionKey\":\"${forum_session_key_2}\"" '"method":"sendMessage"' '"reply_markup"')"; then
+        pass "forum group second-topic outbound — args menu sendMessage for ${forum_session_key_2} in ${elapsed}s"
+      else
+        fail "forum group second-topic outbound — no args menu sendMessage for ${forum_session_key_2} within ${POLL_TIMEOUT}s"
+      fi
+    fi
   fi
 fi
 
