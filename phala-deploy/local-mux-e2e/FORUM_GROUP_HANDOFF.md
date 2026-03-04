@@ -50,7 +50,7 @@ Code/tests:
 ## Required pairing flow for group tests
 
 1. Mint pairing token (`pair-token.sh telegram` or admin API).
-2. Send `/start <token>` inside any topic of that forum chat (via `tgcli send --to <group_id> --topic <topic_id>`).
+2. Send `/start <token>` **inside the target forum topic** (via `tgcli send --to <group_id> --topic <topic_id>`).
 3. Confirm mux log emits `telegram_pairing_token_claimed` with chat-wide group route, for example:
    - `routeKey: telegram:default:chat:-100...`
    - `sessionKey: agent:main:telegram:group:-100...:topic:1`
