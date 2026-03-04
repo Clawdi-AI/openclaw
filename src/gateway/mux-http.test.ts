@@ -10,11 +10,11 @@ const OPENCLAW_ID = "openclaw-rt-1";
 
 const mocks = vi.hoisted(() => ({
   loadConfig: vi.fn(),
-  dispatchInboundMessage: vi.fn(async () => ({
+  dispatchInboundMessage: vi.fn(async (_params?: unknown) => ({
     queuedFinal: false,
     counts: { tool: 0, block: 0, final: 0 },
   })),
-  dispatchReplyWithBufferedBlockDispatcher: vi.fn(async () => ({
+  dispatchReplyWithBufferedBlockDispatcher: vi.fn(async (_params?: unknown) => ({
     queuedFinal: false,
     counts: { tool: 0, block: 0, final: 0 },
   })),
@@ -592,8 +592,13 @@ describe("handleMuxInboundHttpRequest", () => {
           },
         },
       });
-      mocks.dispatchInboundMessage.mockImplementationOnce(async (params) => {
-        await params.replyOptions?.onReplyStart?.();
+      mocks.dispatchInboundMessage.mockImplementationOnce(async (params?: unknown) => {
+        const typedParams = params as
+          | {
+              replyOptions?: { onReplyStart?: () => Promise<void> | void };
+            }
+          | undefined;
+        await typedParams?.replyOptions?.onReplyStart?.();
         return {
           queuedFinal: false,
           counts: { tool: 0, block: 0, final: 0 },

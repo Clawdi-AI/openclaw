@@ -54,7 +54,7 @@ afterEach(() => {
 
 describe("whatsapp extension mux outbound sendPayload", () => {
   it("passes channelData and mediaUrls through mux", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -104,7 +104,11 @@ describe("whatsapp extension mux outbound sendPayload", () => {
     expect(result).toMatchObject({ channel: "whatsapp", messageId: "mx-wa-1" });
     // register call + single send (mediaUrls passed as array) = 2 calls
     expect(fetchSpy).toHaveBeenCalledTimes(2);
-    const [, init] = fetchSpy.mock.calls[1] as [string, RequestInit];
+    const init = fetchSpy.mock.calls[1]?.[1];
+    expect(init).toBeDefined();
+    if (!init) {
+      throw new Error("expected request init in mux send call");
+    }
     const body = JSON.parse(String(init.body)) as {
       channel?: string;
       sessionKey?: string;

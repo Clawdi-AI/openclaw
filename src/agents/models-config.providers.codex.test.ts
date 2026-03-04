@@ -2,14 +2,15 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { ModelDefinitionConfig } from "../config/types.models.js";
 import { normalizeProviders } from "./models-config.providers.js";
 
-function makeModel(id: string) {
+function makeModel(id: string): ModelDefinitionConfig {
   return {
     id,
     name: id,
     reasoning: true,
-    input: ["text"] as const,
+    input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
     maxTokens: 8192,
