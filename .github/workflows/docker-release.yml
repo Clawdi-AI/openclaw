@@ -1,9 +1,10 @@
-name: Docker Release
+name: Docker Release (OpenClaw)
 
 on:
   push:
     branches:
       - main
+      - "phala-*"
     tags:
       - "v*"
     paths-ignore:
@@ -14,7 +15,7 @@ on:
       - "skills/**"
 
 concurrency:
-  group: docker-release-${{ github.workflow }}-${{ github.ref }}
+  group: docker-release-openclaw-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -53,10 +54,14 @@ jobs:
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
+            type=sha,format=short,prefix=sha-
+            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
             type=semver,pattern={{version}},suffix=-amd64
-            type=semver,pattern={{version}},suffix=-arm64
             type=ref,event=branch,suffix=-amd64
-            type=ref,event=branch,suffix=-arm64
+            type=sha,format=short,prefix=sha-,suffix=-amd64
+            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
 
       - name: Build and push amd64 image
         id: build
@@ -102,10 +107,14 @@ jobs:
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
-            type=semver,pattern={{version}},suffix=-amd64
+            type=sha,format=short,prefix=sha-
+            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
             type=semver,pattern={{version}},suffix=-arm64
-            type=ref,event=branch,suffix=-amd64
             type=ref,event=branch,suffix=-arm64
+            type=sha,format=short,prefix=sha-,suffix=-arm64
+            type=sha,format=short,prefix=phala-,suffix=-arm64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=raw,value=phala-latest-arm64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
 
       - name: Build and push arm64 image
         id: build
@@ -143,6 +152,9 @@ jobs:
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
+            type=sha,format=short,prefix=sha-
+            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
 
       - name: Create and push manifest
         run: |
