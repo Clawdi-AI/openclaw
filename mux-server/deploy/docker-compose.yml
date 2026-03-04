@@ -45,11 +45,17 @@ services:
         condition: service_healthy
     ports:
       - "18891:18891"
+    environment:
+      MUX_PROXY_PROMETHEUS_HTPASSWD_B64: ${MUX_PROXY_PROMETHEUS_HTPASSWD_B64:?set MUX_PROXY_PROMETHEUS_HTPASSWD_B64}
     configs:
       - source: mux_proxy_nginx_conf
         target: /etc/nginx/nginx.conf
-      - source: mux_proxy_htpasswd_prometheus
-        target: /etc/nginx/htpasswd-prometheus
+    entrypoint:
+      [
+        "sh",
+        "-c",
+        "printf '%s\\n' \"$MUX_PROXY_PROMETHEUS_HTPASSWD_B64\" | base64 -d > /etc/nginx/htpasswd-prometheus && exec nginx -g 'daemon off;'",
+      ]
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18891/health >/dev/null || exit 1"]
@@ -116,6 +122,3 @@ configs:
           }
         }
       }
-  mux_proxy_htpasswd_prometheus:
-    content: |
-      prometheus:${MUX_PROXY_PROMETHEUS_PASSWORD_HASH:?set MUX_PROXY_PROMETHEUS_PASSWORD_HASH}
