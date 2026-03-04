@@ -370,7 +370,7 @@ The entrypoint keeps SSH available even if the gateway crashes and restarts it w
 Two commands: build, then deploy.
 
 ```sh
-# Build and push OpenClaw image
+# Build and push OpenClaw images (full + base)
 ./phala-deploy/build-pin-openclaw.sh
 
 # Deploy OpenClaw CVM (set env vars first)
@@ -399,7 +399,7 @@ For mux-server deploy/update/pairing flows, see:
 If you prefer a manual env file flow, deploy manually:
 
 ```sh
-# 1. Build and push images (pins full-image digest in docker-compose.yml and writes image refs)
+# 1. Build and push images (full + base)
 ./phala-deploy/build-pin-openclaw.sh
 
 # 2. Download the existing config from the CVM (preserved across deploys)
@@ -450,20 +450,18 @@ If your CVM is destroyed (S3 mode only):
 
 ## File reference
 
-| File                                 | Purpose                                                                                                   |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `Dockerfile`                         | CVM image (Ubuntu 24.04 + Node 24 + rclone + Docker-in-Docker)                                            |
-| `entrypoint.sh`                      | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway                                             |
-| `docker-compose.yml`                 | Compose file for `phala deploy`                                                                           |
-| `image-refs/openclaw-base-image.ref` | Canonical pinned OpenClaw base image ref (`repo:tag@sha256:...`)                                          |
-| `image-refs/openclaw-full-image.ref` | Canonical pinned OpenClaw full image ref (`repo:tag@sha256:...`)                                          |
-| `build-pin-openclaw.sh`              | Rebuild tarball, build/push full then base target images, pin compose full image digest, write image refs |
-| `deploy-openclaw.sh`                 | Deploy OpenClaw CVM, wait for health, run smoke tests                                                     |
-| `migrate-openclaw.sh`                | Apply config migrations to a running CVM via SSH                                                          |
-| `gen-cvm-config.sh`                  | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)                                           |
-| `../mux-server/deploy/README.md`     | Canonical mux-server deployment guide (prod compose, build/pin, deploy, pairing, access control)          |
-| `UPDATE_RUNBOOK.md`                  | Detailed update runbook with fallback procedures                                                          |
-| `S3_STORAGE.md`                      | Detailed S3 encryption documentation                                                                      |
+| File                             | Purpose                                                                                      |
+| -------------------------------- | -------------------------------------------------------------------------------------------- |
+| `Dockerfile`                     | CVM image (Ubuntu 24.04 + Node 24 + rclone + Docker-in-Docker)                               |
+| `entrypoint.sh`                  | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway                                |
+| `docker-compose.yml`             | Compose file for `phala deploy`                                                              |
+| `build-pin-openclaw.sh`          | Build tarball and build/push OpenClaw full + base images                                     |
+| `deploy-openclaw.sh`             | Deploy OpenClaw CVM, wait for health, run smoke tests                                        |
+| `migrate-openclaw.sh`            | Apply config migrations to a running CVM via SSH                                             |
+| `gen-cvm-config.sh`              | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)                              |
+| `../mux-server/deploy/README.md` | Canonical mux-server deployment guide (prod compose, build, deploy, pairing, access control) |
+| `UPDATE_RUNBOOK.md`              | Detailed update runbook with fallback procedures                                             |
+| `S3_STORAGE.md`                  | Detailed S3 encryption documentation                                                         |
 
 ## CVM environment notes
 

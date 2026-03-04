@@ -53,32 +53,8 @@ jobs:
       - name: Resolve version tags
         id: versions
         run: |
-          FULL_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
-          if [[ "$FULL_VERSION" != *-phala.* ]]; then
-            echo "package.json version must match <base>-phala.<minor>; got: $FULL_VERSION" >&2
-            exit 1
-          fi
-
-          IS_RELEASE="false"
-          IS_INTEGRATION="false"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            IS_RELEASE="true"
-          fi
-          if [[ "${GITHUB_REF}" == refs/heads/phala-* ]]; then
-            IS_INTEGRATION="true"
-          fi
-          if [[ "$IS_RELEASE" != "true" && "$IS_INTEGRATION" != "true" ]]; then
-            echo "unsupported ref for this workflow: ${GITHUB_REF}" >&2
-            echo "expected refs/tags/v* or refs/heads/phala-*" >&2
-            exit 1
-          fi
-          if [[ "$IS_RELEASE" == "true" ]]; then
-            TAG_VERSION="${GITHUB_REF_NAME#v}"
-            if [[ "$TAG_VERSION" != "$FULL_VERSION" ]]; then
-              echo "release tag/version mismatch: tag=${TAG_VERSION}, package=${FULL_VERSION}" >&2
-              exit 1
-            fi
-          fi
+          FULL_VERSION="$(bash phala-deploy/release-meta.sh full-version package.json)"
+          bash phala-deploy/release-meta.sh validate-ref "$FULL_VERSION" "$GITHUB_REF" "$GITHUB_REF_NAME" >/dev/null
 
           echo "full=$FULL_VERSION" >> "$GITHUB_OUTPUT"
 
