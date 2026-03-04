@@ -18,6 +18,19 @@ import {
   readOutboundRaw,
   readOutboundText,
 } from "./mux-envelope.js";
+import {
+  normalizeObservabilityLogEvent,
+  formatObservabilityLogLine,
+} from "./observability/logging.js";
+import { createMuxMetrics } from "./observability/metrics.js";
+import {
+  buildObservabilityQueueSnapshot,
+  buildObservabilityReadinessReport,
+  buildObservabilitySnapshot,
+  readNonNegativeCount,
+  readOldestQueuedAgeMs,
+} from "./observability/snapshot.js";
+import { createInboundTraceId } from "./observability/tracing.js";
 import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
 
 type SendResult = {
@@ -213,6 +226,27 @@ type WhatsAppRuntimeHealth = {
 type TelegramPollConflictHealth = {
   lastConflictAtMs: number;
   lastError: string;
+};
+
+type TelegramRuntimeHealth = {
+  loopStartedAtMs: number | null;
+  lastPollSuccessAtMs: number | null;
+  lastPollErrorAtMs: number | null;
+  lastPollError: string | null;
+  lastInboundSeenAtMs: number | null;
+};
+
+type DiscordRuntimeHealth = {
+  pollLoopStartedAtMs: number | null;
+  lastPollSuccessAtMs: number | null;
+  lastPollErrorAtMs: number | null;
+  lastPollError: string | null;
+  gatewayLoopStartedAtMs: number | null;
+  gatewayReadyAtMs: number | null;
+  gatewayLastCloseAtMs: number | null;
+  gatewayLastErrorAtMs: number | null;
+  gatewayLastError: string | null;
+  lastInboundSeenAtMs: number | null;
 };
 
 type WebRuntimeModules = {
@@ -581,10 +615,11 @@ const botSwitchUsageTextOverride =
   readNonEmptyString(process.env.MUX_BOT_SWITCH_USAGE_TEXT) || getNoticeText("botSwitchUsage");
 const configuredUnpairedHintText =
   readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT) || getNoticeText("clawdiIntro");
+const DEFAULT_REQUEST_BODY_MAX_BYTES = 50 * 1024 * 1024;
 const requestBodyMaxBytes = (() => {
-  const parsed = Number(process.env.MUX_MAX_BODY_BYTES || 10 * 1024 * 1024);
+  const parsed = Number(process.env.MUX_MAX_BODY_BYTES || DEFAULT_REQUEST_BODY_MAX_BYTES);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    return 10 * 1024 * 1024;
+    return DEFAULT_REQUEST_BODY_MAX_BYTES;
   }
   return Math.trunc(parsed);
 })();
@@ -998,6 +1033,16 @@ const stmtDeferWhatsAppInboundQueueById = db.prepare(`
   WHERE id = ?
 `);
 
+const stmtCountWhatsAppInboundQueue = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM whatsapp_inbound_queue
+`);
+
+const stmtSelectOldestWhatsAppInboundQueue = db.prepare(`
+  SELECT MIN(created_at_ms) AS oldest_created_at_ms
+  FROM whatsapp_inbound_queue
+`);
+
 const stmtInsertAuditLog = db.prepare(`
   INSERT INTO audit_logs (tenant_id, event_type, payload_json, created_at_ms)
   VALUES (?, ?, ?, ?)
@@ -1018,6 +1063,26 @@ const discordChannelGuildCacheTtlMs = 30_000;
 const discordDmChannelCache = new Map<string, { channelId: string; expiresAtMs: number }>();
 const discordDmChannelCacheTtlMs = 10 * 60_000;
 let activeWhatsAppListener: ActiveWebListener | null = null;
+const metrics = createMuxMetrics();
+const telegramRuntimeHealth: TelegramRuntimeHealth = {
+  loopStartedAtMs: null,
+  lastPollSuccessAtMs: null,
+  lastPollErrorAtMs: null,
+  lastPollError: null,
+  lastInboundSeenAtMs: null,
+};
+const discordRuntimeHealth: DiscordRuntimeHealth = {
+  pollLoopStartedAtMs: null,
+  lastPollSuccessAtMs: null,
+  lastPollErrorAtMs: null,
+  lastPollError: null,
+  gatewayLoopStartedAtMs: null,
+  gatewayReadyAtMs: null,
+  gatewayLastCloseAtMs: null,
+  gatewayLastErrorAtMs: null,
+  gatewayLastError: null,
+  lastInboundSeenAtMs: null,
+};
 const whatsappRuntimeHealth: WhatsAppRuntimeHealth = {
   listenerActive: false,
   loopStartedAtMs: null,
@@ -1182,11 +1247,85 @@ function isSqliteUniqueConstraintError(error: unknown): boolean {
 
 function countActiveTenantInboundTargets(): number {
   const row = stmtCountActiveTenantInboundTargets.get() as { count?: unknown } | undefined;
-  const count = Number(row?.count);
-  if (!Number.isFinite(count) || count < 0) {
-    return 0;
-  }
-  return Math.trunc(count);
+  return readNonNegativeCount(row?.count);
+}
+
+function countWhatsAppInboundQueueDepth(): number {
+  const row = stmtCountWhatsAppInboundQueue.get() as { count?: unknown } | undefined;
+  return readNonNegativeCount(row?.count);
+}
+
+async function renderMetricsPayload(): Promise<string> {
+  const queues = buildQueueSnapshot(Date.now());
+  return await metrics.renderPrometheus(queues.depth);
+}
+
+function resolveWhatsAppOldestQueuedAgeMs(nowMs = Date.now()): number | null {
+  const row = stmtSelectOldestWhatsAppInboundQueue.get() as
+    | { oldest_created_at_ms?: unknown }
+    | undefined;
+  return readOldestQueuedAgeMs(row?.oldest_created_at_ms, nowMs);
+}
+
+function buildQueueSnapshot(nowMs = Date.now()): {
+  depth: Record<"telegram" | "discord" | "whatsapp", number>;
+  oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp", number | null>;
+} {
+  return buildObservabilityQueueSnapshot({
+    nowMs,
+    telegramBgRetryCount,
+    telegramBgRetryQueuedAtMs,
+    discordBgRetryCount,
+    discordBgRetryQueuedAtMs,
+    whatsappQueueDepth: countWhatsAppInboundQueueDepth(),
+    whatsappOldestQueuedAgeMs: resolveWhatsAppOldestQueuedAgeMs(nowMs),
+  });
+}
+
+function buildReadinessReport(nowMs = Date.now()): {
+  ready: boolean;
+  channels: Record<
+    "telegram" | "discord" | "whatsapp",
+    {
+      status: string;
+      ready: boolean;
+      reason?: string;
+      lastSuccessAtMs?: number | null;
+      lastErrorAtMs?: number | null;
+      lastError?: string | null;
+      lastInboundSeenAtMs?: number | null;
+    }
+  >;
+  queues: {
+    depth: Record<"telegram" | "discord" | "whatsapp", number>;
+    oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp", number | null>;
+  };
+  degraded: Array<{ channel: "telegram" | "discord" | "whatsapp"; reason: string }>;
+} {
+  const queues = buildQueueSnapshot(nowMs);
+  const whatsAppCredentialHealth = getWhatsAppCredentialHealth();
+  return buildObservabilityReadinessReport({
+    nowMs,
+    queues,
+    telegramInboundEnabled,
+    telegramPollConflictHealth,
+    telegramRuntimeHealth,
+    discordInboundEnabled,
+    discordRuntimeHealth,
+    whatsappInboundEnabled,
+    whatsappRuntimeHealth,
+    whatsappCredentialStatus: whatsAppCredentialHealth.status,
+  });
+}
+
+function renderObservabilitySnapshot(params: { nowMs?: number; tenantId?: string }) {
+  const nowMs = params.nowMs ?? Date.now();
+  const readiness = buildReadinessReport(nowMs);
+  return buildObservabilitySnapshot({
+    nowMs,
+    tenantId: params.tenantId,
+    readiness,
+  });
 }
 
 async function mintRuntimeJwt(params: {
@@ -1207,6 +1346,7 @@ async function mintRuntimeJwt(params: {
 
 async function buildInboundAuthHeaders(
   target: TenantInboundTarget,
+  traceId?: string,
 ): Promise<Record<string, string>> {
   const runtimeJwt = await mintRuntimeJwt({
     openclawId: target.openclawId,
@@ -1217,6 +1357,7 @@ async function buildInboundAuthHeaders(
   return {
     Authorization: `Bearer ${runtimeJwt}`,
     "X-OpenClaw-Id": target.openclawId,
+    ...(typeof traceId === "string" && traceId.trim() ? { "X-Mux-Trace-Id": traceId.trim() } : {}),
   };
 }
 
@@ -1597,7 +1738,9 @@ function errorString(err: unknown): string {
 }
 
 function log(entry: Record<string, unknown>) {
-  fs.appendFileSync(logPath, `${new Date().toISOString()} ${JSON.stringify(entry)}\n`);
+  const normalized = normalizeObservabilityLogEvent(entry);
+  metrics.observeLogEvent(normalized);
+  fs.appendFileSync(logPath, formatObservabilityLogLine(normalized));
 }
 
 function sendJson(res: ServerResponse, statusCode: number, payload: unknown): string {
@@ -4446,13 +4589,23 @@ async function forwardDiscordMessageToTenant(params: {
   fromId: string;
   body: string;
 }): Promise<"forwarded" | "ignored" | "deferred"> {
+  metrics.recordActiveUser("discord", params.fromId);
+  discordRuntimeHealth.lastInboundSeenAtMs = Date.now();
+  const traceId = createInboundTraceId({
+    channel: "discord",
+    tenantId: params.tenantId,
+    routeKey: params.routeKey,
+    messageId: params.messageId,
+  });
   const target = resolveTenantInboundTarget(params.tenantId);
   if (!target) {
+    metrics.recordInboundEvent("discord", "dropped");
     log({
       type: "discord_inbound_drop_no_target",
       tenantId: params.tenantId,
       bindingId: params.bindingId,
       routeKey: params.routeKey,
+      traceId,
     });
     return "deferred";
   }
@@ -4505,28 +4658,34 @@ async function forwardDiscordMessageToTenant(params: {
     openclawId: params.tenantId,
   };
 
+  const forwardStartedAtMs = Date.now();
   let response: Response;
   try {
     response = await fetch(target.url, {
       method: "POST",
       headers: {
-        ...(await buildInboundAuthHeaders(target)),
+        ...(await buildInboundAuthHeaders(target, traceId)),
         "Content-Type": "application/json; charset=utf-8",
       },
       body: JSON.stringify(payloadWithIdentity),
       signal: AbortSignal.timeout(target.timeoutMs),
     });
   } catch (error) {
+    metrics.observeInboundForwardDuration("discord", Date.now() - forwardStartedAtMs);
+    metrics.recordInboundEvent("discord", "deferred");
     log({
       type: "discord_inbound_retry_deferred",
       tenantId: params.tenantId,
       bindingId: params.bindingId,
       messageId: params.messageId,
       error: String(error),
+      traceId,
     });
     return "deferred";
   }
   if (!response.ok) {
+    metrics.observeInboundForwardDuration("discord", Date.now() - forwardStartedAtMs);
+    metrics.recordInboundEvent("discord", "deferred");
     const bodyText = await response.text();
     log({
       type: "discord_inbound_retry_deferred",
@@ -4534,10 +4693,13 @@ async function forwardDiscordMessageToTenant(params: {
       bindingId: params.bindingId,
       messageId: params.messageId,
       error: `openclaw inbound failed (${response.status}): ${bodyText || "no body"}`,
+      traceId,
     });
     return "deferred";
   }
 
+  metrics.observeInboundForwardDuration("discord", Date.now() - forwardStartedAtMs);
+  metrics.recordInboundEvent("discord", "forwarded");
   log({
     type: "discord_inbound_forwarded",
     tenantId: params.tenantId,
@@ -4545,6 +4707,7 @@ async function forwardDiscordMessageToTenant(params: {
     channelId: params.channelId,
     sessionKey,
     messageId: params.messageId,
+    traceId,
   });
   return "forwarded";
 }
@@ -5053,6 +5216,15 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     isForum,
     messageThreadId: callbackMessage.message_thread_id,
   });
+  const callbackMessageIdSeed =
+    typeof callbackMessage.message_id === "number" && Number.isFinite(callbackMessage.message_id)
+      ? String(Math.trunc(callbackMessage.message_id))
+      : undefined;
+  const traceId = createInboundTraceId({
+    channel: "telegram",
+    updateId: params.updateId,
+    messageId: callbackMessageIdSeed,
+  });
   const binding = resolveTelegramBindingForIncoming(chatId, topicId);
   if (!binding) {
     if (callbackQueryId) {
@@ -5066,6 +5238,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
           type: "telegram_callback_answer_error",
           updateId: params.updateId,
           error: String(error),
+          traceId,
         });
       }
     }
@@ -5074,11 +5247,13 @@ async function forwardTelegramCallbackQueryToTenant(params: {
 
   const target = resolveTenantInboundTarget(binding.tenantId);
   if (!target) {
+    metrics.recordInboundEvent("telegram", "dropped");
     log({
       type: "telegram_inbound_drop_no_target",
       tenantId: binding.tenantId,
       updateId: params.updateId,
       routeKey: binding.routeKey,
+      traceId,
     });
     throw new Error(`telegram inbound target missing for tenant ${binding.tenantId}`);
   }
@@ -5092,6 +5267,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     Number.isFinite(params.callbackQuery.from.id)
       ? String(Math.trunc(params.callbackQuery.from.id))
       : "unknown";
+  metrics.recordActiveUser("telegram", fromId);
   const timestampMs =
     typeof callbackMessage.date === "number" && Number.isFinite(callbackMessage.date)
       ? Math.trunc(callbackMessage.date) * 1_000
@@ -5136,20 +5312,39 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     ...payload,
     openclawId: binding.tenantId,
   };
-
-  const response = await fetch(target.url, {
-    method: "POST",
-    headers: {
-      ...(await buildInboundAuthHeaders(target)),
-      "Content-Type": "application/json; charset=utf-8",
-    },
-    body: JSON.stringify(payloadWithIdentity),
-    signal: AbortSignal.timeout(target.timeoutMs),
+  const tenantTraceId = createInboundTraceId({
+    channel: "telegram",
+    tenantId: binding.tenantId,
+    routeKey: inboundRouteKey,
+    updateId: params.updateId,
+    messageId: callbackMessageId,
   });
+
+  const forwardStartedAtMs = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(target.url, {
+      method: "POST",
+      headers: {
+        ...(await buildInboundAuthHeaders(target, tenantTraceId)),
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(payloadWithIdentity),
+      signal: AbortSignal.timeout(target.timeoutMs),
+    });
+  } catch (error) {
+    metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
+    metrics.recordInboundEvent("telegram", "error");
+    throw error;
+  }
   if (!response.ok) {
+    metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
+    metrics.recordInboundEvent("telegram", "error");
     const bodyText = await response.text();
     throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
   }
+  metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
+  metrics.recordInboundEvent("telegram", "forwarded");
 
   if (callbackQueryId) {
     try {
@@ -5159,6 +5354,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
         type: "telegram_callback_answer_error",
         updateId: params.updateId,
         error: String(error),
+        traceId: tenantTraceId,
       });
     }
   }
@@ -5170,6 +5366,7 @@ async function forwardTelegramCallbackQueryToTenant(params: {
     updateId: params.updateId,
     messageId: callbackMessageId,
     callbackData,
+    traceId: tenantTraceId,
   });
 }
 
@@ -5815,13 +6012,28 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     return;
   }
 
+  const messageId =
+    typeof message.message_id === "number" && Number.isFinite(message.message_id)
+      ? String(Math.trunc(message.message_id))
+      : `tg-msg:${updateId}`;
+  const inboundRouteKey = buildTelegramRouteKey(chatId, topicId);
+  const traceId = createInboundTraceId({
+    channel: "telegram",
+    tenantId: binding.tenantId,
+    routeKey: inboundRouteKey,
+    updateId,
+    messageId,
+  });
+
   const target = resolveTenantInboundTarget(binding.tenantId);
   if (!target) {
+    metrics.recordInboundEvent("telegram", "dropped");
     log({
       type: "telegram_inbound_drop_no_target",
       tenantId: binding.tenantId,
       updateId,
       routeKey: binding.routeKey,
+      traceId,
     });
     throw new Error(`telegram inbound target missing for tenant ${binding.tenantId}`);
   }
@@ -5831,19 +6043,15 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   if (!forwardedBody && inboundMedia.attachments.length === 0) {
     return;
   }
-  const messageId =
-    typeof message.message_id === "number" && Number.isFinite(message.message_id)
-      ? String(Math.trunc(message.message_id))
-      : `tg-msg:${updateId}`;
   const fromId =
     typeof message.from?.id === "number" && Number.isFinite(message.from.id)
       ? String(Math.trunc(message.from.id))
       : "unknown";
+  metrics.recordActiveUser("telegram", fromId);
   const timestampMs =
     typeof message.date === "number" && Number.isFinite(message.date)
       ? Math.trunc(message.date) * 1_000
       : Date.now();
-  const inboundRouteKey = buildTelegramRouteKey(chatId, topicId);
   const sessionKey = resolveTelegramInboundSessionKey({
     tenantId: binding.tenantId,
     bindingId: binding.bindingId,
@@ -5902,20 +6110,32 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     openclawId: binding.tenantId,
   };
 
-  const response = await fetch(target.url, {
-    method: "POST",
-    headers: {
-      ...(await buildInboundAuthHeaders(target)),
-      "Content-Type": "application/json; charset=utf-8",
-    },
-    body: JSON.stringify(payloadWithIdentity),
-    signal: AbortSignal.timeout(target.timeoutMs),
-  });
+  const forwardStartedAtMs = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(target.url, {
+      method: "POST",
+      headers: {
+        ...(await buildInboundAuthHeaders(target, traceId)),
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(payloadWithIdentity),
+      signal: AbortSignal.timeout(target.timeoutMs),
+    });
+  } catch (error) {
+    metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
+    metrics.recordInboundEvent("telegram", "error");
+    throw error;
+  }
 
   if (!response.ok) {
+    metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
+    metrics.recordInboundEvent("telegram", "error");
     const bodyText = await response.text();
     throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
   }
+  metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
+  metrics.recordInboundEvent("telegram", "forwarded");
 
   log({
     type: "telegram_inbound_forwarded",
@@ -5923,6 +6143,7 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
     sessionKey,
     updateId,
     messageId,
+    traceId,
   });
 }
 
@@ -6288,6 +6509,9 @@ async function runDiscordInboundLoop() {
   if (!discordInboundEnabled) {
     return;
   }
+  discordBgRetryCount.clear();
+  discordBgRetryQueuedAtMs.clear();
+  discordRuntimeHealth.pollLoopStartedAtMs = Date.now();
   let running = true;
   process.on("SIGINT", () => {
     running = false;
@@ -6300,7 +6524,12 @@ async function runDiscordInboundLoop() {
   while (running) {
     try {
       await runDiscordInboundPollPass();
+      discordRuntimeHealth.lastPollSuccessAtMs = Date.now();
+      discordRuntimeHealth.lastPollErrorAtMs = null;
+      discordRuntimeHealth.lastPollError = null;
     } catch (error) {
+      discordRuntimeHealth.lastPollErrorAtMs = Date.now();
+      discordRuntimeHealth.lastPollError = errorString(error);
       const err = error instanceof Error ? error : undefined;
       log({
         type: "discord_inbound_poll_error",
@@ -6319,6 +6548,9 @@ const DISCORD_BG_RETRY_MAX_PER_TENANT = 3;
 const DISCORD_BG_RETRY_ATTEMPTS = 5;
 const DISCORD_BG_RETRY_INTERVAL_MS = 30_000;
 const discordBgRetryCount = new Map<string, number>();
+const discordBgRetryQueuedAtMs = new Map<string, number>();
+const telegramBgRetryCount = new Map<string, number>();
+const telegramBgRetryQueuedAtMs = new Map<string, number>();
 
 async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
   const messageId = readUnsignedNumericString(message.id);
@@ -6569,6 +6801,10 @@ async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
     const tid = liveBinding.tenantId;
     const pending = discordBgRetryCount.get(tid) ?? 0;
     if (pending < DISCORD_BG_RETRY_MAX_PER_TENANT) {
+      metrics.recordRetryScheduled("discord");
+      if (pending <= 0) {
+        discordBgRetryQueuedAtMs.set(tid, Date.now());
+      }
       discordBgRetryCount.set(tid, pending + 1);
       void (async () => {
         try {
@@ -6585,7 +6821,13 @@ async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
             }
           }
         } finally {
-          discordBgRetryCount.set(tid, (discordBgRetryCount.get(tid) ?? 1) - 1);
+          const nextPending = (discordBgRetryCount.get(tid) ?? 1) - 1;
+          if (nextPending <= 0) {
+            discordBgRetryCount.delete(tid);
+            discordBgRetryQueuedAtMs.delete(tid);
+          } else {
+            discordBgRetryCount.set(tid, nextPending);
+          }
         }
       })();
     } else {
@@ -6598,6 +6840,8 @@ async function runDiscordGatewayDmSession(): Promise<void> {
   const gatewayUrl = await fetchDiscordGatewayUrl();
   const token = requireDiscordBotToken();
   discordGatewayReady = false;
+  discordRuntimeHealth.gatewayLastError = null;
+  discordRuntimeHealth.gatewayLastErrorAtMs = null;
   const intents =
     Number.isFinite(discordGatewayIntents) && discordGatewayIntents > 0
       ? Math.trunc(discordGatewayIntents)
@@ -6697,6 +6941,7 @@ async function runDiscordGatewayDmSession(): Promise<void> {
       if (eventType === "READY") {
         const ready = asRecord(frame.d);
         discordGatewayReady = true;
+        discordRuntimeHealth.gatewayReadyAtMs = Date.now();
         log({
           type: "discord_gateway_dm_ready",
           sessionId: readNonEmptyString(ready?.session_id) ?? null,
@@ -6711,6 +6956,7 @@ async function runDiscordGatewayDmSession(): Promise<void> {
       if (!eventData) {
         return;
       }
+      discordRuntimeHealth.lastInboundSeenAtMs = Date.now();
       void handleDiscordGatewayMessage(eventData).catch((error) => {
         log({
           type: "discord_gateway_dm_event_error",
@@ -6720,6 +6966,8 @@ async function runDiscordGatewayDmSession(): Promise<void> {
     });
 
     ws.on("error", (error) => {
+      discordRuntimeHealth.gatewayLastErrorAtMs = Date.now();
+      discordRuntimeHealth.gatewayLastError = errorString(error);
       log({
         type: "discord_gateway_dm_socket_error",
         error: String(error),
@@ -6727,6 +6975,7 @@ async function runDiscordGatewayDmSession(): Promise<void> {
     });
 
     ws.on("close", (code, reason) => {
+      discordRuntimeHealth.gatewayLastCloseAtMs = Date.now();
       log({
         type: "discord_gateway_dm_close",
         code,
@@ -6741,6 +6990,7 @@ async function runDiscordGatewayDmLoop() {
   if (!discordInboundEnabled || (!discordGatewayDmEnabled && !discordGatewayGuildEnabled)) {
     return;
   }
+  discordRuntimeHealth.gatewayLoopStartedAtMs = Date.now();
 
   let running = true;
   process.on("SIGINT", () => {
@@ -6759,6 +7009,8 @@ async function runDiscordGatewayDmLoop() {
     try {
       await runDiscordGatewayDmSession();
     } catch (error) {
+      discordRuntimeHealth.gatewayLastErrorAtMs = Date.now();
+      discordRuntimeHealth.gatewayLastError = errorString(error);
       log({
         type: "discord_gateway_dm_loop_error",
         error: String(error),
@@ -7037,14 +7289,24 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     return;
   }
 
+  const messageId = readNonEmptyString(message.id) ?? `wa:${Date.now()}:${randomUUID()}`;
+  const traceId = createInboundTraceId({
+    channel: "whatsapp",
+    tenantId: binding.tenantId,
+    routeKey: binding.routeKey,
+    messageId,
+  });
+
   const target = resolveTenantInboundTarget(binding.tenantId);
   if (!target) {
+    metrics.recordInboundEvent("whatsapp", "dropped");
     log({
       type: "whatsapp_inbound_drop_no_target",
       tenantId: binding.tenantId,
       routeKey: binding.routeKey,
       accountId,
       chatJid,
+      traceId,
     });
     throw new Error(`whatsapp inbound target missing for tenant ${binding.tenantId}`);
   }
@@ -7054,12 +7316,12 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     return;
   }
 
-  const messageId = readNonEmptyString(message.id) ?? `wa:${Date.now()}:${randomUUID()}`;
   const fromId =
     readNonEmptyString(message.senderE164) ??
     readNonEmptyString(message.senderJid) ??
     readNonEmptyString(message.from) ??
     "unknown";
+  metrics.recordActiveUser("whatsapp", fromId);
   const timestampMs =
     typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
       ? Math.trunc(message.timestamp)
@@ -7128,19 +7390,31 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     openclawId: binding.tenantId,
   };
 
-  const response = await fetch(target.url, {
-    method: "POST",
-    headers: {
-      ...(await buildInboundAuthHeaders(target)),
-      "Content-Type": "application/json; charset=utf-8",
-    },
-    body: JSON.stringify(payloadWithIdentity),
-    signal: AbortSignal.timeout(target.timeoutMs),
-  });
+  const forwardStartedAtMs = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(target.url, {
+      method: "POST",
+      headers: {
+        ...(await buildInboundAuthHeaders(target, traceId)),
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(payloadWithIdentity),
+      signal: AbortSignal.timeout(target.timeoutMs),
+    });
+  } catch (error) {
+    metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
+    metrics.recordInboundEvent("whatsapp", "error");
+    throw error;
+  }
   if (!response.ok) {
+    metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
+    metrics.recordInboundEvent("whatsapp", "error");
     const bodyText = await response.text();
     throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
   }
+  metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
+  metrics.recordInboundEvent("whatsapp", "forwarded");
 
   log({
     type: "whatsapp_inbound_forwarded",
@@ -7149,6 +7423,7 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     messageId,
     accountId,
     chatJid,
+    traceId,
   });
 }
 
@@ -7269,12 +7544,15 @@ async function runTelegramInboundLoop() {
   if (!telegramInboundEnabled) {
     return;
   }
+  telegramRuntimeHealth.loopStartedAtMs = Date.now();
 
   try {
     await bootstrapTelegramOffsetIfNeeded();
     clearTelegramPollConflictHealth();
   } catch (error) {
     updateTelegramPollConflictHealth(error);
+    telegramRuntimeHealth.lastPollErrorAtMs = Date.now();
+    telegramRuntimeHealth.lastPollError = errorString(error);
     log({ type: "telegram_inbound_bootstrap_error", error: String(error) });
   }
 
@@ -7287,7 +7565,8 @@ async function runTelegramInboundLoop() {
     100,
     Number(process.env.MUX_TELEGRAM_BG_RETRY_INTERVAL_MS) || 30_000,
   );
-  const telegramBgRetryCount = new Map<string, number>();
+  telegramBgRetryCount.clear();
+  telegramBgRetryQueuedAtMs.clear();
 
   let running = true;
   process.on("SIGINT", () => {
@@ -7302,6 +7581,9 @@ async function runTelegramInboundLoop() {
       const offset = resolveStoredTelegramOffset() + 1;
       const updates = await fetchTelegramUpdates(offset);
       clearTelegramPollConflictHealth();
+      telegramRuntimeHealth.lastPollSuccessAtMs = Date.now();
+      telegramRuntimeHealth.lastPollErrorAtMs = null;
+      telegramRuntimeHealth.lastPollError = null;
       for (const update of updates) {
         const updateId =
           typeof update.update_id === "number" && Number.isFinite(update.update_id)
@@ -7310,6 +7592,7 @@ async function runTelegramInboundLoop() {
         if (updateId <= 0) {
           continue;
         }
+        telegramRuntimeHealth.lastInboundSeenAtMs = Date.now();
         try {
           await forwardTelegramUpdateToTenant(update);
         } catch (error) {
@@ -7324,6 +7607,10 @@ async function runTelegramInboundLoop() {
           if (tenantId) {
             const pending = telegramBgRetryCount.get(tenantId) ?? 0;
             if (pending < TELEGRAM_BG_RETRY_MAX_PER_TENANT) {
+              metrics.recordRetryScheduled("telegram");
+              if (pending <= 0) {
+                telegramBgRetryQueuedAtMs.set(tenantId, Date.now());
+              }
               telegramBgRetryCount.set(tenantId, pending + 1);
               const capturedUpdate = update;
               const capturedId = updateId;
@@ -7353,7 +7640,13 @@ async function runTelegramInboundLoop() {
                     }
                   }
                 } finally {
-                  telegramBgRetryCount.set(tenantId, (telegramBgRetryCount.get(tenantId) ?? 1) - 1);
+                  const nextPending = (telegramBgRetryCount.get(tenantId) ?? 1) - 1;
+                  if (nextPending <= 0) {
+                    telegramBgRetryCount.delete(tenantId);
+                    telegramBgRetryQueuedAtMs.delete(tenantId);
+                  } else {
+                    telegramBgRetryCount.set(tenantId, nextPending);
+                  }
                 }
               })();
             } else {
@@ -7367,6 +7660,8 @@ async function runTelegramInboundLoop() {
       }
     } catch (error) {
       updateTelegramPollConflictHealth(error);
+      telegramRuntimeHealth.lastPollErrorAtMs = Date.now();
+      telegramRuntimeHealth.lastPollError = errorString(error);
       log({ type: "telegram_inbound_poll_error", error: String(error) });
       await new Promise((resolveSleep) =>
         setTimeout(resolveSleep, Math.max(100, Math.trunc(telegramPollRetryMs))),
@@ -7398,6 +7693,32 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && pathname === "/health/live") {
+      sendJson(res, 200, { ok: true, live: true, ts: Date.now() });
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/health/ready") {
+      const readiness = buildReadinessReport(Date.now());
+      sendJson(res, readiness.ready ? 200 : 503, {
+        ok: readiness.ready,
+        ready: readiness.ready,
+        channels: readiness.channels,
+        queues: readiness.queues,
+        degraded: readiness.degraded,
+      });
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/metrics") {
+      const body = await renderMetricsPayload();
+      res.writeHead(200, {
+        "content-type": "text/plain; version=0.0.4; charset=utf-8",
+      });
+      res.end(body);
+      return;
+    }
+
     if (req.method === "GET" && pathname === "/.well-known/jwks.json") {
       sendJson(res, 200, runtimeJwtSigner.jwks());
       return;
@@ -7409,6 +7730,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (!isRegisterAuthorized(req)) {
+        metrics.recordAuthFailure("register");
+        log({ type: "auth_unauthorized", surface: "register" });
         sendJson(res, 401, { ok: false, error: "unauthorized" });
         return;
       }
@@ -7428,10 +7751,31 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (!isAdminAuthorized(req)) {
+        metrics.recordAuthFailure("admin");
+        log({ type: "auth_unauthorized", surface: "admin" });
         sendJson(res, 401, { ok: false, error: "unauthorized" });
         return;
       }
       sendJson(res, 200, { ok: true, whatsapp: getWhatsAppCredentialHealth() });
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/v1/admin/observability/snapshot") {
+      if (!muxAdminToken) {
+        sendJson(res, 404, { ok: false, error: "not found" });
+        return;
+      }
+      if (!isAdminAuthorized(req)) {
+        metrics.recordAuthFailure("admin");
+        log({ type: "auth_unauthorized", surface: "admin" });
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      const tenantId = readNonEmptyString(requestUrl.searchParams.get("tenantId"));
+      const snapshot = renderObservabilitySnapshot({
+        tenantId: tenantId ?? undefined,
+      });
+      sendJson(res, 200, { ok: true, ...snapshot });
       return;
     }
 
@@ -7441,6 +7785,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (!isAdminAuthorized(req)) {
+        metrics.recordAuthFailure("admin");
+        log({ type: "auth_unauthorized", surface: "admin" });
         sendJson(res, 401, { ok: false, error: "unauthorized" });
         return;
       }
@@ -7493,6 +7839,8 @@ const server = http.createServer(async (req, res) => {
 
     const tenant = await resolveTenantIdentity(req);
     if (!tenant) {
+      metrics.recordAuthFailure("tenant");
+      log({ type: "auth_unauthorized", surface: "tenant" });
       sendJson(res, 401, { ok: false, error: "unauthorized" });
       return;
     }
@@ -7543,15 +7891,24 @@ const server = http.createServer(async (req, res) => {
       }
       if (tenant.authKind === "runtime-jwt") {
         if (!payloadOpenClawId || payloadOpenClawId !== tenant.id) {
+          metrics.recordAuthFailure("tenant");
+          log({ type: "auth_unauthorized", surface: "tenant", reason: "openclaw_id_mismatch" });
           sendJson(res, 401, { ok: false, error: "openclawId mismatch" });
           return;
         }
       }
+      const typingStartedAtMs = Date.now();
       const typingResult = await runOutboundAction({
         tenant,
         channel,
         sessionKey,
         action: "typing",
+      });
+      metrics.recordOutboundRequest({
+        channel,
+        method: "typing",
+        statusCode: typingResult.statusCode,
+        durationMs: Date.now() - typingStartedAtMs,
       });
       res.writeHead(typingResult.statusCode, { "content-type": "application/json; charset=utf-8" });
       res.end(typingResult.bodyText);
@@ -7728,6 +8085,8 @@ const server = http.createServer(async (req, res) => {
 
       if (tenant.authKind === "runtime-jwt") {
         if (!payloadOpenClawId || payloadOpenClawId !== tenant.id) {
+          metrics.recordAuthFailure("tenant");
+          log({ type: "auth_unauthorized", surface: "tenant", reason: "openclaw_id_mismatch" });
           return {
             statusCode: 401,
             bodyText: JSON.stringify({
@@ -8132,7 +8491,27 @@ const server = http.createServer(async (req, res) => {
     };
 
     const inflightKey = idempotencyKey ? resolveInflightKey(tenant.id, idempotencyKey) : undefined;
-    const inflightEntry: InflightEntry = { fingerprint, promise: runSend() };
+    const outboundChannel = normalizeChannel(payload.channel);
+    const outboundOperation = readOutboundOperation(payload);
+    const outboundMethod =
+      outboundOperation.op === "action"
+        ? outboundOperation.action === "typing"
+          ? "typing"
+          : "action"
+        : "send";
+    const outboundStartedAtMs = Date.now();
+    const inflightEntry: InflightEntry = {
+      fingerprint,
+      promise: runSend().then((result) => {
+        metrics.recordOutboundRequest({
+          channel: outboundChannel,
+          method: outboundMethod,
+          statusCode: result.statusCode,
+          durationMs: Date.now() - outboundStartedAtMs,
+        });
+        return result;
+      }),
+    };
     if (inflightKey) {
       idempotencyInflight.set(inflightKey, inflightEntry);
     }

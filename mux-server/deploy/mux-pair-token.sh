@@ -6,12 +6,12 @@
 #   --mux-cvm <name>
 #
 # Usage:
-#   ./phala-deploy/mux-pair-token.sh \
+#   ./mux-server/deploy/mux-pair-token.sh \
 #     --openclaw-cvm openclaw-dev \
 #     --mux-cvm openclaw-mux-dev \
 #     telegram
 #
-#   ./phala-deploy/mux-pair-token.sh \
+#   ./mux-server/deploy/mux-pair-token.sh \
 #     --openclaw-cvm openclaw-dev \
 #     --mux-cvm openclaw-mux-dev \
 #     telegram agent:main:main

@@ -8,5 +8,8 @@
     "start": "node --import tsx src/server.ts",
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "prom-client": "^15.1.3"
   }
 }

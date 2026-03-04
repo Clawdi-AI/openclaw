@@ -11,7 +11,7 @@ Do not run both services in one CVM.
 
 1. Keep roles separate:
    - OpenClaw CVM uses `phala-deploy/docker-compose.yml`
-   - mux CVM uses `phala-deploy/mux-server-compose.yml`
+   - mux CVM deploy/update is documented in `mux-server/deploy/README.md`
 2. Keep images digest-pinned in compose.
 3. `MUX_REGISTER_KEY` must match OpenClaw `gateway.http.endpoints.mux.registerKey`.
 4. OpenClaw must have `gateway.http.endpoints.mux.inboundUrl` set to a public URL reachable by mux.
@@ -22,8 +22,7 @@ Do not run both services in one CVM.
 ## Required script args
 
 - `deploy-openclaw.sh`: requires both `--openclaw-cvm <name>` and `--mux-cvm <name>`
-- `deploy-mux.sh`: requires `--mux-cvm <name>`; `--openclaw-cvm <name>` is required when smoke tests run (default and `--test-only`), optional with `--skip-test`
-- `mux-pair-token.sh`: requires both `--openclaw-cvm <name>` and `--mux-cvm <name>`
+- Mux script args and usage: `mux-server/deploy/README.md`
 
 ## Manual env-file flow
 
@@ -46,17 +45,9 @@ EOF
 chmod 600 /tmp/openclaw-phala-deploy.env
 ```
 
-Create mux deploy env (example):
+Mux deploy env and proxy access-control setup are documented in:
 
-```bash
-cat >/tmp/mux-phala-deploy.env <<'EOF'
-MUX_REGISTER_KEY=replace-with-shared-register-key
-MUX_ADMIN_TOKEN=replace-with-mux-admin-token
-TELEGRAM_BOT_TOKEN=replace-with-telegram-token
-DISCORD_BOT_TOKEN=replace-with-discord-token
-EOF
-chmod 600 /tmp/mux-phala-deploy.env
-```
+- `mux-server/deploy/README.md`
 
 Deploy:
 
@@ -68,21 +59,12 @@ phala deploy \
   -e /tmp/openclaw-phala-deploy.env
 
 # mux-server
-phala deploy \
-  --cvm-id <mux-cvm-name> \
-  -c phala-deploy/mux-server-compose.yml \
-  -e /tmp/mux-phala-deploy.env
+# See mux-server/deploy/README.md
 ```
 
-Generate pairing token:
+Pairing-token issuance and admin API access are documented in:
 
-```bash
-export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
-./phala-deploy/mux-pair-token.sh \
-  --openclaw-cvm openclaw-dev \
-  --mux-cvm openclaw-mux-dev \
-  telegram agent:main:main
-```
+- `mux-server/deploy/README.md`
 
 ## Update flow with a local env file
 
@@ -158,10 +140,10 @@ Starting OpenClaw gateway...
 
 ```bash
 bash phala-deploy/deploy-openclaw.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --dry-run
-bash phala-deploy/deploy-mux.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --dry-run
 ```
 
-This validates required env vars and prints the deploy commands without executing them.
+This validates required env vars and prints the deploy command without executing it.
+For mux preflight, see `mux-server/deploy/README.md`.
 
 ### 2. Build and pin images
 
@@ -169,12 +151,6 @@ OpenClaw:
 
 ```bash
 ./phala-deploy/build-pin-openclaw.sh
-```
-
-mux-server (only when mux changed):
-
-```bash
-./phala-deploy/build-pin-mux.sh
 ```
 
 ### 3. Deploy
@@ -194,16 +170,9 @@ bash phala-deploy/deploy-openclaw.sh \
   --openclaw-cvm openclaw-dev \
   --mux-cvm openclaw-mux-dev
 
-# Deploy mux-server (set env vars first)
-export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
-export TELEGRAM_BOT_TOKEN=replace-with-telegram-token
-export DISCORD_BOT_TOKEN=replace-with-discord-token
-bash phala-deploy/deploy-mux.sh \
-  --openclaw-cvm openclaw-dev \
-  --mux-cvm openclaw-mux-dev
 ```
 
-Each script deploys its CVM, waits for health, and runs smoke tests. They can be run independently.
+For mux-server deploy/build/pairing flows, see `mux-server/deploy/README.md`.
 
 ### 4. Verify runtime
 
@@ -239,81 +208,13 @@ Transient behavior note:
   5. If manual recovery is needed, use compose + env-file (not `docker start`):
      `phala ssh <openclaw-cvm-name> -- docker compose -f /dstack/docker-compose.yaml --env-file /dstack/.host-shared/.decrypted-env up -d`
 
-### 5. Pairing smoke check
+### 5. Mux-server ops
 
-Pairing token generation is target-driven:
+All mux-server deployment, pairing-token, and troubleshooting procedures are maintained in:
 
-- use OpenClaw session target (`sessionKey`) to choose where the conversation lands
-- do not use inbound sender identity to select OpenClaw target
-
-Issue pairing token (admin token):
-
-```bash
-export MUX_ADMIN_TOKEN=replace-with-mux-admin-token
-./phala-deploy/mux-pair-token.sh \
-  --openclaw-cvm openclaw-dev \
-  --mux-cvm openclaw-mux-dev \
-  telegram agent:main:main
-```
-
-## Fast fixes for known failures
-
-### Telegram/Discord inbound not working
-
-Cause: missing `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` in mux deploy env.
-
-Fix:
-
-1. Ensure `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` are exported.
-2. Re-run: `bash phala-deploy/deploy-mux.sh --openclaw-cvm <openclaw-cvm-name> --mux-cvm <mux-cvm-name>`
-
-### Telegram `/bot_status` gets no response, mux logs show `getUpdates failed (409)`
-
-Cause: another poller is using the same Telegram bot token (most often a local `phala-deploy/local-mux-e2e` stack).
-
-How to confirm:
-
-1. Check mux health details:
-   - `curl -fsS https://<mux-app-id>-18891.<gateway-domain>/health | jq .`
-   - degraded state shows `telegramInbound.code = "poll_conflict"`.
-2. Check logs:
-   - `phala logs mux-server --cvm-id <mux-cvm-name> --tail 120`
-
-Fix:
-
-1. Stop the competing poller (local e2e example):
-   - `./phala-deploy/local-mux-e2e/scripts/down.sh`
-2. Ensure only one long-poller runs for this bot token.
-3. Re-check logs/health to confirm conflict is gone.
-
-### mux healthy but no messages forwarded to OpenClaw
-
-Cause: either no pairing binding yet, or the OpenClaw instance has not registered a reachable `inboundUrl`.
-
-Fix:
-
-1. Verify OpenClaw mux config (OpenClaw CVM):
-   - `gateway.http.endpoints.mux.baseUrl`
-   - `gateway.http.endpoints.mux.registerKey`
-   - `gateway.http.endpoints.mux.inboundUrl` (must be public/reachable by mux)
-2. Generate a fresh pairing token and pair again:
-   - `./phala-deploy/mux-pair-token.sh --openclaw-cvm <openclaw-cvm-name> --mux-cvm <mux-cvm-name> telegram agent:main:main`
-3. Check mux logs for `instance_registered` and `*_inbound_forwarded` / `*_inbound_retry_deferred`.
-
-### mux startup error: `UNIQUE constraint failed: tenants.api_key_hash`
-
-Cause: stale mux DB tenant rows conflict with current bootstrap seed.
-
-Fix:
-
-1. SSH to the mux CVM host and clear mux state volume:
-   - `phala ssh <mux-cvm-name> -- docker rm -f mux-server || true`
-   - `phala ssh <mux-cvm-name> -- docker volume rm -f mux_data || true`
-2. Re-run: `bash phala-deploy/deploy-mux.sh --openclaw-cvm <openclaw-cvm-name> --mux-cvm <mux-cvm-name>`
+- `mux-server/deploy/README.md`
 
 ## Related files
 
 - `phala-deploy/deploy-openclaw.sh`
-- `phala-deploy/deploy-mux.sh`
-- `phala-deploy/mux-pair-token.sh`
-- `phala-deploy/mux-server-compose.yml`
+- `mux-server/deploy/README.md`

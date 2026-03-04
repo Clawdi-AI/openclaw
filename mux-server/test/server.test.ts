@@ -271,6 +271,12 @@ function expectInboundJwtAuth(
   expect(toSafeString(payload.scope)).toContain("mux:inbound");
 }
 
+function expectMuxTraceIdHeader(value: unknown) {
+  const traceId = readHeaderString(value);
+  expect(traceId).toBeTruthy();
+  expect(traceId).toMatch(/^mux_[a-f0-9]{20}$/);
+}
+
 async function waitForCondition(
   condition: () => boolean,
   timeoutMs: number,
@@ -476,6 +482,65 @@ describe("mux server", () => {
     });
     expect(typeof telegramInbound?.lastConflictAtMs).toBe("number");
     expect(JSON.stringify(telegramInbound?.lastError ?? "")).toContain("getUpdates failed (409)");
+
+    const readiness = await fetch(`http://127.0.0.1:${server.port}/health/ready`);
+    expect(readiness.status).toBe(503);
+    const readinessBody = (await readiness.json()) as Record<string, unknown>;
+    const channels = readinessBody.channels as Record<string, unknown> | undefined;
+    const telegram = channels?.telegram as Record<string, unknown> | undefined;
+    expect(readinessBody.ok).toBe(false);
+    expect(telegram?.ready).toBe(false);
+    expect(telegram?.reason).toBe("poll_conflict");
+  });
+
+  test("metrics endpoint exposes prom counters", async () => {
+    const server = await startServer({
+      extraEnv: {
+        MUX_REGISTER_KEY: "register-key-1",
+        TELEGRAM_BOT_TOKEN: "",
+        DISCORD_BOT_TOKEN: "",
+      },
+    });
+
+    const unauthorizedRegister = await fetch(
+      `http://127.0.0.1:${server.port}/v1/instances/register`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          openclawId: "oc-1",
+          inboundUrl: "http://127.0.0.1:18789/v1/mux/inbound",
+        }),
+      },
+    );
+    expect(unauthorizedRegister.status).toBe(401);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        text: "hello",
+      }),
+    });
+    expect(outbound.status).toBe(403);
+
+    const metrics = await fetch(`http://127.0.0.1:${server.port}/metrics`);
+    expect(metrics.status).toBe(200);
+    expect(metrics.headers.get("content-type")).toContain("text/plain");
+    const body = await metrics.text();
+    expect(body).toContain('mux_auth_failures_total{surface="register"} 1');
+    expect(body).toContain(
+      'mux_outbound_requests_total{channel="telegram",method="send",outcome="error"} 1',
+    );
+    expect(body).toContain('mux_queue_depth{channel="whatsapp"} 0');
+    expect(body).toContain('mux_active_users{channel="telegram",window="5m"} 0');
   });
 
   test("instance register endpoint requires shared register key and returns runtime jwt metadata", async () => {
@@ -777,11 +842,13 @@ describe("mux server", () => {
     const inboundARequests: Array<{
       authorization: string | undefined;
       openclawIdHeader: string | undefined;
+      traceIdHeader: string | undefined;
       payload: Record<string, unknown>;
     }> = [];
     const inboundBRequests: Array<{
       authorization: string | undefined;
       openclawIdHeader: string | undefined;
+      traceIdHeader: string | undefined;
       payload: Record<string, unknown>;
     }> = [];
 
@@ -796,7 +863,11 @@ describe("mux server", () => {
         typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
       const openclawIdHeader =
         typeof req.headers["x-openclaw-id"] === "string" ? req.headers["x-openclaw-id"] : undefined;
-      inboundARequests.push({ authorization, openclawIdHeader, payload });
+      const traceIdHeader =
+        typeof req.headers["x-mux-trace-id"] === "string"
+          ? req.headers["x-mux-trace-id"]
+          : undefined;
+      inboundARequests.push({ authorization, openclawIdHeader, traceIdHeader, payload });
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -812,7 +883,11 @@ describe("mux server", () => {
         typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
       const openclawIdHeader =
         typeof req.headers["x-openclaw-id"] === "string" ? req.headers["x-openclaw-id"] : undefined;
-      inboundBRequests.push({ authorization, openclawIdHeader, payload });
+      const traceIdHeader =
+        typeof req.headers["x-mux-trace-id"] === "string"
+          ? req.headers["x-mux-trace-id"]
+          : undefined;
+      inboundBRequests.push({ authorization, openclawIdHeader, traceIdHeader, payload });
       res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -916,6 +991,7 @@ describe("mux server", () => {
       },
       "tenant-a",
     );
+    expectMuxTraceIdHeader(inboundARequests[0]?.traceIdHeader);
     expect(inboundARequests[0]?.payload.body).toBe("first target");
 
     const registeredB = await registerInstance({
@@ -940,6 +1016,7 @@ describe("mux server", () => {
       },
       "tenant-a",
     );
+    expectMuxTraceIdHeader(inboundBRequests[0]?.traceIdHeader);
     expect(inboundBRequests[0]?.payload.body).toBe("second target");
     expect(inboundARequests.length).toBe(1);
   }, 20_000);
@@ -2401,8 +2478,8 @@ describe("mux server", () => {
         MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
         MUX_TELEGRAM_POLL_RETRY_MS: "50",
         MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
-        // Short retry interval for test speed
-        MUX_TELEGRAM_BG_RETRY_INTERVAL_MS: "100",
+        // Short retry interval while leaving enough time to observe pending backlog.
+        MUX_TELEGRAM_BG_RETRY_INTERVAL_MS: "300",
       },
     });
 
@@ -2414,6 +2491,34 @@ describe("mux server", () => {
     });
     expect(claim.status).toBe(200);
     releaseUpdates = true;
+
+    await waitForCondition(
+      () => inboundAttempts.length >= 1,
+      4_000,
+      "timed out waiting for first failed telegram forward attempt",
+    );
+
+    let observedRetryBacklog = false;
+    const backlogDeadline = Date.now() + 4_000;
+    while (Date.now() < backlogDeadline) {
+      const readiness = await fetch(`http://127.0.0.1:${server.port}/health/ready`);
+      const body = (await readiness.json()) as {
+        queues?: { depth?: { telegram?: unknown }; oldestQueuedAgeMs?: { telegram?: unknown } };
+      };
+      const depth = Number(body.queues?.depth?.telegram);
+      if (Number.isFinite(depth) && depth >= 1) {
+        observedRetryBacklog = true;
+        expect(typeof body.queues?.oldestQueuedAgeMs?.telegram).toBe("number");
+        break;
+      }
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 50));
+    }
+    expect(observedRetryBacklog).toBe(true);
+
+    const metrics = await fetch(`http://127.0.0.1:${server.port}/metrics`);
+    expect(metrics.status).toBe(200);
+    const metricsBody = await metrics.text();
+    expect(metricsBody).toContain('mux_queue_depth{channel="telegram"}');
 
     // The poller should advance the offset immediately (to 462) even though
     // the first forward fails. The background retry delivers the message.

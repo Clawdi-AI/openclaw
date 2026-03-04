@@ -3,12 +3,14 @@
 #
 # Required args:
 #   --mux-cvm <name>
+#   --compose-file <path>   (optional, default: mux-server/deploy/docker-compose.yml)
 #
 # Required for smoke tests (default and --test-only):
 #   --openclaw-cvm <name>
 #
 # Required env vars:
 #   MUX_REGISTER_KEY MUX_ADMIN_TOKEN TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN
+#   MUX_PROXY_PROMETHEUS_PASSWORD_HASH (only when compose contains metrics proxy auth)
 # Accepted aliases:
 #   TELEGRAM_BOT_TOKEN_PROD -> TELEGRAM_BOT_TOKEN
 #   DISCORD_BOT_TOKEN_PROD  -> DISCORD_BOT_TOKEN
@@ -16,13 +18,19 @@
 # Usage:
 #   MUX_REGISTER_KEY=... MUX_ADMIN_TOKEN=... \
 #     TELEGRAM_BOT_TOKEN=... DISCORD_BOT_TOKEN=... \
-#     bash phala-deploy/deploy-mux.sh \
+#     bash mux-server/deploy/deploy-mux.sh \
 #       --openclaw-cvm openclaw-dev \
 #       --mux-cvm openclaw-mux-dev
 #
-#   bash phala-deploy/deploy-mux.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --dry-run
-#   bash phala-deploy/deploy-mux.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --skip-test
-#   bash phala-deploy/deploy-mux.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --test-only
+#   # Production compose with /metrics basic auth:
+#   MUX_PROXY_PROMETHEUS_PASSWORD_HASH='$2y$05$replace.with.bcrypt.hash' \
+#   bash mux-server/deploy/deploy-mux.sh \
+#     --openclaw-cvm openclaw-dev \
+#     --mux-cvm openclaw-mux-dev
+#
+#   bash mux-server/deploy/deploy-mux.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --dry-run
+#   bash mux-server/deploy/deploy-mux.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --skip-test
+#   bash mux-server/deploy/deploy-mux.sh --openclaw-cvm openclaw-dev --mux-cvm openclaw-mux-dev --test-only
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,8 +49,9 @@ OPENCLAW_GATEWAY_DOMAIN=""
 MUX_APP_ID=""
 MUX_GATEWAY_DOMAIN=""
 
-COMPOSE_FILE="${SCRIPT_DIR}/mux-server-compose.yml"
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 DEPLOY_ENV_FILE="/tmp/mux-phala-deploy.env"
+NEEDS_PROXY_CREDS=0
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -80,6 +89,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)      DRY_RUN=1; shift ;;
     --skip-test)    SKIP_TEST=1; shift ;;
     --test-only)    TEST_ONLY=1; shift ;;
+    --compose-file) COMPOSE_FILE="${2:?}"; shift 2 ;;
     --timeout)      HEALTH_TIMEOUT="${2:?}"; shift 2 ;;
     -h|--help)
       sed -n '2,/^[^#]/{ /^#/s/^# \?//p }' "$0"
@@ -107,6 +117,11 @@ fi
 require_cmd phala
 require_cmd curl
 require_cmd node
+
+[[ -f "$COMPOSE_FILE" ]] || die "compose file not found: $COMPOSE_FILE"
+if grep -q "MUX_PROXY_PROMETHEUS_PASSWORD_HASH" "$COMPOSE_FILE"; then
+  NEEDS_PROXY_CREDS=1
+fi
 
 # Normalize optional aliases so callers can pass either naming style.
 map_env_alias TELEGRAM_BOT_TOKEN TELEGRAM_BOT_TOKEN_PROD
@@ -157,6 +172,13 @@ preflight_secrets() {
       missing+=("$key")
     fi
   done
+  if [[ "$NEEDS_PROXY_CREDS" -eq 1 ]]; then
+    for key in MUX_PROXY_PROMETHEUS_PASSWORD_HASH; do
+      if [[ -z "${!key:-}" ]]; then
+        missing+=("$key")
+      fi
+    done
+  fi
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     die "missing required env vars: ${missing[*]}"
@@ -177,6 +199,11 @@ MUX_ADMIN_TOKEN=${MUX_ADMIN_TOKEN}
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
 EOF_ENV
+  if [[ "$NEEDS_PROXY_CREDS" -eq 1 ]]; then
+    cat >>"$DEPLOY_ENV_FILE" <<EOF_PROXY
+MUX_PROXY_PROMETHEUS_PASSWORD_HASH=${MUX_PROXY_PROMETHEUS_PASSWORD_HASH}
+EOF_PROXY
+  fi
   chmod 600 "$DEPLOY_ENV_FILE"
 
   if (( DRY_RUN )); then
