@@ -165,6 +165,8 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
     },
     threading: {
       resolveReplyToMode: ({ cfg }) => cfg.channels?.telegram?.replyToMode ?? "off",
+      // Telegram default in off mode should stay in-thread without hard-replying to each message.
+      allowExplicitReplyTagsWhenOff: false,
       buildToolContext: ({ context, hasRepliedRef }) => {
         const threadId = context.MessageThreadId ?? context.ReplyToId;
         return {

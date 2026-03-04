@@ -14,6 +14,7 @@ import type { CommandArgs } from "../auto-reply/commands-registry.types.js";
 import { dispatchInboundMessage } from "../auto-reply/dispatch.js";
 import { dispatchReplyWithBufferedBlockDispatcher } from "../auto-reply/reply/provider-dispatcher.js";
 import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
+import { resolveReplyToMode } from "../auto-reply/reply/reply-threading.js";
 import { routeReply } from "../auto-reply/reply/route-reply.js";
 import type { MsgContext } from "../auto-reply/templating.js";
 import { shouldAckReaction, type AckReactionScope } from "../channels/ack-reactions.js";
@@ -47,6 +48,7 @@ import {
 } from "../telegram/callback-actions.js";
 import { createTelegramStreamingDispatch } from "../telegram/draft-stream.js";
 import {
+  buildTelegramThreadReplyParams,
   deleteMessageTelegram,
   editMessageTelegram,
   reactMessageTelegram,
@@ -551,6 +553,16 @@ async function dispatchMuxTelegram(params: {
   const messageThreadId = readTelegramMessageThreadId(
     resolveMuxThreadId(ctx.MessageThreadId, channelData),
   );
+  const replyToMode = resolveReplyToMode(cfg, "telegram", ctx.AccountId, ctx.ChatType);
+  const draftReplyToMessageId = replyToMode !== "off" ? readMuxPositiveInt(messageId) : undefined;
+  const threadReplyParams = buildTelegramThreadReplyParams({
+    messageThreadId,
+    chatType:
+      ctx.ChatType === "direct" || ctx.ChatType === "group" || ctx.ChatType === "unknown"
+        ? ctx.ChatType
+        : "unknown",
+    replyToMessageId: draftReplyToMessageId,
+  });
 
   const mux: MuxTransportOpts = { cfg, sessionKey, accountId: ctx.AccountId };
 
@@ -596,9 +608,8 @@ async function dispatchMuxTelegram(params: {
 
   // Draft stream transport — mirrors direct path (bot-message-dispatch.ts):
   //   • send() and edit() use plain text (no parse_mode) during streaming
-  //   • send() includes reply_parameters pointing to the inbound message
+  //   • send() reuses canonical Telegram thread/reply param builder from send.ts
   //   • finalization editFn uses textMode: "html" (via editMessageTelegram)
-  const inboundMessageId = readMuxPositiveInt(messageId);
   const streaming = createTelegramStreamingDispatch({
     transport: {
       send: async (text) => {
@@ -612,10 +623,7 @@ async function dispatchMuxTelegram(params: {
               method: "sendMessage",
               body: {
                 text,
-                ...(messageThreadId != null ? { message_thread_id: messageThreadId } : {}),
-                ...(inboundMessageId != null
-                  ? { reply_parameters: { message_id: inboundMessageId } }
-                  : {}),
+                ...threadReplyParams,
               },
             },
           },

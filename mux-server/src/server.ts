@@ -318,6 +318,9 @@ type TelegramIncomingMessage = {
   document?: TelegramDocument;
   video?: TelegramVideo;
   animation?: TelegramAnimation;
+  voice?: TelegramVoice;
+  audio?: TelegramAudio;
+  video_note?: TelegramVideoNote;
   from?: { id?: number; username?: string };
   chat?: { id?: number; type?: string; is_forum?: boolean };
   entities?: Array<{ type?: string; offset?: number; length?: number }>;
@@ -355,6 +358,28 @@ type TelegramAnimation = {
   mime_type?: string;
   width?: number;
   height?: number;
+  duration?: number;
+  file_size?: number;
+};
+
+type TelegramVoice = {
+  file_id?: string;
+  mime_type?: string;
+  duration?: number;
+  file_size?: number;
+};
+
+type TelegramAudio = {
+  file_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  duration?: number;
+  file_size?: number;
+};
+
+type TelegramVideoNote = {
+  file_id?: string;
+  length?: number;
   duration?: number;
   file_size?: number;
 };
@@ -2742,7 +2767,14 @@ function hasTelegramMessageContent(message: TelegramIncomingMessage): boolean {
   if (Array.isArray(message.photo) && message.photo.length > 0) {
     return true;
   }
-  return Boolean(message.document || message.video || message.animation);
+  return Boolean(
+    message.document ||
+    message.video ||
+    message.animation ||
+    message.voice ||
+    message.audio ||
+    message.video_note,
+  );
 }
 
 function extractPairingTokenFromText(input: string | null): string | null {
@@ -3014,6 +3046,65 @@ async function extractTelegramInboundMedia(params: {
       width: readPositiveInt(animation?.width),
       height: readPositiveInt(animation?.height),
       durationSec: readPositiveInt(animation?.duration),
+    });
+    media.push(result.summary);
+    if (result.attachment) {
+      attachments.push(result.attachment);
+    }
+  }
+
+  const voice = params.message.voice;
+  const voiceFileId = readNonEmptyString(voice?.file_id);
+  if (voiceFileId) {
+    const result = await resolveTelegramAttachment({
+      updateId: params.updateId,
+      kind: "voice",
+      fileId: voiceFileId,
+      mimeType: readNonEmptyString(voice?.mime_type)?.toLowerCase() ?? "audio/ogg",
+      fileSize: readPositiveInt(voice?.file_size),
+      durationSec: readPositiveInt(voice?.duration),
+    });
+    media.push(result.summary);
+    if (result.attachment) {
+      attachments.push(result.attachment);
+    }
+  }
+
+  const audio = params.message.audio;
+  const audioFileId = readNonEmptyString(audio?.file_id);
+  if (audioFileId) {
+    const audioFileName = readNonEmptyString(audio?.file_name);
+    const result = await resolveTelegramAttachment({
+      updateId: params.updateId,
+      kind: "audio",
+      fileId: audioFileId,
+      fileName: audioFileName ?? undefined,
+      mimeType:
+        readNonEmptyString(audio?.mime_type)?.toLowerCase() ??
+        inferMimeTypeFromPath(audioFileName ?? undefined) ??
+        "audio/mpeg",
+      fileSize: readPositiveInt(audio?.file_size),
+      durationSec: readPositiveInt(audio?.duration),
+    });
+    media.push(result.summary);
+    if (result.attachment) {
+      attachments.push(result.attachment);
+    }
+  }
+
+  const videoNote = params.message.video_note;
+  const videoNoteFileId = readNonEmptyString(videoNote?.file_id);
+  if (videoNoteFileId) {
+    const side = readPositiveInt(videoNote?.length);
+    const result = await resolveTelegramAttachment({
+      updateId: params.updateId,
+      kind: "video_note",
+      fileId: videoNoteFileId,
+      mimeType: "video/mp4",
+      fileSize: readPositiveInt(videoNote?.file_size),
+      width: side,
+      height: side,
+      durationSec: readPositiveInt(videoNote?.duration),
     });
     media.push(result.summary);
     if (result.attachment) {

@@ -20,6 +20,7 @@ type InlineProviderConfig = {
   api?: ModelDefinitionConfig["api"];
   models?: ModelDefinitionConfig[];
 };
+type ProviderConfig = NonNullable<NonNullable<OpenClawConfig["models"]>["providers"]>[string];
 
 export { buildModelAliasLines };
 
@@ -30,6 +31,44 @@ function resolveDefaultModelApiForProvider(
     return "openai-codex-responses";
   }
   return undefined;
+}
+
+function resolveProviderConfigForModel(
+  provider: string,
+  cfg?: OpenClawConfig,
+): ProviderConfig | undefined {
+  const providers = cfg?.models?.providers;
+  if (!providers) {
+    return undefined;
+  }
+  const direct = providers[provider];
+  if (direct) {
+    return direct;
+  }
+  const normalizedProvider = normalizeProviderId(provider);
+  for (const [providerId, providerCfg] of Object.entries(providers)) {
+    if (normalizeProviderId(providerId) === normalizedProvider) {
+      return providerCfg;
+    }
+  }
+  return undefined;
+}
+
+function applyProviderOverridesToModel(model: Model<Api>, provider: string, cfg?: OpenClawConfig) {
+  const providerCfg = resolveProviderConfigForModel(provider, cfg);
+  if (!providerCfg) {
+    return normalizeModelCompat(model);
+  }
+  const baseUrl = providerCfg.baseUrl?.trim();
+  const api = providerCfg.api ?? resolveDefaultModelApiForProvider(provider);
+  if (!baseUrl && !api) {
+    return normalizeModelCompat(model);
+  }
+  return normalizeModelCompat({
+    ...model,
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(api ? { api } : {}),
+  } as Model<Api>);
 }
 
 export function buildInlineProviderModels(
@@ -85,7 +124,7 @@ export function resolveModel(
     if (forwardCompat) {
       return { model: forwardCompat, authStorage, modelRegistry };
     }
-    const providerCfg = providers[provider];
+    const providerCfg = resolveProviderConfigForModel(provider, cfg);
     if (providerCfg || modelId.startsWith("mock-")) {
       const fallbackModel: Model<Api> = normalizeModelCompat({
         id: modelId,
@@ -107,7 +146,7 @@ export function resolveModel(
       modelRegistry,
     };
   }
-  return { model: normalizeModelCompat(model), authStorage, modelRegistry };
+  return { model: applyProviderOverridesToModel(model, provider, cfg), authStorage, modelRegistry };
 }
 
 /**

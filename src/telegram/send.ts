@@ -247,7 +247,7 @@ function isTelegramHtmlParseError(err: unknown): boolean {
   return PARSE_ERR_RE.test(formatErrorMessage(err));
 }
 
-function buildTelegramThreadReplyParams(params: {
+export function buildTelegramThreadReplyParams(params: {
   targetMessageThreadId?: number;
   messageThreadId?: number;
   chatType?: "direct" | "group" | "unknown";
