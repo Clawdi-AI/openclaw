@@ -29,6 +29,13 @@ describe("extractModelDirective", () => {
       expect(result.rawModel).toBe("anthropic/claude-opus-4-5");
     });
 
+    it("extracts /model with telegram-style bot mention", () => {
+      const result = extractModelDirective("/model@openclaw_bot");
+      expect(result.hasDirective).toBe(true);
+      expect(result.rawModel).toBeUndefined();
+      expect(result.cleaned).toBe("");
+    });
+
     it("extracts /model with profile override", () => {
       const result = extractModelDirective("/model gpt-5@myprofile");
       expect(result.hasDirective).toBe(true);
@@ -55,6 +62,15 @@ describe("extractModelDirective", () => {
 
     it("recognizes /gpt: as model directive when alias is configured", () => {
       const result = extractModelDirective("/gpt:", {
+        aliases: ["gpt", "sonnet", "opus"],
+      });
+      expect(result.hasDirective).toBe(true);
+      expect(result.rawModel).toBe("gpt");
+      expect(result.cleaned).toBe("");
+    });
+
+    it("recognizes /gpt@bot as alias directive when alias is configured", () => {
+      const result = extractModelDirective("/gpt@openclaw_bot", {
         aliases: ["gpt", "sonnet", "opus"],
       });
       expect(result.hasDirective).toBe(true);

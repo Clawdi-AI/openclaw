@@ -201,7 +201,7 @@ function createJwtFixture() {
 describe("handleMuxInboundHttpRequest", () => {
   test("authenticates and dispatches inbound payload", async () => {
     const jwtFixture = createJwtFixture();
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         return new Response(JSON.stringify(jwtFixture.jwks), {
@@ -340,7 +340,7 @@ describe("handleMuxInboundHttpRequest", () => {
   test("accepts mux inbound jwt auth and reuses cached jwks", async () => {
     const jwtFixture = createJwtFixture();
     let jwksFetchCount = 0;
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         jwksFetchCount += 1;
@@ -471,7 +471,9 @@ describe("handleMuxInboundHttpRequest", () => {
 
   test("passes through channelData without transport mutation", async () => {
     const jwtFixture = createJwtFixture();
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         return new Response(JSON.stringify(jwtFixture.jwks), {
@@ -638,7 +640,9 @@ describe("handleMuxInboundHttpRequest", () => {
 
   test("sets ctx.MediaPaths and MediaTypes from base64 content attachment", async () => {
     const jwtFixture = createJwtFixture();
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         return new Response(JSON.stringify(jwtFixture.jwks), {
@@ -880,6 +884,246 @@ describe("handleMuxInboundHttpRequest", () => {
 
     await new Promise((resolveSleep) => setTimeout(resolveSleep, 300));
     expect(mocks.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+  });
+
+  test("mux telegram draft stream omits reply_parameters when replyToMode is off", async () => {
+    const jwtFixture = createJwtFixture();
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          replyToMode: "off",
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    mocks.dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(
+      async (params?: unknown) => {
+        const typedParams = params as
+          | {
+              replyOptions?: {
+                onPartialReply?: (payload: { text?: string }) => void | Promise<void>;
+              };
+            }
+          | undefined;
+        await typedParams?.replyOptions?.onPartialReply?.({
+          text: "This draft stream payload is long enough to trigger Telegram preview sending.",
+        });
+        return {
+          queuedFinal: false,
+          counts: { tool: 0, block: 0, final: 0 },
+        };
+      },
+    );
+
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      if (url === "http://mux.local/v1/instances/register") {
+        return new Response(
+          JSON.stringify({
+            runtimeToken: "rt-token-1",
+            expiresAtMs: Date.now() + 86_400_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } },
+        );
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return new Response(JSON.stringify({ messageId: "mx-draft-off-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        to: "telegram:123",
+        from: "telegram:456",
+        body: "hello mux stream",
+        accountId: "default",
+        chatType: "direct",
+        messageId: "789",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    const sendCall = (fetchMock.mock.calls as Array<[string | URL | Request, RequestInit?]>).find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const init = sendCall?.[1];
+    expect(init).toBeDefined();
+    if (!init) {
+      throw new Error("expected fetch init for mux outbound send");
+    }
+    const body = parseJsonRequestBody(init);
+    const raw = body.raw as Record<string, unknown> | undefined;
+    const telegram = raw?.telegram as Record<string, unknown> | undefined;
+    const telegramBody = telegram?.body as Record<string, unknown> | undefined;
+    expect(telegram?.method).toBe("sendMessage");
+    expect(telegramBody?.reply_to_message_id).toBeUndefined();
+    expect(telegramBody?.reply_parameters).toBeUndefined();
+  });
+
+  test("mux telegram draft stream includes reply_parameters when replyToMode is all", async () => {
+    const jwtFixture = createJwtFixture();
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          replyToMode: "all",
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    mocks.dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(
+      async (params?: unknown) => {
+        const typedParams = params as
+          | {
+              replyOptions?: {
+                onPartialReply?: (payload: { text?: string }) => void | Promise<void>;
+              };
+            }
+          | undefined;
+        await typedParams?.replyOptions?.onPartialReply?.({
+          text: "This draft stream payload is long enough to trigger Telegram preview sending.",
+        });
+        return {
+          queuedFinal: false,
+          counts: { tool: 0, block: 0, final: 0 },
+        };
+      },
+    );
+
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      if (url === "http://mux.local/v1/instances/register") {
+        return new Response(
+          JSON.stringify({
+            runtimeToken: "rt-token-1",
+            expiresAtMs: Date.now() + 86_400_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } },
+        );
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return new Response(JSON.stringify({ messageId: "mx-draft-all-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        to: "telegram:123",
+        from: "telegram:456",
+        body: "hello mux stream",
+        accountId: "default",
+        chatType: "direct",
+        messageId: "789",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    const sendCall = (fetchMock.mock.calls as Array<[string | URL | Request, RequestInit?]>).find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const init = sendCall?.[1];
+    expect(init).toBeDefined();
+    if (!init) {
+      throw new Error("expected fetch init for mux outbound send");
+    }
+    const body = parseJsonRequestBody(init);
+    const raw = body.raw as Record<string, unknown> | undefined;
+    const telegram = raw?.telegram as Record<string, unknown> | undefined;
+    const telegramBody = telegram?.body as Record<string, unknown> | undefined;
+    expect(telegram?.method).toBe("sendMessage");
+    expect(telegramBody?.reply_to_message_id).toBe(789);
+    expect(telegramBody?.reply_parameters).toBeUndefined();
   });
 
   test("resolves text alias commands for Telegram argsMenu buttons", async () => {

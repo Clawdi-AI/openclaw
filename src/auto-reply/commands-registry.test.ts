@@ -165,6 +165,13 @@ describe("commands registry", () => {
     );
   });
 
+  it("normalizes telegram-style command mentions when any bot mention is allowed", () => {
+    expect(normalizeCommandBody("/help@otherbot", { allowAnyBotMention: true })).toBe("/help");
+    expect(normalizeCommandBody("/help@otherbot: args", { allowAnyBotMention: true })).toBe(
+      "/help args",
+    );
+  });
+
   it("normalizes dock command aliases", () => {
     expect(normalizeCommandBody("/dock_telegram")).toBe("/dock-telegram");
   });

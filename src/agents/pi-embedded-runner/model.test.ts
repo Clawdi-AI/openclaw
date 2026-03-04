@@ -233,6 +233,39 @@ describe("resolveModel", () => {
     });
   });
 
+  it("applies provider baseUrl override to discovered openai-codex models", () => {
+    mockDiscoveredModel({
+      provider: "openai-codex",
+      modelId: "gpt-5.3-codex",
+      templateModel: {
+        ...OPENAI_CODEX_TEMPLATE_MODEL,
+        id: "gpt-5.3-codex",
+        name: "GPT-5.3 Codex",
+      },
+    });
+
+    const cfg = {
+      models: {
+        providers: {
+          "openai-codex": {
+            baseUrl: "https://proxy.example.com/v1",
+            models: [],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = resolveModel("openai-codex", "gpt-5.3-codex", "/tmp/agent", cfg);
+
+    expect(result.error).toBeUndefined();
+    expect(result.model).toMatchObject({
+      provider: "openai-codex",
+      id: "gpt-5.3-codex",
+      api: "openai-codex-responses",
+      baseUrl: "https://proxy.example.com/v1",
+    });
+  });
+
   it("builds an anthropic forward-compat fallback for claude-opus-4-6", () => {
     mockDiscoveredModel({
       provider: "anthropic",

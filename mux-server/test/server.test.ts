@@ -1319,6 +1319,195 @@ describe("mux server", () => {
     });
   });
 
+  test("telegram outbound raw sendMessage retries without HTML parse_mode on parse errors", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/sendMessage") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        if (telegramRequests.length === 1) {
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: "Bad Request: can't parse entities: Can't find end of the entity",
+            }),
+          );
+          return;
+        }
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9904, chat: { id: -100123 } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-RAW-PARSE",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-RAW-PARSE",
+      sessionKey: "agent:main:telegram:group:-100123:topic:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:telegram:group:-100123:topic:2",
+        raw: {
+          telegram: {
+            method: "sendMessage",
+            body: {
+              text: "/model <provider/model>",
+              parse_mode: "HTML",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "9904",
+      rawPassthrough: true,
+    });
+    expect(telegramRequests).toHaveLength(2);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "-100123",
+      message_thread_id: 2,
+      text: "/model <provider/model>",
+      parse_mode: "HTML",
+    });
+    expect(telegramRequests[1]).toMatchObject({
+      chat_id: "-100123",
+      message_thread_id: 2,
+      text: "/model <provider/model>",
+    });
+    expect(telegramRequests[1]?.parse_mode).toBeUndefined();
+  });
+
+  test("telegram outbound raw editMessageText retries without HTML parse_mode on parse errors", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/editMessageText") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        if (telegramRequests.length === 1) {
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: "Bad Request: can't parse entities: Can't find end of the entity",
+            }),
+          );
+          return;
+        }
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9905, chat: { id: -100123 } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-RAW-EDIT-PARSE",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-RAW-EDIT-PARSE",
+      sessionKey: "agent:main:telegram:group:-100123:topic:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:telegram:group:-100123:topic:2",
+        raw: {
+          telegram: {
+            method: "editMessageText",
+            body: {
+              message_id: 321,
+              text: "/model <provider/model>",
+              parse_mode: "HTML",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "9905",
+      rawPassthrough: true,
+    });
+    expect(telegramRequests).toHaveLength(2);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "-100123",
+      message_id: 321,
+      text: "/model <provider/model>",
+      parse_mode: "HTML",
+    });
+    expect(telegramRequests[0]?.message_thread_id).toBeUndefined();
+    expect(telegramRequests[1]).toMatchObject({
+      chat_id: "-100123",
+      message_id: 321,
+      text: "/model <provider/model>",
+    });
+    expect(telegramRequests[1]?.parse_mode).toBeUndefined();
+    expect(telegramRequests[1]?.message_thread_id).toBeUndefined();
+  });
+
   test("telegram outbound raw editMessageText keeps route lock and skips thread id injection", async () => {
     const telegramRequests: Array<Record<string, unknown>> = [];
     const telegramApi = await startHttpServer(async (req, res) => {
@@ -2697,6 +2886,132 @@ describe("mux server", () => {
         ? (rawTelegram.rawUpdate as Record<string, unknown>)
         : {};
     expect(rawUpdate.update_id).toBe(4901);
+  });
+
+  test("forwards voice-only Telegram updates with attachment payload", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    let releaseUpdates = false;
+    let hasSentUpdate = false;
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/getUpdates") {
+        const body = await readJsonBody(req);
+        const hasOffset = typeof body.offset === "number";
+        const shouldSend = hasOffset && releaseUpdates && !hasSentUpdate;
+        if (shouldSend) {
+          hasSentUpdate = true;
+        }
+        const result = shouldSend
+          ? [
+              {
+                update_id: 4902,
+                message: {
+                  message_id: 9002,
+                  date: 1_700_000_101,
+                  from: { id: 1234 },
+                  chat: { id: 999, type: "private" },
+                  voice: {
+                    file_id: "voice-file-id",
+                    mime_type: "audio/ogg",
+                    duration: 7,
+                    file_size: 2048,
+                  },
+                },
+              },
+            ]
+          : [];
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-IN-VOICE-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:999",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+        MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+        MUX_TELEGRAM_POLL_RETRY_MS: "50",
+        MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-IN-VOICE-1",
+      sessionKey: "agent:main:telegram:direct:999",
+    });
+    expect(claim.status).toBe(200);
+
+    releaseUpdates = true;
+    await waitForCondition(
+      () => inboundRequests.length > 0,
+      5_000,
+      "timed out waiting for voice-only inbound forward",
+    );
+
+    expect(inboundRequests).toHaveLength(1);
+    const payload = inboundRequests[0];
+    expect(payload.channel).toBe("telegram");
+    expect(payload.sessionKey).toBe("agent:main:telegram:direct:999");
+    expect(payload.body).toBe("");
+    expect(payload.messageId).toBe("9002");
+
+    const attachments = Array.isArray(payload.attachments)
+      ? (payload.attachments as Array<Record<string, unknown>>)
+      : [];
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]?.type).toBe("audio");
+    expect(attachments[0]?.mimeType).toBe("audio/ogg");
+    expect(typeof attachments[0]?.url).toBe("string");
+    expect(String(attachments[0]?.url)).toContain("/v1/mux/files/telegram?fileId=voice-file-id");
+
+    const channelData =
+      payload.channelData && typeof payload.channelData === "object"
+        ? (payload.channelData as Record<string, unknown>)
+        : {};
+    const telegramData =
+      channelData.telegram && typeof channelData.telegram === "object"
+        ? (channelData.telegram as Record<string, unknown>)
+        : {};
+    const media = Array.isArray(telegramData.media)
+      ? (telegramData.media as Array<Record<string, unknown>>)
+      : [];
+    expect(media).toHaveLength(1);
+    expect(media[0]?.kind).toBe("voice");
+    expect(media[0]?.fileId).toBe("voice-file-id");
+    expect(media[0]?.mimeType).toBe("audio/ogg");
+    expect(media[0]?.durationSec).toBe(7);
   });
 
   test("forwards inbound Discord DM messages with raw payload and media attachment", async () => {

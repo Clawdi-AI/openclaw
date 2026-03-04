@@ -381,11 +381,15 @@ export function normalizeCommandBody(raw: string, options?: CommandNormalizeOpti
     : singleLine;
 
   const normalizedBotUsername = options?.botUsername?.trim().toLowerCase();
-  const mentionMatch = normalizedBotUsername
-    ? normalized.match(/^\/([^\s@]+)@([^\s]+)(.*)$/)
-    : null;
+  const mentionMatch = normalized.match(/^\/([^\s@]+)@([^\s]+)(.*)$/);
+  const mentionMatchesCurrentBot = Boolean(
+    mentionMatch &&
+    normalizedBotUsername &&
+    mentionMatch[2].toLowerCase() === normalizedBotUsername,
+  );
+  const mentionMatchesAnyBot = Boolean(mentionMatch && options?.allowAnyBotMention);
   const commandBody =
-    mentionMatch && mentionMatch[2].toLowerCase() === normalizedBotUsername
+    mentionMatch && (mentionMatchesCurrentBot || mentionMatchesAnyBot)
       ? `/${mentionMatch[1]}${mentionMatch[3] ?? ""}`
       : normalized;
 

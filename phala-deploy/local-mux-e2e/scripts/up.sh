@@ -103,22 +103,34 @@ CONFIG_JSON=$(node -e "
     { id: 'gpt-5.3-codex', name: 'gpt-5.3-codex', reasoning: true, input: ['text', 'image'] },
     { id: 'gpt-5.1-codex-mini', name: 'gpt-5.1-codex-mini', reasoning: true, input: ['text', 'image'] },
   ];
-  if (modelPrimary && codexEndpoint && codexApiKey) {
-    cfg.agents.defaults.model = { primary: modelPrimary };
-    cfg.agents.defaults.models = {
-      'openai-codex/gpt-5.3-codex': { alias: 'Codex' },
-      'openai-codex/gpt-5.1-codex-mini': { alias: 'Codex Mini' },
+  if (codexEndpoint && codexApiKey) {
+    cfg.tools = cfg.tools || {};
+    cfg.tools.media = cfg.tools.media || {};
+    cfg.tools.media.audio = {
+      enabled: true,
+      models: [{ provider: 'openai', model: 'gpt-4o-transcribe' }],
     };
-    cfg.models = {
-      providers: {
-        'openai-codex': {
-          baseUrl: codexEndpoint,
-          apiKey: codexMockJwt,
-          headers: { 'x-api-key': codexApiKey },
-          models: codexSwitchModels,
-        },
-      },
+    cfg.models = cfg.models || {};
+    cfg.models.providers = cfg.models.providers || {};
+    cfg.models.providers.openai = {
+      baseUrl: codexEndpoint,
+      apiKey: codexApiKey,
+      headers: { 'x-api-key': codexApiKey },
+      models: [{ id: 'gpt-4o-transcribe', name: 'gpt-4o-transcribe' }],
     };
+    if (modelPrimary) {
+      cfg.agents.defaults.model = { primary: modelPrimary };
+      cfg.agents.defaults.models = {
+        'openai-codex/gpt-5.3-codex': { alias: 'Codex' },
+        'openai-codex/gpt-5.1-codex-mini': { alias: 'Codex Mini' },
+      };
+      cfg.models.providers['openai-codex'] = {
+        baseUrl: codexEndpoint,
+        apiKey: codexMockJwt,
+        headers: { 'x-api-key': codexApiKey },
+        models: codexSwitchModels,
+      };
+    }
   }
 
   process.stdout.write(JSON.stringify(cfg, null, 2));
@@ -131,6 +143,9 @@ export OPENCLAW_CONFIG_B64
 # --- Bring up the stack ---
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   echo "[local-mux-e2e] WARNING: TELEGRAM_BOT_TOKEN not set." >&2
+fi
+if [[ -z "${CODEX_API_ENDPOINT:-}" || -z "${CODEX_API_KEY:-}" ]]; then
+  echo "[local-mux-e2e] WARNING: CODEX_API_ENDPOINT/CODEX_API_KEY not set; OpenAI audio transcription may fail." >&2
 fi
 docker compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans
 

@@ -1,123 +1,116 @@
 ---
 name: e2e-telegram
-description: Run the full Telegram end-to-end test against the local mux-server + OpenClaw docker-compose stack. Use when asked to run e2e tests, integration tests, or verify Telegram pipeline.
+description: Run the local Telegram end-to-end suite against mux-server + OpenClaw docker-compose, including onboarding lifecycle, DM round-trip, media/file proxy, and forum topic routing checks.
 ---
 
 # Telegram E2E Test
 
-Exercises the full pipeline: tgcli (real MTProto sender) → Telegram API → mux-server (Bot API poll) → OpenClaw (HTTP inbound) → OpenClaw reply → mux-server (outbound send) → Telegram API.
+Exercises the full pipeline:
 
-## Environment setup
+tgcli (real MTProto sender) -> Telegram API -> mux-server (Bot API poll) -> OpenClaw (HTTP inbound) -> OpenClaw reply/tool actions -> mux-server (outbound send) -> Telegram API.
 
-Before the first run, set up the tools, credentials, and secrets. Each step only needs to be done once per machine.
+## Current Workflow
 
-### 1. Install system dependencies
+- No `rv-exec` required.
+- No `phala-deploy/openclaw.tgz` build/pack step required.
+- The script auto-loads env files from:
+  - `phala-deploy/local-mux-e2e/.env.local`
+  - repo root `.env.local` (fallback)
+- The script reuses a running stack and only calls `up.sh` when required containers are missing.
+
+## One-Time Setup
+
+### 1. Install dependencies
 
 ```bash
 # Rust toolchain (needed for tgcli)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
-# tgcli — pure Rust Telegram MTProto CLI (no TDLib)
+# tgcli (MTProto CLI)
 cargo install tgcli
 
-# Other required tools (usually already present)
-# jq, curl, docker, uuidgen
+# Also needed: jq, curl, docker, uuidgen
 ```
 
-### 2. Authenticate tgcli
-
-tgcli needs a dedicated Telegram **user** account (not a bot) to act as the sender. This is interactive — it prompts for phone number, verification code, and optional 2FA password.
+### 2. Authenticate tgcli user session
 
 ```bash
 tgcli auth
 ```
 
-Session is stored in `~/.tgcli/` and persists across runs. Re-authenticate only if the session expires or the store is wiped.
+Use a Telegram user account (not a bot). Session persists in `~/.tgcli/`.
 
-### 3. Establish bot access hash
+### 3. Ensure the bot is discoverable in tgcli
 
-Telegram requires an access hash before a user can message a bot. Send any message to the bot once, then sync metadata:
+Send one manual DM to the bot and run:
 
 ```bash
-# Get the bot's user ID
-rv-exec TELEGRAM_BOT_TOKEN -- bash -c \
-  'curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | jq .result.id'
-
-# Send a throwaway message (replace <BOT_USER_ID> with the ID above)
-tgcli send --to <BOT_USER_ID> --message "hi"
-
-# Cache chat metadata locally
 tgcli sync
 ```
 
-### 4. Store secrets in rv vault
+## Environment Variables
 
-The e2e script reads secrets via `rv-exec`. These should already exist from other workflows, except for the bot chat ID:
+Set these in `phala-deploy/local-mux-e2e/.env.local` (preferred):
 
-```bash
-# Approve the project for rv (once per checkout)
-rv approve
+- Required:
+  - `MODEL_PRIMARY`
+  - `TELEGRAM_BOT_TOKEN` (or alias `TELEGRAM_BOT_TOKEN_E2E`)
+- Optional:
+  - `TELEGRAM_E2E_BOT_CHAT_ID` (defaults to bot user ID from token prefix)
+  - `MUX_BASE_URL` (default `http://127.0.0.1:18891`)
+  - `MUX_ADMIN_TOKEN`
+  - `MUX_REGISTER_KEY`
+  - `POLL_TIMEOUT`, `LLM_TIMEOUT`
+  - `TELEGRAM_E2E_SEND_COOLDOWN_SEC`
+  - `TELEGRAM_E2E_FORUM_CHAT_ID`, `TELEGRAM_E2E_FORUM_TOPIC_ID`, `TELEGRAM_E2E_FORUM_SECOND_TOPIC_ID`
 
-# Store the bot's user ID (from step 3)
-echo <BOT_USER_ID> | rv set TELEGRAM_E2E_BOT_CHAT_ID
-
-# Verify all required secrets are present
-rv list | grep -E 'TELEGRAM_BOT_TOKEN|DISCORD_BOT_TOKEN|TELEGRAM_E2E_BOT_CHAT_ID'
-```
-
-Required secrets: `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_E2E_BOT_CHAT_ID`.
-
-### 5. Build the openclaw tarball
-
-The Docker image needs `phala-deploy/openclaw.tgz`. Rebuild whenever source changes:
+If `TELEGRAM_BOT_TOKEN` is not set in env files, the script also tries:
 
 ```bash
-pnpm build
-npm pack --pack-destination phala-deploy
-mv phala-deploy/openclaw-*.tgz phala-deploy/openclaw.tgz
+docker exec mux-server-local-e2e printenv TELEGRAM_BOT_TOKEN
 ```
 
-This step is only needed if the containers haven't been built yet or if you changed OpenClaw source code.
-
-## Running the test
+## Run
 
 ```bash
-rv-exec TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN TELEGRAM_E2E_BOT_CHAT_ID \
-  -- bash phala-deploy/local-mux-e2e/scripts/e2e-telegram.sh
+bash phala-deploy/local-mux-e2e/scripts/e2e-telegram.sh
 ```
 
-The script:
+## What The Suite Verifies
 
-1. Checks prerequisites (tgcli, jq, curl, docker, env vars)
-2. Ensures the docker-compose stack is running (calls `up.sh` if not)
-3. Issues a pairing token and sends `/start <token>` to the bot
-4. Runs 4 tests: text message, photo with caption, document with caption, file proxy fetch
-5. Prints pass/fail summary; exits non-zero on any failure
+The script currently runs onboarding + transport + AI round-trip checks:
 
-## Key details
+1. Unpaired DM hint behavior (`Clawdi` intro text).
+2. Fresh pairing claim flow (`claimType=fresh`, synthetic inbound, intro reply).
+3. Re-pairing flow (`claimType=repaired`, reconnect notice, no synthetic inbound).
+4. DM text round-trip.
+5. DM photo round-trip.
+6. AI multi-action flow (`sendMessage`, `sendDocument`/`sendPhoto`, `setMessageReaction`).
+7. Telegram file proxy fetch with runtime JWT auth.
+8. Args-menu inline keyboard transport path (`/reasoning`).
+9. Sticker inbound forward (skips if tgcli has no sticker packs).
+10. Document inbound forward.
+11. Forum group behavior across two topics (chat-wide pairing + topic session routing).
 
-- **tgcli flags**: `--message` for text-only, `--caption` for media. `--photo` for images, `--file` for documents.
-- **Detection**: polls mux-server structured log (`/data/mux-server.log`) for `telegram_inbound_forwarded` entries.
-- **File proxy test**: sends a photo via Bot API, extracts `file_id`, fetches through proxy with runtime JWT auth.
-- **Stack management**: `up.sh` to start, `down.sh` to stop, `down.sh --wipe` to reset volumes.
+Pass/fail is determined from mux-server structured logs (`/data/mux-server.log`) and Telegram chat observations.
 
-## Stack management scripts
+## Stack Scripts
 
 All in `phala-deploy/local-mux-e2e/scripts/`:
 
-| Script                    | Purpose                                      |
-| ------------------------- | -------------------------------------------- |
-| `up.sh`                   | Build + start containers, wait for health    |
-| `down.sh`                 | Stop containers (`--wipe` to remove volumes) |
-| `pair-token.sh <channel>` | Issue a pairing token                        |
-| `logs.sh [service]`       | Tail container logs                          |
-| `e2e-telegram.sh`         | Run the full e2e test suite                  |
+| Script                    | Purpose                                    |
+| ------------------------- | ------------------------------------------ |
+| `up.sh`                   | Build + start containers, wait for health  |
+| `down.sh`                 | Stop containers (`--wipe` removes volumes) |
+| `pair-token.sh <channel>` | Issue a pairing token                      |
+| `logs.sh [service]`       | Tail container logs                        |
+| `e2e-telegram.sh`         | Run the full Telegram E2E suite            |
 
 ## Troubleshooting
 
-- **"openclaw.tgz not found"**: Run the build step above.
-- **"rv-exec: project not approved"**: Run `rv approve` in the project root.
-- **"tgcli is required"**: `cargo install tgcli` then `tgcli auth`.
-- **OpenClaw replies with "No API key"**: The e2e test only checks inbound forwarding, not LLM replies. This error is expected if no API key is configured in the container.
-- **Containers won't start**: Check `docker compose -f phala-deploy/local-mux-e2e/docker-compose.yml logs`.
+- `tgcli is required`: install with `cargo install tgcli`.
+- `TELEGRAM_BOT_TOKEN not set`: define it in `phala-deploy/local-mux-e2e/.env.local` (or use `TELEGRAM_BOT_TOKEN_E2E`).
+- `MODEL_PRIMARY not set`: add a valid model slug in `.env.local`.
+- `mux-server health check failed`: verify stack and port mapping, then inspect compose logs.
+- `openclaw cannot reach mux-server`: check docker network/container health.
