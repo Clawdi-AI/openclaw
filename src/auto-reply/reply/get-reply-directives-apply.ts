@@ -35,6 +35,21 @@ export type ApplyDirectiveResult =
       };
     };
 
+function isReadOnlyModelSummaryDirective(directives: InlineDirectives): boolean {
+  return (
+    directives.hasModelDirective &&
+    !directives.rawModelDirective &&
+    !directives.rawModelProfile &&
+    !directives.hasThinkDirective &&
+    !directives.hasVerboseDirective &&
+    !directives.hasReasoningDirective &&
+    !directives.hasElevatedDirective &&
+    !directives.hasExecDirective &&
+    !directives.hasStatusDirective &&
+    !directives.hasQueueDirective
+  );
+}
+
 export async function applyInlineDirectiveOverrides(params: {
   ctx: MsgContext;
   cfg: OpenClawConfig;
@@ -104,8 +119,10 @@ export async function applyInlineDirectiveOverrides(params: {
   let { contextTokens } = params;
 
   let directiveAck: ReplyPayload | undefined;
+  const allowUnauthorizedModelSummary =
+    !command.isAuthorizedSender && isReadOnlyModelSummaryDirective(directives);
 
-  if (!command.isAuthorizedSender) {
+  if (!command.isAuthorizedSender && !allowUnauthorizedModelSummary) {
     directives = clearInlineDirectives(directives.cleaned);
   }
 
@@ -119,7 +136,7 @@ export async function applyInlineDirectiveOverrides(params: {
       isGroup,
     })
   ) {
-    if (!command.isAuthorizedSender) {
+    if (!command.isAuthorizedSender && !allowUnauthorizedModelSummary) {
       typing.cleanup();
       return { kind: "reply", reply: undefined };
     }
