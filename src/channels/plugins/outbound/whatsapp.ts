@@ -2,8 +2,8 @@ import { chunkText } from "../../../auto-reply/chunk.js";
 import { shouldLogVerbose } from "../../../globals.js";
 import { sendPollWhatsApp } from "../../../web/outbound.js";
 import { resolveWhatsAppOutboundTarget } from "../../../whatsapp/resolve-outbound-target.js";
-import type { ChannelOutboundAdapter } from "../types.js";
 import { buildWhatsAppRawSend } from "../mux-envelope.js";
+import type { ChannelOutboundAdapter } from "../types.js";
 import { isMuxEnabled, sendViaMux } from "./mux.js";
 
 export const whatsappOutbound: ChannelOutboundAdapter = {
@@ -41,7 +41,17 @@ export const whatsappOutbound: ChannelOutboundAdapter = {
     });
     return { channel: "whatsapp", ...result };
   },
-  sendMedia: async ({ cfg, to, text, mediaUrl, mediaLocalRoots, accountId, deps, gifPlayback, sessionKey }) => {
+  sendMedia: async ({
+    cfg,
+    to,
+    text,
+    mediaUrl,
+    mediaLocalRoots,
+    accountId,
+    deps,
+    gifPlayback,
+    sessionKey,
+  }) => {
     if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
       const result = await sendViaMux({
         cfg,
