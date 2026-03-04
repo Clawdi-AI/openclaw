@@ -13,12 +13,14 @@ import type {
   ChannelThreadingToolContext,
 } from "../../channels/plugins/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { buildAgentMainSessionKey, parseAgentSessionKey } from "../../routing/session-key.js";
 import {
   isDeliverableMessageChannel,
   normalizeMessageChannel,
   type GatewayClientMode,
   type GatewayClientName,
 } from "../../utils/message-channel.js";
+import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "../../whatsapp/normalize.js";
 import { throwIfAborted } from "./abort.js";
 import {
   listConfiguredMessageChannels,
@@ -86,6 +88,107 @@ function resolveAndApplyOutboundThreadId(
     params.threadId = resolved;
   }
   return resolved ?? undefined;
+}
+
+function normalizeProvidedSessionKey(sessionKey?: string): string | undefined {
+  const trimmed = typeof sessionKey === "string" ? sessionKey.trim() : "";
+  return trimmed ? trimmed.toLowerCase() : undefined;
+}
+
+function parseWhatsAppTargetFromSessionKey(sessionKey: string): string | undefined {
+  const parsed = parseAgentSessionKey(sessionKey);
+  if (!parsed) {
+    return undefined;
+  }
+  const parts = parsed.rest
+    .split(":")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length < 3) {
+    return undefined;
+  }
+  if (parts[0]?.toLowerCase() !== "whatsapp") {
+    return undefined;
+  }
+
+  const second = parts[1]?.toLowerCase();
+  const third = parts[2]?.toLowerCase();
+  let kind: "direct" | "group" | undefined;
+  let peerStart = 0;
+  if (second === "direct" || second === "group") {
+    kind = second;
+    peerStart = 2;
+  } else if (third === "direct" || third === "group") {
+    kind = third;
+    peerStart = 3;
+  } else {
+    return undefined;
+  }
+
+  const peerId = parts.slice(peerStart).join(":").trim();
+  if (!peerId) {
+    return undefined;
+  }
+  const normalizedTarget = normalizeWhatsAppTarget(peerId);
+  if (!normalizedTarget) {
+    return undefined;
+  }
+  const isGroup = isWhatsAppGroupJid(normalizedTarget);
+  if ((kind === "group" && !isGroup) || (kind === "direct" && isGroup)) {
+    return undefined;
+  }
+  return normalizedTarget;
+}
+
+function shouldPreserveWhatsAppSessionKey(params: {
+  cfg: OpenClawConfig;
+  agentId?: string;
+  target: string;
+  providedSessionKey: string;
+  derivedSessionKey?: string;
+}): boolean {
+  if (!params.derivedSessionKey || !params.agentId) {
+    return false;
+  }
+  const mainSessionKey = buildAgentMainSessionKey({
+    agentId: params.agentId,
+    mainKey: params.cfg.session?.mainKey,
+  });
+  if (params.derivedSessionKey !== mainSessionKey) {
+    return false;
+  }
+  const providedTarget = parseWhatsAppTargetFromSessionKey(params.providedSessionKey);
+  const outboundTarget = normalizeWhatsAppTarget(params.target);
+  return Boolean(providedTarget && outboundTarget && providedTarget === outboundTarget);
+}
+
+function selectOutboundSessionKey(params: {
+  cfg: OpenClawConfig;
+  channel: ChannelId;
+  target: string;
+  agentId?: string;
+  providedSessionKey?: string;
+  derivedSessionKey?: string;
+}): string | undefined {
+  if (!params.derivedSessionKey) {
+    return params.providedSessionKey;
+  }
+  if (!params.providedSessionKey) {
+    return params.derivedSessionKey;
+  }
+  if (
+    params.channel === "whatsapp" &&
+    shouldPreserveWhatsAppSessionKey({
+      cfg: params.cfg,
+      agentId: params.agentId,
+      target: params.target,
+      providedSessionKey: params.providedSessionKey,
+      derivedSessionKey: params.derivedSessionKey,
+    })
+  ) {
+    return params.providedSessionKey;
+  }
+  return params.derivedSessionKey;
 }
 
 export type RunMessageActionParams = {
@@ -481,13 +584,9 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     toolContext: input.toolContext,
     allowSlackAutoThread: channel === "slack" && !replyToId,
   });
-  const providedSessionKey =
-    typeof input.sessionKey === "string" && input.sessionKey.trim().length > 0
-      ? input.sessionKey.trim().toLowerCase()
-      : undefined;
-  const preserveProvidedSessionKey = channel === "whatsapp" && Boolean(providedSessionKey);
+  const providedSessionKey = normalizeProvidedSessionKey(input.sessionKey);
   const outboundRoute =
-    agentId && !dryRun && !preserveProvidedSessionKey
+    agentId && !dryRun
       ? await resolveOutboundSessionRoute({
           cfg,
           channel,
@@ -499,7 +598,15 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
           threadId: resolvedThreadId,
         })
       : null;
-  if (outboundRoute && agentId && !dryRun) {
+  const outboundSessionKey = selectOutboundSessionKey({
+    cfg,
+    channel,
+    target: to,
+    agentId,
+    providedSessionKey,
+    derivedSessionKey: outboundRoute?.sessionKey,
+  });
+  if (outboundRoute && agentId && !dryRun && outboundSessionKey === outboundRoute.sessionKey) {
     await ensureOutboundSessionEntry({
       cfg,
       agentId,
@@ -508,8 +615,6 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       route: outboundRoute,
     });
   }
-  const outboundSessionKey =
-    (preserveProvidedSessionKey ? providedSessionKey : undefined) ?? outboundRoute?.sessionKey;
   if (outboundSessionKey && !dryRun) {
     params.__sessionKey = outboundSessionKey;
   }
@@ -526,7 +631,8 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       params,
       agentId,
       accountId: accountId ?? undefined,
-      sessionKey: input.sessionKey,
+      sessionKey:
+        channel === "whatsapp" ? (outboundSessionKey ?? input.sessionKey) : input.sessionKey,
       gateway,
       toolContext: input.toolContext,
       deps: input.deps,

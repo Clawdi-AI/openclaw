@@ -662,35 +662,26 @@ describe("runMessageAction media caption behavior", () => {
 });
 
 describe("runMessageAction outbound session key selection", () => {
-  const handleAction = vi.fn(async ({ params }: { params: Record<string, unknown> }) =>
-    jsonResult({
-      ok: true,
-      sessionKey: typeof params.__sessionKey === "string" ? params.__sessionKey : null,
-      agentId: typeof params.__agentId === "string" ? params.__agentId : null,
-    }),
-  );
+  const sendText = vi.fn().mockResolvedValue({
+    channel: "whatsapp",
+    messageId: "wa-text",
+    toJid: "15550001111@s.whatsapp.net",
+  });
+  const sendMedia = vi.fn().mockResolvedValue({
+    channel: "whatsapp",
+    messageId: "wa-media",
+    toJid: "15550001111@s.whatsapp.net",
+  });
 
-  const whatsappActionPlugin: ChannelPlugin = {
+  const whatsappOutboundPlugin = createOutboundTestPlugin({
     id: "whatsapp",
-    meta: {
-      id: "whatsapp",
-      label: "WhatsApp",
-      selectionLabel: "WhatsApp",
-      docsPath: "/channels/whatsapp",
-      blurb: "WhatsApp action probe.",
-    },
     capabilities: { chatTypes: ["direct", "group"] },
-    config: {
-      listAccountIds: () => ["default"],
-      resolveAccount: () => ({ enabled: true }),
-      isConfigured: () => true,
+    outbound: {
+      deliveryMode: "direct",
+      sendText,
+      sendMedia,
     },
-    actions: {
-      listActions: () => ["send"],
-      supportsAction: ({ action }) => action === "send",
-      handleAction,
-    },
-  };
+  });
 
   beforeEach(() => {
     setActivePluginRegistry(
@@ -698,19 +689,23 @@ describe("runMessageAction outbound session key selection", () => {
         {
           pluginId: "whatsapp",
           source: "test",
-          plugin: whatsappActionPlugin,
+          plugin: whatsappOutboundPlugin,
         },
       ]),
     );
-    handleAction.mockClear();
+    sendText.mockClear();
+    sendMedia.mockClear();
   });
 
   afterEach(() => {
     setActivePluginRegistry(createTestRegistry([]));
   });
 
-  it("keeps the active session key for whatsapp media sends", async () => {
+  it("keeps the active whatsapp session key when derived key collapses to main", async () => {
     const cfg = {
+      session: {
+        dmScope: "main",
+      },
       channels: {
         whatsapp: {
           allowFrom: ["*"],
@@ -733,18 +728,51 @@ describe("runMessageAction outbound session key selection", () => {
     });
 
     expect(result.kind).toBe("send");
-    expect(result.handledBy).toBe("plugin");
-    expect(handleAction).toHaveBeenCalledWith(
+    expect(result.handledBy).toBe("core");
+    expect(sendMedia).toHaveBeenCalledWith(
       expect.objectContaining({
-        params: expect.objectContaining({
-          __sessionKey: activeSessionKey,
-        }),
+        sessionKey: activeSessionKey,
       }),
     );
-    const called = handleAction.mock.calls[0]?.[0] as
-      | { params?: Record<string, unknown> }
-      | undefined;
-    expect(called?.params?.__sessionKey).not.toBe("agent:main:main");
+  });
+
+  it("does not reuse a whatsapp session key when sending to another target", async () => {
+    const cfg = {
+      session: {
+        dmScope: "main",
+      },
+      channels: {
+        whatsapp: {
+          allowFrom: ["*"],
+        },
+      },
+    } as OpenClawConfig;
+    const activeSessionKey = "agent:main:whatsapp:direct:+15550001111";
+
+    const result = await runMessageAction({
+      cfg,
+      action: "send",
+      params: {
+        channel: "whatsapp",
+        target: "+15550002222",
+        message: "cross context send",
+        media: "https://example.com/file.pdf",
+      },
+      sessionKey: activeSessionKey,
+      toolContext: {
+        currentChannelId: "+15550001111",
+        currentChannelProvider: "whatsapp",
+      },
+      dryRun: false,
+    });
+
+    expect(result.kind).toBe("send");
+    expect(result.handledBy).toBe("core");
+    expect(sendMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "agent:main:main",
+      }),
+    );
   });
 });
 
