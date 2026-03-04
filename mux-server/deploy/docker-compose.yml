@@ -72,9 +72,6 @@ configs:
     content: |
       events {}
       http {
-        limit_req_zone $$binary_remote_addr zone=mux_public:10m rate=20r/s;
-        limit_req_zone $$binary_remote_addr zone=mux_admin:10m rate=5r/s;
-
         server {
           listen 18891;
           # Align with mux-server default MUX_MAX_BODY_BYTES (50 MiB).
@@ -107,17 +104,14 @@ configs:
           location = /metrics {
             auth_basic "mux-metrics";
             auth_basic_user_file /etc/nginx/htpasswd-prometheus;
-            limit_req zone=mux_admin burst=10 nodelay;
             proxy_pass http://mux-server:18891;
           }
 
           location ^~ /v1/admin/ {
-            limit_req zone=mux_admin burst=20 nodelay;
             proxy_pass http://mux-server:18891;
           }
 
           location / {
-            limit_req zone=mux_public burst=60 nodelay;
             proxy_pass http://mux-server:18891;
           }
         }
