@@ -10,7 +10,6 @@ Do not use a separate "basic" compose for production.
 
 ## Files
 
-- `mux-server/deploy/build-pin-mux.sh`: build/push image and pin digest in compose
 - `mux-server/deploy/deploy-mux.sh`: deploy mux CVM and run smoke tests
 - `mux-server/deploy/mux-pair-token.sh`: issue pairing tokens
 - `mux-server/deploy/docker-compose.yml`: production compose with nginx access control
@@ -33,16 +32,16 @@ For token issuance via `mux-pair-token.sh`, use:
 
 - `MUX_ADMIN_TOKEN`
 
-## Build and Pin
+## Build Image
 
 ```bash
-./mux-server/deploy/build-pin-mux.sh
+docker build -f mux-server/Dockerfile -t your-user/openclaw-mux:2026.2.17-phala.5 .
 ```
 
 Optional:
 
 ```bash
-./mux-server/deploy/build-pin-mux.sh --image-repo your-user/openclaw-mux --image-tag 2026.3.1
+docker push your-user/openclaw-mux:2026.2.17-phala.5
 ```
 
 ## Deploy

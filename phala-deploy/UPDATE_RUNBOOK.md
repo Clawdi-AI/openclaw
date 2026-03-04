@@ -70,13 +70,11 @@ Pairing-token issuance and admin API access are documented in:
 
 If you have a local secrets file (e.g., `configs/my-instance.env`):
 
-### 1. Build and pin the new image
+### 1. Build the new images
 
 ```bash
-./phala-deploy/build-pin-openclaw.sh
-# This pushes full + base target images, updates docker-compose.yml with the full image, and writes:
-#   phala-deploy/image-refs/openclaw-base-image.ref
-#   phala-deploy/image-refs/openclaw-full-image.ref
+./phala-deploy/build-openclaw.sh
+# This builds and pushes full + base target images.
 ```
 
 ### 2. Download the existing config
@@ -145,12 +143,12 @@ bash phala-deploy/deploy-openclaw.sh --openclaw-cvm openclaw-dev --mux-cvm openc
 This validates required env vars and prints the deploy command without executing it.
 For mux preflight, see `mux-server/deploy/README.md`.
 
-### 2. Build and pin images
+### 2. Build images
 
 OpenClaw:
 
 ```bash
-./phala-deploy/build-pin-openclaw.sh
+./phala-deploy/build-openclaw.sh
 ```
 
 ### 3. Deploy
