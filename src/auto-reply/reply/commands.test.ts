@@ -785,6 +785,21 @@ describe("/models command", () => {
   });
 });
 
+describe("/commands command", () => {
+  it("handles telegram bot-mention form", async () => {
+    const cfg = {
+      commands: { text: true },
+    } as OpenClawConfig;
+    const params = buildPolicyParams("/commands@ClawPhalaTest1bot", cfg, {
+      Provider: "telegram",
+      Surface: "telegram",
+    });
+    const result = await handleCommands(params);
+    expect(result.shouldContinue).toBe(false);
+    expect(result.reply?.text).toContain("/stop");
+  });
+});
+
 describe("handleCommands plugin commands", () => {
   it("dispatches registered plugin commands", async () => {
     clearPluginCommands();

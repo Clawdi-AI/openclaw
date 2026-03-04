@@ -24,8 +24,10 @@ export function buildCommandContext(params: {
   const channel = (ctx.Provider ?? surface).trim().toLowerCase();
   const abortKey = sessionKey ?? (auth.from || undefined) ?? (auth.to || undefined);
   const rawBodyNormalized = triggerBodyNormalized;
+  const shouldNormalizeTelegramMention = surface === "telegram" || channel === "telegram";
   const commandBodyNormalized = normalizeCommandBody(
     isGroup ? stripMentions(rawBodyNormalized, ctx, cfg, agentId) : rawBodyNormalized,
+    shouldNormalizeTelegramMention ? { allowAnyBotMention: true } : undefined,
   );
 
   return {

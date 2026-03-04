@@ -72,6 +72,11 @@ export type NativeCommandSpec = {
 
 export type CommandNormalizeOptions = {
   botUsername?: string;
+  /**
+   * Telegram mux fallback: strip `/cmd@bot` mention suffixes even when
+   * the concrete bot username is unavailable in inbound context.
+   */
+  allowAnyBotMention?: boolean;
 };
 
 export type CommandDetection = {
