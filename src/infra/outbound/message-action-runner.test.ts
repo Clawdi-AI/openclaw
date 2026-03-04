@@ -661,6 +661,113 @@ describe("runMessageAction media caption behavior", () => {
   });
 });
 
+describe("runMessageAction outbound session key selection", () => {
+  const sendText = vi.fn().mockResolvedValue({
+    channel: "whatsapp",
+    messageId: "wa-text",
+    toJid: "15550001111@s.whatsapp.net",
+  });
+  const sendMedia = vi.fn().mockResolvedValue({
+    channel: "whatsapp",
+    messageId: "wa-media",
+    toJid: "15550001111@s.whatsapp.net",
+  });
+  const activeSessionKey = "agent:main:whatsapp:direct:+15550001111";
+  const whatsappMainScopeCfg = {
+    session: {
+      dmScope: "main",
+    },
+    channels: {
+      whatsapp: {
+        allowFrom: ["*"],
+      },
+    },
+  } as OpenClawConfig;
+
+  const whatsappOutboundPlugin = createOutboundTestPlugin({
+    id: "whatsapp",
+    capabilities: { chatTypes: ["direct", "group"] },
+    outbound: {
+      deliveryMode: "direct",
+      sendText,
+      sendMedia,
+    },
+  });
+
+  beforeEach(() => {
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "whatsapp",
+          source: "test",
+          plugin: whatsappOutboundPlugin,
+        },
+      ]),
+    );
+    sendText.mockClear();
+    sendMedia.mockClear();
+  });
+
+  afterEach(() => {
+    setActivePluginRegistry(createTestRegistry([]));
+  });
+
+  async function runWhatsAppMediaSend(params: {
+    target: string;
+    message: string;
+    toolContext?: { currentChannelId: string; currentChannelProvider: "whatsapp" };
+  }) {
+    return await runMessageAction({
+      cfg: whatsappMainScopeCfg,
+      action: "send",
+      params: {
+        channel: "whatsapp",
+        target: params.target,
+        message: params.message,
+        media: "https://example.com/file.pdf",
+      },
+      sessionKey: activeSessionKey,
+      toolContext: params.toolContext,
+      dryRun: false,
+    });
+  }
+
+  it("keeps the active whatsapp session key when derived key collapses to main", async () => {
+    const result = await runWhatsAppMediaSend({
+      target: "+15550001111",
+      message: "file attached",
+    });
+
+    expect(result.kind).toBe("send");
+    expect(result.handledBy).toBe("core");
+    expect(sendMedia).toHaveBeenCalledTimes(1);
+    expect(sendMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: activeSessionKey,
+      }),
+    );
+  });
+
+  it("does not reuse a whatsapp session key when sending to another target", async () => {
+    const result = await runWhatsAppMediaSend({
+      target: "+15550002222",
+      message: "cross context send",
+      toolContext: {
+        currentChannelId: "+15550001111",
+        currentChannelProvider: "whatsapp",
+      },
+    });
+
+    expect(result.kind).toBe("send");
+    expect(result.handledBy).toBe("core");
+    expect(sendMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "agent:main:main",
+      }),
+    );
+  });
+});
+
 describe("runMessageAction card-only send behavior", () => {
   const handleAction = vi.fn(async ({ params }: { params: Record<string, unknown> }) =>
     jsonResult({

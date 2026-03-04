@@ -13,12 +13,14 @@ import type {
   ChannelThreadingToolContext,
 } from "../../channels/plugins/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { buildAgentMainSessionKey, parseAgentSessionKey } from "../../routing/session-key.js";
 import {
   isDeliverableMessageChannel,
   normalizeMessageChannel,
   type GatewayClientMode,
   type GatewayClientName,
 } from "../../utils/message-channel.js";
+import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "../../whatsapp/normalize.js";
 import { throwIfAborted } from "./abort.js";
 import {
   listConfiguredMessageChannels,
@@ -86,6 +88,63 @@ function resolveAndApplyOutboundThreadId(
     params.threadId = resolved;
   }
   return resolved ?? undefined;
+}
+
+function normalizeProvidedSessionKey(sessionKey?: string): string | undefined {
+  const trimmed = typeof sessionKey === "string" ? sessionKey.trim() : "";
+  return trimmed ? trimmed.toLowerCase() : undefined;
+}
+
+function parseWhatsAppSessionTarget(
+  sessionKey: string,
+): { kind: "direct" | "group"; target: string } | null {
+  const parsed = parseAgentSessionKey(sessionKey);
+  if (!parsed) {
+    return null;
+  }
+  // Supports both:
+  // - agent:<id>:whatsapp:direct:<peer>
+  // - agent:<id>:whatsapp:<account>:direct:<peer>
+  const match = /^whatsapp:(?:[^:]+:)?(direct|group):(.+)$/i.exec(parsed.rest);
+  if (!match) {
+    return null;
+  }
+  const kind = match[1]?.toLowerCase() as "direct" | "group";
+  const peerId = match[2]?.trim() ?? "";
+  const normalizedTarget = normalizeWhatsAppTarget(peerId);
+  if (!normalizedTarget) {
+    return null;
+  }
+  const isGroup = isWhatsAppGroupJid(normalizedTarget);
+  if ((kind === "group" && !isGroup) || (kind === "direct" && isGroup)) {
+    return null;
+  }
+  return { kind, target: normalizedTarget };
+}
+
+function resolveWhatsAppSendSessionKey(params: {
+  cfg: OpenClawConfig;
+  agentId?: string;
+  target: string;
+  providedSessionKey: string;
+  derivedSessionKey?: string;
+}): string | undefined {
+  if (!params.derivedSessionKey || !params.agentId) {
+    return params.derivedSessionKey;
+  }
+  const mainSessionKey = buildAgentMainSessionKey({
+    agentId: params.agentId,
+    mainKey: params.cfg.session?.mainKey,
+  });
+  if (params.derivedSessionKey !== mainSessionKey) {
+    return params.derivedSessionKey;
+  }
+  const providedTarget = parseWhatsAppSessionTarget(params.providedSessionKey);
+  const outboundTarget = normalizeWhatsAppTarget(params.target);
+  if (!providedTarget || !outboundTarget || providedTarget.target !== outboundTarget) {
+    return params.derivedSessionKey;
+  }
+  return params.providedSessionKey;
 }
 
 export type RunMessageActionParams = {
@@ -481,6 +540,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     toolContext: input.toolContext,
     allowSlackAutoThread: channel === "slack" && !replyToId,
   });
+  const providedSessionKey = normalizeProvidedSessionKey(input.sessionKey);
   const outboundRoute =
     agentId && !dryRun
       ? await resolveOutboundSessionRoute({
@@ -494,7 +554,20 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
           threadId: resolvedThreadId,
         })
       : null;
-  if (outboundRoute && agentId && !dryRun) {
+  const derivedSessionKey = outboundRoute?.sessionKey;
+  const selectedRouteSessionKey =
+    channel === "whatsapp" && providedSessionKey
+      ? resolveWhatsAppSendSessionKey({
+          cfg,
+          agentId,
+          target: to,
+          providedSessionKey,
+          derivedSessionKey,
+        })
+      : derivedSessionKey;
+  const transportSessionKey =
+    channel === "whatsapp" ? (selectedRouteSessionKey ?? input.sessionKey) : input.sessionKey;
+  if (outboundRoute && agentId && !dryRun && selectedRouteSessionKey === derivedSessionKey) {
     await ensureOutboundSessionEntry({
       cfg,
       agentId,
@@ -503,8 +576,8 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       route: outboundRoute,
     });
   }
-  if (outboundRoute && !dryRun) {
-    params.__sessionKey = outboundRoute.sessionKey;
+  if (selectedRouteSessionKey && !dryRun) {
+    params.__sessionKey = selectedRouteSessionKey;
   }
   if (agentId) {
     params.__agentId = agentId;
@@ -519,15 +592,15 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       params,
       agentId,
       accountId: accountId ?? undefined,
-      sessionKey: input.sessionKey,
+      sessionKey: transportSessionKey,
       gateway,
       toolContext: input.toolContext,
       deps: input.deps,
       dryRun,
       mirror:
-        outboundRoute && !dryRun
+        selectedRouteSessionKey && !dryRun
           ? {
-              sessionKey: outboundRoute.sessionKey,
+              sessionKey: selectedRouteSessionKey,
               agentId,
               text: message,
               mediaUrls: mirrorMediaUrls,
