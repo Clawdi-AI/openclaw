@@ -200,35 +200,9 @@ if [ -f "$CONFIG_FILE" ]; then
   ' "$CONFIG_FILE" || true
 fi
 
-# --- Configure mcporter for MCP OAuth servers ---
-node -e '
-  const fs = require("fs");
-  const cfgPath = "/root/.mcporter/mcporter.json";
-  let mcpCfg = { mcpServers: {}, imports: [] };
-  try { mcpCfg = JSON.parse(fs.readFileSync(cfgPath, "utf8")); } catch {}
-  if (!mcpCfg.mcpServers) mcpCfg.mcpServers = {};
-
-  const oauthServers = {
-    "twitter": "https://twitter-mcp-production-2c2f.up.railway.app/mcp",
-    "iosg-vote": "https://votemcp-production.up.railway.app/mcp",
-    "coinmarketcap": "https://coingeckomcp-production.up.railway.app/mcp",
-    "defillama": "https://defillamamcp-production.up.railway.app/mcp",
-    "dune": "https://dune-mcp-production.up.railway.app/mcp",
-    "herd": "https://mcp.herd.eco/v1",
-    "otter": "https://mcp.otter.ai/mcp",
-  };
-  for (const [name, url] of Object.entries(oauthServers)) {
-    if (!mcpCfg.mcpServers[name]) mcpCfg.mcpServers[name] = { baseUrl: url, auth: "oauth" };
-  }
-  const exaUrl = process.env.EXA_MCP_URL || "";
-  if (exaUrl && !mcpCfg.mcpServers["exa"]) {
-    mcpCfg.mcpServers["exa"] = { baseUrl: exaUrl };
-  }
-
-  fs.mkdirSync("/root/.mcporter", { recursive: true });
-  fs.writeFileSync(cfgPath, JSON.stringify(mcpCfg, null, 2), { mode: 0o600 });
-  console.log("mcporter: " + Object.keys(mcpCfg.mcpServers).length + " servers configured.");
-' || true
+# MCP OAuth servers are configured by the mcp-dashboard sidecar.
+# It writes to /data/.mcporter/mcporter.json (shared volume) after each
+# successful OAuth flow, so mcporter only sees authenticated servers.
 
 # --- Pre-seed device pairing for local CLI ---
 # When MASTER_KEY is set the CLI's device identity is deterministic (HKDF-derived).
