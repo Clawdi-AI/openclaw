@@ -1990,6 +1990,35 @@ const ALLOWED_TELEGRAM_METHODS = new Set([
   "createForumTopic",
 ]);
 
+const TELEGRAM_PARSE_ERR_RE = /can't parse entities|parse entities|find end of the entity/i;
+
+function readTelegramResultDescription(result: Record<string, unknown>): string {
+  const description = result.description;
+  return typeof description === "string" ? description : "";
+}
+
+function isTelegramMessageNotModified(method: string, result: Record<string, unknown>): boolean {
+  return (
+    method === "editMessageText" &&
+    /message is not modified/i.test(readTelegramResultDescription(result))
+  );
+}
+
+function shouldRetryTelegramWithoutHtmlParseMode(params: {
+  method: string;
+  body: Record<string, unknown>;
+  result: Record<string, unknown>;
+}): boolean {
+  if (params.method !== "sendMessage" && params.method !== "editMessageText") {
+    return false;
+  }
+  const parseMode = readNonEmptyString(params.body.parse_mode);
+  if (!parseMode || parseMode.toLowerCase() !== "html") {
+    return false;
+  }
+  return TELEGRAM_PARSE_ERR_RE.test(readTelegramResultDescription(params.result));
+}
+
 async function sendTelegram(method: string, body: Record<string, unknown>) {
   const token = requireTelegramBotToken();
   const url = `${telegramApiBaseUrl}/bot${token}/${method}`;
@@ -8289,16 +8318,25 @@ const server = http.createServer(async (req, res) => {
               }
             }
           }
-          const { response, result } = await sendTelegram(telegramMethod, finalBody);
+          let { response, result } = await sendTelegram(telegramMethod, finalBody);
+          if (
+            (!response.ok || result.ok !== true) &&
+            shouldRetryTelegramWithoutHtmlParseMode({
+              method: telegramMethod,
+              body: finalBody,
+              result,
+            })
+          ) {
+            const retryBody: Record<string, unknown> = { ...finalBody };
+            delete retryBody.parse_mode;
+            ({ response, result } = await sendTelegram(telegramMethod, retryBody));
+          }
           if (!response.ok || result.ok !== true) {
             // Telegram returns 400 "message is not modified" when an editMessageText
             // call produces the same rendered text.  The direct bot path (grammY)
             // silently swallows this — treat it as success here so the mux path
             // behaves identically (keeps the preview message instead of deleting it).
-            const description = typeof result?.description === "string" ? result.description : "";
-            const isNotModified =
-              telegramMethod === "editMessageText" && /message is not modified/i.test(description);
-            if (!isNotModified) {
+            if (!isTelegramMessageNotModified(telegramMethod, result)) {
               return {
                 statusCode: 502,
                 bodyText: JSON.stringify({

@@ -1319,6 +1319,195 @@ describe("mux server", () => {
     });
   });
 
+  test("telegram outbound raw sendMessage retries without HTML parse_mode on parse errors", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/sendMessage") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        if (telegramRequests.length === 1) {
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: "Bad Request: can't parse entities: Can't find end of the entity",
+            }),
+          );
+          return;
+        }
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9904, chat: { id: -100123 } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-RAW-PARSE",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-RAW-PARSE",
+      sessionKey: "agent:main:telegram:group:-100123:topic:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:telegram:group:-100123:topic:2",
+        raw: {
+          telegram: {
+            method: "sendMessage",
+            body: {
+              text: "/model <provider/model>",
+              parse_mode: "HTML",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "9904",
+      rawPassthrough: true,
+    });
+    expect(telegramRequests).toHaveLength(2);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "-100123",
+      message_thread_id: 2,
+      text: "/model <provider/model>",
+      parse_mode: "HTML",
+    });
+    expect(telegramRequests[1]).toMatchObject({
+      chat_id: "-100123",
+      message_thread_id: 2,
+      text: "/model <provider/model>",
+    });
+    expect(telegramRequests[1]?.parse_mode).toBeUndefined();
+  });
+
+  test("telegram outbound raw editMessageText retries without HTML parse_mode on parse errors", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/editMessageText") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        if (telegramRequests.length === 1) {
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error_code: 400,
+              description: "Bad Request: can't parse entities: Can't find end of the entity",
+            }),
+          );
+          return;
+        }
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9905, chat: { id: -100123 } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-RAW-EDIT-PARSE",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-RAW-EDIT-PARSE",
+      sessionKey: "agent:main:telegram:group:-100123:topic:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:telegram:group:-100123:topic:2",
+        raw: {
+          telegram: {
+            method: "editMessageText",
+            body: {
+              message_id: 321,
+              text: "/model <provider/model>",
+              parse_mode: "HTML",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "9905",
+      rawPassthrough: true,
+    });
+    expect(telegramRequests).toHaveLength(2);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "-100123",
+      message_id: 321,
+      text: "/model <provider/model>",
+      parse_mode: "HTML",
+    });
+    expect(telegramRequests[0]?.message_thread_id).toBeUndefined();
+    expect(telegramRequests[1]).toMatchObject({
+      chat_id: "-100123",
+      message_id: 321,
+      text: "/model <provider/model>",
+    });
+    expect(telegramRequests[1]?.parse_mode).toBeUndefined();
+    expect(telegramRequests[1]?.message_thread_id).toBeUndefined();
+  });
+
   test("telegram outbound raw editMessageText keeps route lock and skips thread id injection", async () => {
     const telegramRequests: Array<Record<string, unknown>> = [];
     const telegramApi = await startHttpServer(async (req, res) => {

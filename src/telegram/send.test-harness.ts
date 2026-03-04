@@ -27,16 +27,11 @@ const { loadConfig } = vi.hoisted(() => ({
   loadConfig: vi.fn(() => ({})),
 }));
 
-const { sendViaMux } = vi.hoisted(() => ({
-  sendViaMux: vi.fn(),
-}));
-
 type TelegramSendTestMocks = {
   botApi: Record<string, MockFn>;
   botCtorSpy: MockFn;
   loadConfig: MockFn;
   loadWebMedia: MockFn;
-  sendViaMux: MockFn;
 };
 
 vi.mock("../web/media.js", () => ({
@@ -67,23 +62,14 @@ vi.mock("../config/config.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../channels/plugins/outbound/mux.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../channels/plugins/outbound/mux.js")>();
-  return {
-    ...actual,
-    sendViaMux,
-  };
-});
-
 export function getTelegramSendTestMocks(): TelegramSendTestMocks {
-  return { botApi, botCtorSpy, loadConfig, loadWebMedia, sendViaMux };
+  return { botApi, botCtorSpy, loadConfig, loadWebMedia };
 }
 
 export function installTelegramSendTestHooks() {
   beforeEach(() => {
     loadConfig.mockReturnValue({});
     loadWebMedia.mockReset();
-    sendViaMux.mockReset();
     botCtorSpy.mockReset();
     for (const fn of Object.values(botApi)) {
       fn.mockReset();

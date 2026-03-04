@@ -44,7 +44,6 @@ type MuxSendResponseBody = {
   conversationId?: unknown;
   pollId?: unknown;
   error?: unknown;
-  details?: unknown;
 };
 
 type MuxRegisterResponseBody = {
@@ -97,30 +96,6 @@ function normalizeBaseUrl(value?: string): string | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function readErrorDetails(value: unknown): string | undefined {
-  const direct = readString(value);
-  if (direct) {
-    return direct;
-  }
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-  const record = value as Record<string, unknown>;
-  const description = readString(record.description);
-  if (description) {
-    return description;
-  }
-  const message = readString(record.message);
-  if (message) {
-    return message;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return undefined;
-  }
 }
 
 function normalizeChannelMuxConfig(
@@ -567,10 +542,8 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
 
   const parsedBody = (await response.json()) as MuxSendResponseBody;
   if (!response.ok) {
-    const errorText = readString(parsedBody.error) ?? "request failed";
-    const detailsText = readErrorDetails(parsedBody.details);
     throw new Error(
-      `mux outbound failed (${response.status}): ${errorText}${detailsText ? `: ${detailsText}` : ""}`,
+      `mux outbound failed (${response.status}): ${readString(parsedBody.error) ?? "request failed"}`,
     );
   }
 

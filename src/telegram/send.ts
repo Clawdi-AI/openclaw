@@ -250,7 +250,7 @@ function isTelegramHtmlParseError(err: unknown): boolean {
 export function buildTelegramThreadReplyParams(params: {
   targetMessageThreadId?: number;
   messageThreadId?: number;
-  chatType?: "direct" | "group" | "unknown";
+  chatType?: string;
   replyToMessageId?: number;
   quoteText?: string;
 }): Record<string, unknown> {
@@ -499,43 +499,6 @@ async function sendMessageTelegramViaMux(
     });
   };
 
-  const sendMuxTextWithHtmlFallback = async (params: {
-    text: string;
-    fallbackText?: string;
-    buttons?: TelegramSendOpts["buttons"];
-    messageThreadId?: number;
-    replyToMessageId?: number;
-    quoteText?: string;
-  }) => {
-    const htmlRaw = buildTelegramRawSend({
-      to: chatId,
-      text: renderHtmlText(params.text),
-      buttons: params.buttons,
-      messageThreadId: params.messageThreadId,
-      replyToMessageId: params.replyToMessageId,
-      quoteText: params.quoteText,
-    });
-    try {
-      return await muxSend(htmlRaw);
-    } catch (err) {
-      const errText = err instanceof Error ? err.message : String(err);
-      if (!PARSE_ERR_RE.test(errText)) {
-        throw err;
-      }
-      logVerbose(`telegram HTML parse failed via mux; retrying without formatting: ${errText}`);
-      const plainRaw = buildTelegramRawSend({
-        to: chatId,
-        text: params.fallbackText ?? params.text,
-        buttons: params.buttons,
-        messageThreadId: params.messageThreadId,
-        replyToMessageId: params.replyToMessageId,
-        quoteText: params.quoteText,
-        parseMode: null,
-      });
-      return await muxSend(plainRaw);
-    }
-  };
-
   if (mediaUrl) {
     const media = await loadWebMedia(mediaUrl, {
       maxBytes: opts.maxBytes,
@@ -599,11 +562,13 @@ async function sendMessageTelegramViaMux(
     const result = await muxSend(raw);
 
     if (needsSeparateText && followUpText) {
-      await sendMuxTextWithHtmlFallback({
-        text: followUpText,
-        buttons: opts.buttons,
+      const textRaw = buildTelegramRawSend({
+        to: chatId,
+        text: renderHtmlText(followUpText),
         messageThreadId,
+        buttons: opts.buttons,
       });
+      await muxSend(textRaw);
     }
 
     return { messageId: String(result.messageId ?? "unknown"), chatId };
@@ -613,13 +578,15 @@ async function sendMessageTelegramViaMux(
     throw new Error("Message must be non-empty for Telegram sends");
   }
 
-  const result = await sendMuxTextWithHtmlFallback({
-    text,
-    buttons: opts.buttons,
+  const raw = buildTelegramRawSend({
+    to: chatId,
+    text: renderHtmlText(text),
     messageThreadId,
     replyToMessageId,
     quoteText: opts.quoteText,
+    buttons: opts.buttons,
   });
+  const result = await muxSend(raw);
   return { messageId: String(result.messageId ?? "unknown"), chatId };
 }
 

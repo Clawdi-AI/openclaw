@@ -557,10 +557,7 @@ async function dispatchMuxTelegram(params: {
   const draftReplyToMessageId = replyToMode !== "off" ? readMuxPositiveInt(messageId) : undefined;
   const threadReplyParams = buildTelegramThreadReplyParams({
     messageThreadId,
-    chatType:
-      ctx.ChatType === "direct" || ctx.ChatType === "group" || ctx.ChatType === "unknown"
-        ? ctx.ChatType
-        : "unknown",
+    chatType: ctx.ChatType,
     replyToMessageId: draftReplyToMessageId,
   });
 
