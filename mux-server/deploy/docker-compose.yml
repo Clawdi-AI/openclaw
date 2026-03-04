@@ -50,7 +50,12 @@ services:
     configs:
       - source: mux_proxy_nginx_conf
         target: /etc/nginx/nginx.conf
-    entrypoint: ["sh", "-c", "printf '%s\\n' \"$MUX_PROXY_PROMETHEUS_HTPASSWD_B64\" | base64 -d > /etc/nginx/htpasswd-prometheus && exec nginx -g 'daemon off;'"]
+    entrypoint:
+      [
+        "sh",
+        "-c",
+        "printf '%s\\n' \"$MUX_PROXY_PROMETHEUS_HTPASSWD_B64\" | base64 -d > /etc/nginx/htpasswd-prometheus && exec nginx -g 'daemon off;'",
+      ]
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18891/health >/dev/null || exit 1"]
