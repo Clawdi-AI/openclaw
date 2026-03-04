@@ -661,6 +661,93 @@ describe("runMessageAction media caption behavior", () => {
   });
 });
 
+describe("runMessageAction outbound session key selection", () => {
+  const handleAction = vi.fn(async ({ params }: { params: Record<string, unknown> }) =>
+    jsonResult({
+      ok: true,
+      sessionKey: typeof params.__sessionKey === "string" ? params.__sessionKey : null,
+      agentId: typeof params.__agentId === "string" ? params.__agentId : null,
+    }),
+  );
+
+  const whatsappActionPlugin: ChannelPlugin = {
+    id: "whatsapp",
+    meta: {
+      id: "whatsapp",
+      label: "WhatsApp",
+      selectionLabel: "WhatsApp",
+      docsPath: "/channels/whatsapp",
+      blurb: "WhatsApp action probe.",
+    },
+    capabilities: { chatTypes: ["direct", "group"] },
+    config: {
+      listAccountIds: () => ["default"],
+      resolveAccount: () => ({ enabled: true }),
+      isConfigured: () => true,
+    },
+    actions: {
+      listActions: () => ["send"],
+      supportsAction: ({ action }) => action === "send",
+      handleAction,
+    },
+  };
+
+  beforeEach(() => {
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "whatsapp",
+          source: "test",
+          plugin: whatsappActionPlugin,
+        },
+      ]),
+    );
+    handleAction.mockClear();
+  });
+
+  afterEach(() => {
+    setActivePluginRegistry(createTestRegistry([]));
+  });
+
+  it("keeps the active session key for whatsapp media sends", async () => {
+    const cfg = {
+      channels: {
+        whatsapp: {
+          allowFrom: ["*"],
+        },
+      },
+    } as OpenClawConfig;
+    const activeSessionKey = "agent:main:whatsapp:direct:+15550001111";
+
+    const result = await runMessageAction({
+      cfg,
+      action: "send",
+      params: {
+        channel: "whatsapp",
+        target: "+15550001111",
+        message: "file attached",
+        media: "https://example.com/file.pdf",
+      },
+      sessionKey: activeSessionKey,
+      dryRun: false,
+    });
+
+    expect(result.kind).toBe("send");
+    expect(result.handledBy).toBe("plugin");
+    expect(handleAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          __sessionKey: activeSessionKey,
+        }),
+      }),
+    );
+    const called = handleAction.mock.calls[0]?.[0] as
+      | { params?: Record<string, unknown> }
+      | undefined;
+    expect(called?.params?.__sessionKey).not.toBe("agent:main:main");
+  });
+});
+
 describe("runMessageAction card-only send behavior", () => {
   const handleAction = vi.fn(async ({ params }: { params: Record<string, unknown> }) =>
     jsonResult({

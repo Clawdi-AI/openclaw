@@ -481,8 +481,12 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     toolContext: input.toolContext,
     allowSlackAutoThread: channel === "slack" && !replyToId,
   });
+  const providedSessionKey =
+    typeof input.sessionKey === "string" && input.sessionKey.trim().length > 0
+      ? input.sessionKey.trim().toLowerCase()
+      : undefined;
   const outboundRoute =
-    agentId && !dryRun
+    agentId && !dryRun && !providedSessionKey
       ? await resolveOutboundSessionRoute({
           cfg,
           channel,
@@ -503,8 +507,9 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       route: outboundRoute,
     });
   }
-  if (outboundRoute && !dryRun) {
-    params.__sessionKey = outboundRoute.sessionKey;
+  const outboundSessionKey = providedSessionKey ?? outboundRoute?.sessionKey;
+  if (outboundSessionKey && !dryRun) {
+    params.__sessionKey = outboundSessionKey;
   }
   if (agentId) {
     params.__agentId = agentId;
@@ -519,15 +524,15 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       params,
       agentId,
       accountId: accountId ?? undefined,
-      sessionKey: input.sessionKey,
+      sessionKey: providedSessionKey ?? input.sessionKey,
       gateway,
       toolContext: input.toolContext,
       deps: input.deps,
       dryRun,
       mirror:
-        outboundRoute && !dryRun
+        outboundSessionKey && !dryRun
           ? {
-              sessionKey: outboundRoute.sessionKey,
+              sessionKey: outboundSessionKey,
               agentId,
               text: message,
               mediaUrls: mirrorMediaUrls,
