@@ -3,7 +3,6 @@ name: Docker Release (Phala)
 on:
   push:
     branches:
-      - main
       - "phala-*"
     tags:
       - "v*"
@@ -29,8 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version-full: ${{ steps.versions.outputs.full }}
-      version-base: ${{ steps.versions.outputs.base }}
-      version-has-phala: ${{ steps.versions.outputs.has_phala }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,11 +59,28 @@ jobs:
             exit 1
           fi
 
-          BASE_VERSION="${FULL_VERSION%%-phala.*}"
+          IS_RELEASE="false"
+          IS_INTEGRATION="false"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            IS_RELEASE="true"
+          fi
+          if [[ "${GITHUB_REF}" == refs/heads/phala-* ]]; then
+            IS_INTEGRATION="true"
+          fi
+          if [[ "$IS_RELEASE" != "true" && "$IS_INTEGRATION" != "true" ]]; then
+            echo "unsupported ref for this workflow: ${GITHUB_REF}" >&2
+            echo "expected refs/tags/v* or refs/heads/phala-*" >&2
+            exit 1
+          fi
+          if [[ "$IS_RELEASE" == "true" ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "$TAG_VERSION" != "$FULL_VERSION" ]]; then
+              echo "release tag/version mismatch: tag=${TAG_VERSION}, package=${FULL_VERSION}" >&2
+              exit 1
+            fi
+          fi
 
           echo "full=$FULL_VERSION" >> "$GITHUB_OUTPUT"
-          echo "base=$BASE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "has_phala=true" >> "$GITHUB_OUTPUT"
 
       - name: Pack tarball
         run: |
@@ -81,7 +95,7 @@ jobs:
           path: phala-deploy/openclaw.tgz
           if-no-files-found: error
 
-  release-openclaw-amd64:
+  release-openclaw-full-amd64:
     needs: prepare-release
     runs-on: ubuntu-latest
     permissions:
@@ -89,8 +103,7 @@ jobs:
       contents: read
     env:
       VERSION_FULL: ${{ needs.prepare-release.outputs.version-full }}
-      VERSION_BASE: ${{ needs.prepare-release.outputs.version-base }}
-      VERSION_HAS_PHALA: ${{ needs.prepare-release.outputs.version-has-phala }}
+      IMAGE_NAME_OPENCLAW: ${{ github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -121,20 +134,18 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_LC }}
           tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=raw,value=${{ env.VERSION_FULL }}
-            type=raw,value=${{ env.VERSION_BASE }},enable=${{ env.VERSION_HAS_PHALA == 'true' }}
-            type=sha,format=short,prefix=sha-
-            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=semver,pattern={{version}},suffix=-amd64
-            type=ref,event=branch,suffix=-amd64
-            type=raw,value=${{ env.VERSION_FULL }}-amd64
-            type=raw,value=${{ env.VERSION_BASE }}-amd64,enable=${{ env.VERSION_HAS_PHALA == 'true' }}
-            type=sha,format=short,prefix=sha-,suffix=-amd64
-            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ env.VERSION_FULL }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=ref,event=branch,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=sha-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=sha-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
 
       - name: Build and push amd64 image
         uses: docker/build-push-action@v6
@@ -147,6 +158,72 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_LC }}-cache:amd64
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_LC }}-cache:amd64,mode=max
+          provenance: false
+          push: true
+
+  release-openclaw-base-amd64:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    env:
+      VERSION_FULL: ${{ needs.prepare-release.outputs.version-full }}
+      IMAGE_NAME_OPENCLAW_BASE: ${{ github.repository }}-base
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: openclaw-release-tgz
+          path: phala-deploy
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Normalize image refs
+        run: |
+          echo "IMAGE_NAME_OPENCLAW_BASE_LC=${IMAGE_NAME_OPENCLAW_BASE,,}" >> "$GITHUB_ENV"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_BASE_LC }}
+          tags: |
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ env.VERSION_FULL }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=ref,event=branch,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=sha-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=sha-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+
+      - name: Build and push amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: phala-deploy/Dockerfile
+          target: base
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_BASE_LC }}-cache:amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_BASE_LC }}-cache:amd64,mode=max
           provenance: false
           push: true
 
@@ -182,18 +259,18 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MUX_LC }}
           tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=raw,value=${{ env.VERSION_FULL }}
-            type=sha,format=short,prefix=sha-
-            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=semver,pattern={{version}},suffix=-amd64
-            type=ref,event=branch,suffix=-amd64
-            type=raw,value=${{ env.VERSION_FULL }}-amd64
-            type=sha,format=short,prefix=sha-,suffix=-amd64
-            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ env.VERSION_FULL }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=ref,event=branch,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=sha-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=sha-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
 
       - name: Build and push mux amd64 image
         uses: docker/build-push-action@v6
