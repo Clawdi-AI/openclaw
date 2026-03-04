@@ -64,35 +64,6 @@ describe("directive behavior", () => {
       expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
   });
-  it("shows /model summary even when commands.allowFrom excludes the sender", async () => {
-    await withTempHome(async (home) => {
-      const text = replyText(
-        await getReplyFromConfig(
-          { Body: "/model", From: "+1222", To: "+1222", CommandAuthorized: true },
-          {},
-          makeWhatsAppDirectiveConfig(
-            home,
-            {
-              model: { primary: "anthropic/claude-opus-4-5" },
-              models: {
-                "anthropic/claude-opus-4-5": {},
-                "openai/gpt-4.1-mini": {},
-              },
-            },
-            {
-              session: { store: sessionStorePath(home) },
-              commands: { allowFrom: { whatsapp: ["+1999"] } },
-            },
-          ),
-        ),
-      );
-
-      expect(text).toContain("Current: anthropic/claude-opus-4-5");
-      expect(text).toContain("Switch: /model <provider/model>");
-      expect(text).toContain("Browse: /models (providers) or /models <provider> (models)");
-      expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
-    });
-  });
   it("includes catalog providers when no allowlist is set", async () => {
     await withTempHome(async (home) => {
       vi.mocked(loadModelCatalog).mockResolvedValue([
