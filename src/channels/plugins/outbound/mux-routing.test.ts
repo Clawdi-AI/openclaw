@@ -110,7 +110,7 @@ describe("mux outbound routing", () => {
   });
 
   it("routes discord outbound through mux when enabled", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -158,7 +158,13 @@ describe("mux outbound routing", () => {
       ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
     );
     expect(sendCall).toBeDefined();
-    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    const url = sendCall?.[0];
+    const init = sendCall?.[1];
+    expect(url).toBeDefined();
+    expect(init).toBeDefined();
+    if (url === undefined || init === undefined) {
+      throw new Error("expected mux outbound send call with RequestInit");
+    }
     expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
     expect(parseJsonRequestBody(init)).toMatchObject({
       channel: "discord",
@@ -175,7 +181,7 @@ describe("mux outbound routing", () => {
   });
 
   it("routes whatsapp outbound through mux when enabled", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -219,7 +225,13 @@ describe("mux outbound routing", () => {
       ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
     );
     expect(sendCall).toBeDefined();
-    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    const url = sendCall?.[0];
+    const init = sendCall?.[1];
+    expect(url).toBeDefined();
+    expect(init).toBeDefined();
+    if (url === undefined || init === undefined) {
+      throw new Error("expected mux outbound send call with RequestInit");
+    }
     expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
     expect(parseJsonRequestBody(init)).toMatchObject({
       channel: "whatsapp",
@@ -236,7 +248,7 @@ describe("mux outbound routing", () => {
   });
 
   it("routes telegram outbound through mux from default account config", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -278,7 +290,7 @@ describe("mux outbound routing", () => {
   });
 
   it("routes discord outbound through mux from default account config", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -320,7 +332,7 @@ describe("mux outbound routing", () => {
   });
 
   it("routes whatsapp outbound through mux from default account config", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -362,7 +374,7 @@ describe("mux outbound routing", () => {
   });
 
   it("routes typing through mux when enabled", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -400,7 +412,13 @@ describe("mux outbound routing", () => {
       ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
     );
     expect(sendCall).toBeDefined();
-    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    const url = sendCall?.[0];
+    const init = sendCall?.[1];
+    expect(url).toBeDefined();
+    expect(init).toBeDefined();
+    if (url === undefined || init === undefined) {
+      throw new Error("expected mux outbound send call with RequestInit");
+    }
     expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
     expect(parseJsonRequestBody(init)).toMatchObject({
       op: "action",
@@ -471,7 +489,7 @@ describe("mux outbound routing", () => {
   });
 
   it("rejects telegram mux success payload missing messageId", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -509,7 +527,7 @@ describe("mux outbound routing", () => {
   });
 
   it("rejects discord mux success payload missing messageId", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
@@ -547,7 +565,7 @@ describe("mux outbound routing", () => {
   });
 
   it("rejects whatsapp mux success payload missing messageId", async () => {
-    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/v1/instances/register") {
         return jsonResponse({
