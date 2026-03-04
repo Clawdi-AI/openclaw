@@ -41,9 +41,9 @@ gog --help                  # full command reference
 
 ## Build details
 
-| Detail | Value |
-|--------|-------|
-| Source | `github.com/Leechael/gogcli` branch `feat/env-token-injection` |
-| Build | `CGO_ENABLED=0`, stripped (`-s -w`) |
-| Binary size | ~21MB |
-| Linked | Static (no libc dependency) |
+| Detail      | Value                                                          |
+| ----------- | -------------------------------------------------------------- |
+| Source      | `github.com/Leechael/gogcli` branch `feat/env-token-injection` |
+| Build       | `CGO_ENABLED=0`, stripped (`-s -w`)                            |
+| Binary size | ~21MB                                                          |
+| Linked      | Static (no libc dependency)                                    |

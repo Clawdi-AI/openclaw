@@ -296,7 +296,17 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount> = {
     textChunkLimit: 2000,
     pollMaxOptions: 10,
     resolveTarget: ({ to }) => normalizeDiscordOutboundTarget(to),
-    sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, silent, sessionKey }) => {
+    sendText: async ({
+      cfg,
+      to,
+      text,
+      accountId,
+      deps,
+      replyToId,
+      threadId,
+      silent,
+      sessionKey,
+    }) => {
       if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
         const result = await sendViaMux({
           cfg,

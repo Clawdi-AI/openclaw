@@ -1,6 +1,6 @@
 import { sendMessageDiscord, sendPollDiscord } from "../../../discord/send.js";
-import { normalizeDiscordOutboundTarget } from "../normalize/discord.js";
 import { buildDiscordRawSend } from "../mux-envelope.js";
+import { normalizeDiscordOutboundTarget } from "../normalize/discord.js";
 import type { ChannelOutboundAdapter } from "../types.js";
 import { isMuxEnabled, sendViaMux } from "./mux.js";
 
@@ -38,7 +38,18 @@ export const discordOutbound: ChannelOutboundAdapter = {
     });
     return { channel: "discord", ...result };
   },
-  sendMedia: async ({ cfg, to, text, mediaUrl, mediaLocalRoots, accountId, deps, replyToId, silent, sessionKey }) => {
+  sendMedia: async ({
+    cfg,
+    to,
+    text,
+    mediaUrl,
+    mediaLocalRoots,
+    accountId,
+    deps,
+    replyToId,
+    silent,
+    sessionKey,
+  }) => {
     if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
       const result = await sendViaMux({
         cfg,

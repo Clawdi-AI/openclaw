@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "../../../config/config.js";
-import type { PollInput } from "../../../polls.js";
 import { loadOrCreateDeviceIdentity } from "../../../infra/device-identity.js";
+import type { PollInput } from "../../../polls.js";
 import { DEFAULT_ACCOUNT_ID } from "../../../routing/session-key.js";
 
 type SupportedMuxChannel = "whatsapp" | "telegram" | "discord";
