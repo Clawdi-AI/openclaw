@@ -1,21 +1,10 @@
-name: Docker Release (OpenClaw)
+name: Docker Release
 
 on:
-  push:
-    branches:
-      - main
-      - "phala-*"
-    tags:
-      - "v*"
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "**/*.mdx"
-      - ".agents/**"
-      - "skills/**"
+  workflow_dispatch:
 
 concurrency:
-  group: docker-release-openclaw-${{ github.ref }}
+  group: docker-release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -46,26 +35,18 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Normalize image refs
-        run: |
-          echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
-            type=sha,format=short,prefix=sha-
-            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
             type=semver,pattern={{version}},suffix=-amd64
+            type=semver,pattern={{version}},suffix=-arm64
             type=ref,event=branch,suffix=-amd64
-            type=sha,format=short,prefix=sha-,suffix=-amd64
-            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=ref,event=branch,suffix=-arm64
 
       - name: Build and push amd64 image
         id: build
@@ -75,8 +56,8 @@ jobs:
           platforms: linux/amd64
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}-cache:amd64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}-cache:amd64,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache:amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache:amd64,mode=max
           provenance: false
           push: true
 
@@ -103,26 +84,18 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Normalize image refs
-        run: |
-          echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
-            type=sha,format=short,prefix=sha-
-            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
+            type=semver,pattern={{version}},suffix=-amd64
             type=semver,pattern={{version}},suffix=-arm64
+            type=ref,event=branch,suffix=-amd64
             type=ref,event=branch,suffix=-arm64
-            type=sha,format=short,prefix=sha-,suffix=-arm64
-            type=sha,format=short,prefix=phala-,suffix=-arm64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest-arm64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
 
       - name: Build and push arm64 image
         id: build
@@ -132,8 +105,8 @@ jobs:
           platforms: linux/arm64
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}-cache:arm64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}-cache:arm64,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache:arm64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache:arm64,mode=max
           provenance: false
           push: true
 
@@ -152,21 +125,14 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Normalize image refs
-        run: |
-          echo "IMAGE_NAME_LC=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-
       - name: Extract metadata for manifest
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
-            type=sha,format=short,prefix=sha-
-            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
-            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') || (startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-phala.')) }}
 
       - name: Create and push manifest
         run: |

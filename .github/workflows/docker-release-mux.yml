@@ -1,18 +1,7 @@
 name: Docker Release (Mux Server)
 
 on:
-  push:
-    branches:
-      - main
-      - "phala-*"
-    tags:
-      - "v*"
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "**/*.mdx"
-      - ".agents/**"
-      - "skills/**"
+  workflow_dispatch:
 
 concurrency:
   group: docker-release-mux-${{ github.ref }}
