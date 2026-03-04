@@ -201,7 +201,7 @@ function createJwtFixture() {
 describe("handleMuxInboundHttpRequest", () => {
   test("authenticates and dispatches inbound payload", async () => {
     const jwtFixture = createJwtFixture();
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         return new Response(JSON.stringify(jwtFixture.jwks), {
@@ -340,7 +340,7 @@ describe("handleMuxInboundHttpRequest", () => {
   test("accepts mux inbound jwt auth and reuses cached jwks", async () => {
     const jwtFixture = createJwtFixture();
     let jwksFetchCount = 0;
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         jwksFetchCount += 1;
@@ -471,7 +471,9 @@ describe("handleMuxInboundHttpRequest", () => {
 
   test("passes through channelData without transport mutation", async () => {
     const jwtFixture = createJwtFixture();
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         return new Response(JSON.stringify(jwtFixture.jwks), {
@@ -638,7 +640,9 @@ describe("handleMuxInboundHttpRequest", () => {
 
   test("sets ctx.MediaPaths and MediaTypes from base64 content attachment", async () => {
     const jwtFixture = createJwtFixture();
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         return new Response(JSON.stringify(jwtFixture.jwks), {
@@ -983,11 +987,15 @@ describe("handleMuxInboundHttpRequest", () => {
     expect(res.statusCode).toBe(202);
 
     await waitForAsyncDispatch();
-    const sendCall = fetchMock.mock.calls.find(
+    const sendCall = (fetchMock.mock.calls as Array<[string | URL | Request, RequestInit?]>).find(
       ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
     );
     expect(sendCall).toBeDefined();
-    const [, init] = sendCall as [string | URL | Request, RequestInit];
+    const init = sendCall?.[1];
+    expect(init).toBeDefined();
+    if (!init) {
+      throw new Error("expected fetch init for mux outbound send");
+    }
     const body = parseJsonRequestBody(init);
     const raw = body.raw as Record<string, unknown> | undefined;
     const telegram = raw?.telegram as Record<string, unknown> | undefined;
@@ -1048,7 +1056,9 @@ describe("handleMuxInboundHttpRequest", () => {
       },
     );
 
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
       const url = resolveFetchUrl(input);
       if (url === "http://mux.local/.well-known/jwks.json") {
         return new Response(JSON.stringify(jwtFixture.jwks), {
@@ -1098,11 +1108,15 @@ describe("handleMuxInboundHttpRequest", () => {
     expect(res.statusCode).toBe(202);
 
     await waitForAsyncDispatch();
-    const sendCall = fetchMock.mock.calls.find(
+    const sendCall = (fetchMock.mock.calls as Array<[string | URL | Request, RequestInit?]>).find(
       ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
     );
     expect(sendCall).toBeDefined();
-    const [, init] = sendCall as [string | URL | Request, RequestInit];
+    const init = sendCall?.[1];
+    expect(init).toBeDefined();
+    if (!init) {
+      throw new Error("expected fetch init for mux outbound send");
+    }
     const body = parseJsonRequestBody(init);
     const raw = body.raw as Record<string, unknown> | undefined;
     const telegram = raw?.telegram as Record<string, unknown> | undefined;
