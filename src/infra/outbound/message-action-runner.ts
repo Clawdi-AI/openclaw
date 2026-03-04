@@ -485,8 +485,9 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     typeof input.sessionKey === "string" && input.sessionKey.trim().length > 0
       ? input.sessionKey.trim().toLowerCase()
       : undefined;
+  const preserveProvidedSessionKey = channel === "whatsapp" && Boolean(providedSessionKey);
   const outboundRoute =
-    agentId && !dryRun && !providedSessionKey
+    agentId && !dryRun && !preserveProvidedSessionKey
       ? await resolveOutboundSessionRoute({
           cfg,
           channel,
@@ -507,7 +508,8 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       route: outboundRoute,
     });
   }
-  const outboundSessionKey = providedSessionKey ?? outboundRoute?.sessionKey;
+  const outboundSessionKey =
+    (preserveProvidedSessionKey ? providedSessionKey : undefined) ?? outboundRoute?.sessionKey;
   if (outboundSessionKey && !dryRun) {
     params.__sessionKey = outboundSessionKey;
   }
@@ -524,7 +526,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       params,
       agentId,
       accountId: accountId ?? undefined,
-      sessionKey: providedSessionKey ?? input.sessionKey,
+      sessionKey: input.sessionKey,
       gateway,
       toolContext: input.toolContext,
       deps: input.deps,
