@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag (e.g. proxy-test)"
-        required: true
-        default: "proxy-test"
+        description: "Image tag (optional; defaults to current branch name)"
+        required: false
+        default: ""
       target:
         description: "Dockerfile target (base or full)"
         required: true
@@ -29,6 +29,23 @@ jobs:
 
       - name: Lowercase image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Resolve image tag
+        run: |
+          RAW_TAG="${{ inputs.image_tag }}"
+          if [ -z "$RAW_TAG" ]; then
+            RAW_TAG="${GITHUB_REF_NAME}"
+          fi
+
+          SAFE_TAG="$(printf '%s' "$RAW_TAG" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's#[^a-z0-9._-]+#-#g; s#^-+##; s#-+$##; s#-+#-#g')"
+          SAFE_TAG="${SAFE_TAG:0:128}"
+          if [ -z "$SAFE_TAG" ]; then
+            SAFE_TAG="proxy-test"
+          fi
+
+          echo "TAG=$SAFE_TAG" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -72,6 +89,6 @@ jobs:
           target: ${{ inputs.target }}
           platforms: linux/amd64
           push: true
-          tags: ${{ env.IMAGE }}:${{ inputs.image_tag }}
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

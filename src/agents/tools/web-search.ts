@@ -22,7 +22,8 @@ const SEARCH_PROVIDERS = ["brave", "perplexity", "grok"] as const;
 const DEFAULT_SEARCH_COUNT = 5;
 const MAX_SEARCH_COUNT = 10;
 
-const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const DEFAULT_BRAVE_BASE_URL = "https://api.search.brave.com";
+const BRAVE_SEARCH_PATH = "/res/v1/web/search";
 const DEFAULT_PERPLEXITY_BASE_URL = "https://openrouter.ai/api/v1";
 const PERPLEXITY_DIRECT_BASE_URL = "https://api.perplexity.ai";
 const DEFAULT_PERPLEXITY_MODEL = "perplexity/sonar-pro";
@@ -367,6 +368,14 @@ function resolveGrokInlineCitations(grok?: GrokConfig): boolean {
   return grok?.inlineCitations === true;
 }
 
+function resolveBraveBaseUrl(search?: WebSearchConfig): string {
+  const fromConfig =
+    search && "baseUrl" in search && typeof search.baseUrl === "string"
+      ? search.baseUrl.trim().replace(/\/$/, "")
+      : "";
+  return fromConfig || DEFAULT_BRAVE_BASE_URL;
+}
+
 function resolveSearchCount(value: unknown, fallback: number): number {
   const parsed = typeof value === "number" && Number.isFinite(value) ? value : fallback;
   const clamped = Math.max(1, Math.min(MAX_SEARCH_COUNT, Math.floor(parsed)));
@@ -562,6 +571,7 @@ async function runWebSearch(params: {
   search_lang?: string;
   ui_lang?: string;
   freshness?: string;
+  braveBaseUrl?: string;
   perplexityBaseUrl?: string;
   perplexityModel?: string;
   grokModel?: string;
@@ -569,9 +579,9 @@ async function runWebSearch(params: {
 }): Promise<Record<string, unknown>> {
   const cacheKey = normalizeCacheKey(
     params.provider === "brave"
-      ? `${params.provider}:${params.query}:${params.count}:${params.country || "default"}:${params.search_lang || "default"}:${params.ui_lang || "default"}:${params.freshness || "default"}`
+      ? `${params.provider}:${params.query}:${params.count}:${params.country || "default"}:${params.search_lang || "default"}:${params.ui_lang || "default"}:${params.freshness || "default"}:${params.braveBaseUrl || DEFAULT_BRAVE_BASE_URL}`
       : params.provider === "perplexity"
-        ? `${params.provider}:${params.query}:${params.perplexityBaseUrl ?? DEFAULT_PERPLEXITY_BASE_URL}:${params.perplexityModel ?? DEFAULT_PERPLEXITY_MODEL}:${params.freshness || "default"}`
+        ? `${params.provider}:${params.query}:${params.count}:${params.perplexityBaseUrl ?? DEFAULT_PERPLEXITY_BASE_URL}:${params.perplexityModel ?? DEFAULT_PERPLEXITY_MODEL}:${params.freshness || "default"}`
         : `${params.provider}:${params.query}:${params.grokModel ?? DEFAULT_GROK_MODEL}:${String(params.grokInlineCitations ?? false)}`,
   );
   const cached = readCache(SEARCH_CACHE, cacheKey);
@@ -582,10 +592,70 @@ async function runWebSearch(params: {
   const start = Date.now();
 
   if (params.provider === "perplexity") {
+    const resolvedBase = (params.perplexityBaseUrl ?? DEFAULT_PERPLEXITY_BASE_URL).replace(
+      /\/$/,
+      "",
+    );
+    const proxyMode =
+      resolvedBase !== DEFAULT_PERPLEXITY_BASE_URL && resolvedBase !== PERPLEXITY_DIRECT_BASE_URL;
+
+    if (proxyMode) {
+      // Proxy mode → flat-rate Perplexity Search API (POST /search)
+      const searchBody: Record<string, unknown> = {
+        query: params.query,
+        max_results: params.count,
+      };
+      const recency = freshnessToPerplexityRecency(params.freshness);
+      if (recency) {
+        searchBody.search_recency_filter = recency;
+      }
+      const searchRes = await fetch(`${resolvedBase}/search`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${params.apiKey}`,
+        },
+        body: JSON.stringify(searchBody),
+        signal: withTimeout(undefined, params.timeoutSeconds * 1000),
+      });
+      if (!searchRes.ok) {
+        const d = (await readResponseText(searchRes, { maxBytes: 64_000 })).text;
+        throw new Error(
+          `Perplexity Search API error (${searchRes.status}): ${d || searchRes.statusText}`,
+        );
+      }
+      const { results: rawResults = [] } = (await searchRes.json()) as {
+        results?: Array<{ title?: string; url?: string; snippet?: string; date?: string }>;
+      };
+      const mapped = rawResults.map((e) => ({
+        title: e.title ? wrapWebContent(e.title, "web_search") : "",
+        url: e.url ?? "",
+        description: e.snippet ? wrapWebContent(e.snippet, "web_search") : "",
+        published: e.date || undefined,
+        siteName: resolveSiteName(e.url) || undefined,
+      }));
+      const proxyPayload = {
+        query: params.query,
+        provider: params.provider,
+        count: mapped.length,
+        tookMs: Date.now() - start,
+        externalContent: {
+          untrusted: true,
+          source: "web_search",
+          provider: params.provider,
+          wrapped: true,
+        },
+        results: mapped,
+      };
+      writeCache(SEARCH_CACHE, cacheKey, proxyPayload, params.cacheTtlMs);
+      return proxyPayload;
+    }
+
+    // Direct mode → original Sonar chat completions (unchanged)
     const { content, citations } = await runPerplexitySearch({
       query: params.query,
       apiKey: params.apiKey,
-      baseUrl: params.perplexityBaseUrl ?? DEFAULT_PERPLEXITY_BASE_URL,
+      baseUrl: resolvedBase,
       model: params.perplexityModel ?? DEFAULT_PERPLEXITY_MODEL,
       timeoutSeconds: params.timeoutSeconds,
       freshness: params.freshness,
@@ -641,7 +711,8 @@ async function runWebSearch(params: {
     throw new Error("Unsupported web search provider.");
   }
 
-  const url = new URL(BRAVE_SEARCH_ENDPOINT);
+  const braveBase = (params.braveBaseUrl || DEFAULT_BRAVE_BASE_URL).replace(/\/$/, "");
+  const url = new URL(`${braveBase}${BRAVE_SEARCH_PATH}`);
   url.searchParams.set("q", params.query);
   url.searchParams.set("count", String(params.count));
   if (params.country) {
@@ -778,6 +849,7 @@ export function createWebSearchTool(options?: {
         search_lang,
         ui_lang,
         freshness,
+        braveBaseUrl: resolveBraveBaseUrl(search),
         perplexityBaseUrl: resolvePerplexityBaseUrl(
           perplexityConfig,
           perplexityAuth?.source,
