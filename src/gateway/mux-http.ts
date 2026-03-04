@@ -7,6 +7,7 @@ import {
   buildCommandTextFromArgs,
   findCommandByNativeName,
   parseCommandArgs,
+  resolveTextCommand,
   resolveCommandArgMenu,
 } from "../auto-reply/commands-registry.js";
 import type { CommandArgs } from "../auto-reply/commands-registry.types.js";
@@ -560,7 +561,9 @@ async function dispatchMuxTelegram(params: {
   const commandMatch = body.match(/^\/([a-z0-9_]+)(?:@\S+)?\s*(.*)/i);
   if (commandMatch) {
     const [, commandName, rawArgs] = commandMatch;
-    const commandDef = findCommandByNativeName(commandName, "telegram");
+    const commandDef =
+      findCommandByNativeName(commandName, "telegram") ??
+      resolveTextCommand(`/${commandName}`, cfg)?.command;
     if (commandDef) {
       const commandArgs = parseCommandArgs(commandDef, rawArgs.trim());
       const menu = resolveCommandArgMenu({ command: commandDef, args: commandArgs, cfg });
