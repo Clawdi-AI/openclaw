@@ -273,8 +273,10 @@ export function buildTelegramRawSend(params: {
   messageThreadId?: number;
   replyToMessageId?: number;
   quoteText?: string;
+  parseMode?: "HTML" | null;
 }) {
   const replyMarkup = buildTelegramReplyMarkup(params.buttons);
+  const parseMode = params.parseMode === undefined ? "HTML" : params.parseMode;
   const replyParams =
     params.replyToMessageId == null
       ? {}
@@ -291,7 +293,7 @@ export function buildTelegramRawSend(params: {
     body: {
       chat_id: params.to,
       text: params.text,
-      parse_mode: "HTML" as const,
+      ...(parseMode ? { parse_mode: parseMode } : {}),
       ...(params.messageThreadId != null ? { message_thread_id: params.messageThreadId } : {}),
       ...replyParams,
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),

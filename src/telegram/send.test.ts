@@ -9,7 +9,7 @@ import { clearSentMessageCache, recordSentMessage, wasSentByBot } from "./sent-m
 
 installTelegramSendTestHooks();
 
-const { botApi, botCtorSpy, loadConfig, loadWebMedia } = getTelegramSendTestMocks();
+const { botApi, botCtorSpy, loadConfig, loadWebMedia, sendViaMux } = getTelegramSendTestMocks();
 const {
   buildInlineKeyboard,
   createForumTopicTelegram,
@@ -174,6 +174,43 @@ describe("sendMessageTelegram", () => {
     expect(sendMessage).toHaveBeenNthCalledWith(2, chatId, "_oops_");
     expect(res.chatId).toBe(chatId);
     expect(res.messageId).toBe("42");
+  });
+
+  it("falls back to plain text when mux Telegram HTML parsing fails", async () => {
+    const chatId = "123";
+    sendViaMux
+      .mockRejectedValueOnce(
+        new Error(
+          "mux outbound failed (502): telegram raw send failed: Bad Request: can't parse entities: Can't find end of the entity",
+        ),
+      )
+      .mockResolvedValueOnce({
+        messageId: "91",
+        chatId,
+      });
+
+    const res = await sendMessageTelegram(chatId, "/model <provider/model>", {
+      textMode: "html",
+      buttons: [[{ text: "Browse providers", callback_data: "mdl_prov" }]],
+      mux: {
+        cfg: {} as ReturnType<typeof loadConfig>,
+        sessionKey: "test:session",
+      },
+    });
+
+    expect(sendViaMux).toHaveBeenCalledTimes(2);
+    const firstCall = sendViaMux.mock.calls[0]?.[0] as {
+      raw?: { telegram?: { body?: { text?: string; parse_mode?: string } } };
+    };
+    const secondCall = sendViaMux.mock.calls[1]?.[0] as {
+      raw?: { telegram?: { body?: { text?: string; parse_mode?: string } } };
+    };
+    expect(firstCall.raw?.telegram?.body?.text).toBe("/model <provider/model>");
+    expect(firstCall.raw?.telegram?.body?.parse_mode).toBe("HTML");
+    expect(secondCall.raw?.telegram?.body?.text).toBe("/model <provider/model>");
+    expect(secondCall.raw?.telegram?.body?.parse_mode).toBeUndefined();
+    expect(res.chatId).toBe(chatId);
+    expect(res.messageId).toBe("91");
   });
 
   it("adds link_preview_options when previews are disabled in config", async () => {
