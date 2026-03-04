@@ -371,7 +371,7 @@ Two commands: build, then deploy.
 
 ```sh
 # Build and push OpenClaw images (full + base)
-./phala-deploy/build-pin-openclaw.sh
+./phala-deploy/build-openclaw.sh
 
 # Deploy OpenClaw CVM (set env vars first)
 export MASTER_KEY=replace-with-master-key
@@ -400,7 +400,7 @@ If you prefer a manual env file flow, deploy manually:
 
 ```sh
 # 1. Build and push images (full + base)
-./phala-deploy/build-pin-openclaw.sh
+./phala-deploy/build-openclaw.sh
 
 # 2. Download the existing config from the CVM (preserved across deploys)
 phala ssh <cvm-name> -- docker cp openclaw:/root/.openclaw/openclaw.json /tmp/openclaw.json
@@ -455,7 +455,7 @@ If your CVM is destroyed (S3 mode only):
 | `Dockerfile`                     | CVM image (Ubuntu 24.04 + Node 24 + rclone + Docker-in-Docker)                               |
 | `entrypoint.sh`                  | Boot sequence: key derivation, S3 mount, SSH, Docker, gateway                                |
 | `docker-compose.yml`             | Compose file for `phala deploy`                                                              |
-| `build-pin-openclaw.sh`          | Build tarball and build/push OpenClaw full + base images                                     |
+| `build-openclaw.sh`              | Build tarball and build/push OpenClaw full + base images                                     |
 | `deploy-openclaw.sh`             | Deploy OpenClaw CVM, wait for health, run smoke tests                                        |
 | `migrate-openclaw.sh`            | Apply config migrations to a running CVM via SSH                                             |
 | `gen-cvm-config.sh`              | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)                              |

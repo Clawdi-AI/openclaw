@@ -73,7 +73,7 @@ If you have a local secrets file (e.g., `configs/my-instance.env`):
 ### 1. Build the new images
 
 ```bash
-./phala-deploy/build-pin-openclaw.sh
+./phala-deploy/build-openclaw.sh
 # This builds and pushes full + base target images.
 ```
 
@@ -148,7 +148,7 @@ For mux preflight, see `mux-server/deploy/README.md`.
 OpenClaw:
 
 ```bash
-./phala-deploy/build-pin-openclaw.sh
+./phala-deploy/build-openclaw.sh
 ```
 
 ### 3. Deploy
