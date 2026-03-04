@@ -285,61 +285,336 @@ async function handleCallback(name, code) {
 }
 
 function renderDashboard() {
-  const serverCards = Object.entries(state)
-    .map(([name, s]) => {
-      const statusEmoji =
-        {
-          pending: "⏳",
-          awaiting_auth: "🔑",
-          exchanging: "🔄",
-          connecting: "🔄",
-          connected: "✅",
-          error: "❌",
-        }[s.status] || "❓";
-      const statusText = {
-        pending: "Initializing...",
-        awaiting_auth: "Click to authorize",
-        exchanging: "Exchanging token...",
-        connecting: "Connecting...",
-        connected: `Connected — ${s.tools.length} tools`,
-        error: `Error: ${s.error}`,
-      }[s.status];
-      let toolsList = "";
-      if (s.tools.length > 0) {
-        toolsList =
-          '<div class="tools">' +
-          s.tools
-            .map((t) => `<div class="tool"><b>${t.name}</b><span>${t.description}</span></div>`)
-            .join("") +
-          "</div>";
-      }
-      let button = "";
-      if (s.status === "awaiting_auth" && s.authUrl) {
-        button = `<a href="${s.authUrl}" class="btn" target="_blank">Authorize ${name}</a>`;
-      }
-      return `<div class="card ${s.status}"><div class="card-header"><span class="emoji">${statusEmoji}</span><span class="name">${name}</span><span class="status-badge ${s.status}">${statusText}</span></div>${button}${toolsList}</div>`;
-    })
-    .join("");
   const connectedCount = Object.values(state).filter((s) => s.status === "connected").length;
   const total = Object.keys(state).length;
-  return `<!DOCTYPE html><html><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenClaw MCP Onboarding</title><meta http-equiv="refresh" content="3">
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0a;color:#e5e5e5;padding:16px;max-width:600px;margin:0 auto}h1{font-size:22px;margin-bottom:4px}.subtitle{color:#888;margin-bottom:20px;font-size:14px}.progress{background:#1a1a1a;border-radius:8px;height:8px;margin-bottom:20px;overflow:hidden}.progress-bar{background:linear-gradient(90deg,#3b82f6,#22c55e);height:100%;transition:width .5s;border-radius:8px}.card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;padding:14px;margin-bottom:10px}.card.connected{border-color:#22c55e40}.card.error{border-color:#ef444440}.card.awaiting_auth{border-color:#3b82f640}.card-header{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}.emoji{font-size:20px}.name{font-weight:600;font-size:16px}.status-badge{font-size:12px;color:#888;margin-left:auto}.status-badge.connected{color:#22c55e}.status-badge.error{color:#ef4444}.status-badge.awaiting_auth{color:#3b82f6}.btn{display:block;background:#3b82f6;color:white;text-decoration:none;padding:10px;border-radius:8px;font-weight:500;text-align:center;margin-top:4px;font-size:15px}.tools{margin-top:8px;max-height:200px;overflow-y:auto}.tool{padding:4px 0;border-top:1px solid #222;font-size:12px}.tool b{color:#93c5fd;margin-right:6px}.tool span{color:#666}.footer{text-align:center;color:#444;font-size:11px;margin-top:16px}</style></head><body>
-<h1>OpenClaw MCP Onboarding</h1>
-<p class="subtitle">${connectedCount}/${total} connected. Credentials auto-saved to mcporter.</p>
-<div class="progress"><div class="progress-bar" style="width:${(connectedCount / total) * 100}%"></div></div>
-${serverCards}
-<p class="footer">Auto-refreshes every 3s</p></body></html>`;
+  const allDone = connectedCount === total;
+  const pct = total > 0 ? Math.round((connectedCount / total) * 100) : 0;
+
+  const serverCards = Object.entries(state)
+    .map(([name, s], i) => {
+      const statusCfg = {
+        pending: {
+          icon: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 3"><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="3s" repeatCount="indefinite"/></circle></svg>`,
+          label: "Initializing",
+          cls: "pending",
+        },
+        awaiting_auth: {
+          icon: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="4" y="2" width="8" height="6" rx="2" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="7" width="10" height="7" rx="2" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="10.5" r="1" fill="currentColor"/></svg>`,
+          label: "Needs authorization",
+          cls: "auth",
+        },
+        exchanging: {
+          icon: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2v4l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="1s" repeatCount="indefinite"/></circle></svg>`,
+          label: "Exchanging token",
+          cls: "loading",
+        },
+        connecting: {
+          icon: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2v4l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="1s" repeatCount="indefinite"/></circle></svg>`,
+          label: "Connecting",
+          cls: "loading",
+        },
+        connected: {
+          icon: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l2 2 3.5-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+          label: `${s.tools.length} tools`,
+          cls: "ok",
+        },
+        error: {
+          icon: `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+          label: "Error",
+          cls: "err",
+        },
+      }[s.status] || { icon: "", label: s.status, cls: "" };
+
+      let action = "";
+      if (s.status === "awaiting_auth" && s.authUrl) {
+        action = `<a href="${s.authUrl}" class="card-action" target="_blank">
+          <span>Connect</span>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 3h7v7M13 3L6 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>`;
+      }
+
+      let toolsList = "";
+      if (s.tools.length > 0) {
+        toolsList = `<div class="tools">${s.tools
+          .map((t) => `<span class="tool-chip">${t.name}</span>`)
+          .join("")}</div>`;
+      }
+
+      let errorDetail = "";
+      if (s.status === "error" && s.error) {
+        errorDetail = `<p class="error-msg">${s.error.substring(0, 120)}</p>`;
+      }
+
+      return `<div class="card card--${statusCfg.cls}" style="animation-delay:${i * 60}ms">
+        <div class="card-row">
+          <div class="card-icon">${statusCfg.icon}</div>
+          <div class="card-body">
+            <div class="card-name">${name}</div>
+            <div class="card-status">${statusCfg.label}</div>
+          </div>
+          ${action}
+        </div>
+        ${toolsList}${errorDetail}
+      </div>`;
+    })
+    .join("");
+
+  return `<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="theme-color" content="#DE332C">
+<title>MCP Onboarding &mdash; OpenClaw</title>
+<meta http-equiv="refresh" content="3">
+<style>
+:root {
+  --bg: oklch(0.985 0.005 85);
+  --surface: #fff;
+  --border: oklch(0.912 0.006 85);
+  --border-hi: oklch(0.85 0.01 85);
+  --text: oklch(0.145 0 0);
+  --text-muted: oklch(0.556 0 0);
+  --text-dim: oklch(0.7 0 0);
+  --primary: oklch(0.674 0.215 31);
+  --primary-fg: #fff;
+  --green: oklch(0.6 0.17 155);
+  --green-subtle: oklch(0.96 0.03 155);
+  --amber: oklch(0.7 0.16 75);
+  --amber-subtle: oklch(0.96 0.03 75);
+  --red: oklch(0.577 0.245 27);
+  --red-subtle: oklch(0.96 0.04 27);
+  --muted: oklch(0.955 0.008 85);
+  --radius: 0.625rem;
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-xl: calc(var(--radius) + 6px);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.04);
+  --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: oklch(0.145 0 0);
+    --surface: oklch(0.2 0 0);
+    --border: oklch(0.269 0 0);
+    --border-hi: oklch(0.33 0 0);
+    --text: oklch(0.985 0 0);
+    --text-muted: oklch(0.65 0 0);
+    --text-dim: oklch(0.45 0 0);
+    --green-subtle: oklch(0.2 0.04 155);
+    --amber-subtle: oklch(0.2 0.04 75);
+    --red-subtle: oklch(0.2 0.04 27);
+    --muted: oklch(0.2 0 0);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.2);
+    --shadow: 0 1px 3px rgba(0,0,0,.3), 0 1px 2px rgba(0,0,0,.2);
+  }
+}
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+html { -webkit-font-smoothing: antialiased; }
+body {
+  font-family: var(--sans);
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+.shell {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 48px 20px 40px;
+}
+
+/* Header */
+.hdr { margin-bottom: 24px; }
+h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 4px;
+}
+.hdr-sub {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* Progress */
+.prog {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.prog-track {
+  flex: 1;
+  height: 6px;
+  background: var(--muted);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.prog-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--primary);
+  transition: width .6s cubic-bezier(.4,0,.2,1);
+}
+.prog-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 36px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cards */
+.cards { display: flex; flex-direction: column; gap: 10px; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color .15s, box-shadow .15s;
+  animation: card-in .3s ease both;
+}
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.card--ok   { border-color: oklch(0.8 0.1 155); }
+.card--auth { border-color: oklch(0.82 0.1 75); }
+.card--err  { border-color: oklch(0.8 0.12 27); }
+
+.card-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.card-icon {
+  width: 36px; height: 36px;
+  border-radius: var(--radius);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  background: var(--muted);
+  color: var(--text-muted);
+}
+.card--ok      .card-icon { background: var(--green-subtle); color: var(--green); }
+.card--auth    .card-icon { background: var(--amber-subtle); color: var(--amber); }
+.card--err     .card-icon { background: var(--red-subtle);   color: var(--red); }
+.card--loading .card-icon { background: oklch(0.96 0.02 260); color: oklch(0.55 0.15 260); }
+
+.card-body { flex: 1; min-width: 0; }
+.card-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+.card-status {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+.card--ok   .card-status { color: var(--green); }
+.card--auth .card-status { color: var(--amber); }
+.card--err  .card-status { color: var(--red); }
+
+.card-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--radius-md);
+  background: var(--primary);
+  color: var(--primary-fg);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: opacity .15s;
+  flex-shrink: 0;
+}
+.card-action:hover { opacity: .9; }
+.card-action svg { display: block; }
+
+.tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.tool-chip {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--green);
+  background: var(--green-subtle);
+  padding: 2px 8px;
+  border-radius: 9999px;
+}
+.error-msg {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--red);
+  word-break: break-word;
+}
+
+/* Footer */
+.ftr {
+  margin-top: 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.ftr-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: .3; }
+  50% { opacity: 1; }
+}
+</style></head><body>
+<div class="shell">
+  <div class="hdr">
+    <h1>MCP Onboarding</h1>
+    <p class="hdr-sub">${allDone ? "All services connected. You\u2019re ready to go." : "Connect your MCP services to get started."}</p>
+  </div>
+
+  <div class="prog">
+    <div class="prog-track"><div class="prog-bar" style="width:${pct}%"></div></div>
+    <span class="prog-label">${connectedCount}/${total}</span>
+  </div>
+
+  <div class="cards">${serverCards}</div>
+
+  <p class="ftr"><span class="ftr-dot"></span>Auto-refreshes</p>
+</div>
+</body></html>`;
 }
 
 function renderEmpty() {
-  return `<!DOCTYPE html><html><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenClaw MCP Onboarding</title>
-<style>body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0a;color:#e5e5e5;padding:40px;text-align:center}h1{font-size:22px;margin-bottom:8px}p{color:#888}</style></head><body>
-<h1>OpenClaw MCP Onboarding</h1>
-<p>No MCP servers configured. Set MCP_SERVERS_JSON to enable OAuth onboarding.</p></body></html>`;
+  return `<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MCP Onboarding &mdash; OpenClaw</title>
+<style>
+:root { --bg:oklch(0.985 0.005 85); --text:oklch(0.145 0 0); --muted:oklch(0.556 0 0); }
+@media(prefers-color-scheme:dark){ :root{ --bg:oklch(0.145 0 0); --text:oklch(0.985 0 0); --muted:oklch(0.65 0 0); } }
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 20px;text-align:center}
+h1{font-size:18px;font-weight:600;margin-bottom:6px}
+p{font-size:14px;color:var(--muted);line-height:1.6}
+</style></head><body>
+<div><h1>MCP Onboarding</h1><p>No MCP servers configured.</p></div>
+</body></html>`;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -351,9 +626,26 @@ const server = http.createServer(async (req, res) => {
     const code = url.searchParams.get("code");
     if (state[name] && code) {
       res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(
-        `<html><body style="font-family:sans-serif;text-align:center;padding:50px;background:#0a0a0a;color:#fff"><h1>✅ ${name} authorized!</h1><p style="color:#888">You can close this tab.</p><script>setTimeout(()=>window.close(),2000)</script></body></html>`,
-      );
+      res.end(`<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<style>
+:root{--bg:oklch(0.985 0.005 85);--text:oklch(0.145 0 0);--muted:oklch(0.556 0 0);--green:oklch(0.6 0.17 155);--green-bg:oklch(0.96 0.03 155)}
+@media(prefers-color-scheme:dark){:root{--bg:oklch(0.145 0 0);--text:oklch(0.985 0 0);--muted:oklch(0.65 0 0);--green-bg:oklch(0.2 0.04 155)}}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center}
+.wrap{text-align:center;animation:in .35s ease}
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.icon{width:48px;height:48px;margin:0 auto 14px;border-radius:0.625rem;background:var(--green-bg);display:flex;align-items:center;justify-content:center;color:var(--green)}
+h1{font-size:16px;font-weight:600;margin-bottom:4px}
+p{font-size:13px;color:var(--muted)}
+</style></head><body>
+<div class="wrap">
+<div class="icon"><svg width="22" height="22" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l2 2 3.5-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+<h1>${name} connected</h1>
+<p>Credentials saved. Closing automatically\u2026</p>
+</div>
+<script>setTimeout(()=>window.close(),2500)</script>
+</body></html>`);
       void handleCallback(name, code);
     } else {
       res.writeHead(400);
