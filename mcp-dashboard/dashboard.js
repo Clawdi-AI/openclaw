@@ -363,7 +363,6 @@ function renderDashboard() {
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta name="theme-color" content="#DE332C">
 <title>MCP Onboarding &mdash; OpenClaw</title>
-<meta http-equiv="refresh" content="3">
 <style>
 :root {
   --bg: oklch(0.985 0.005 85);
@@ -596,8 +595,77 @@ h1 {
 
   <div class="cards">${serverCards}</div>
 
-  <p class="ftr"><span class="ftr-dot"></span>Auto-refreshes</p>
+  <p class="ftr"><span class="ftr-dot"></span>Live</p>
 </div>
+<script>
+(function(){
+  var SPIN='<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 3"><animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="3s" repeatCount="indefinite"/></circle></svg>';
+  var LOCK='<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="4" y="2" width="8" height="6" rx="2" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="7" width="10" height="7" rx="2" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="10.5" r="1" fill="currentColor"/></svg>';
+  var CHECK='<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l2 2 3.5-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var CROSS='<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+  var STATUS_CFG = {
+    connected:     {cls:"ok",      label:function(d){return d.tools.length+" tools"}, icon:CHECK},
+    awaiting_auth: {cls:"auth",    label:function(){return "Needs authorization"},    icon:LOCK},
+    exchanging:    {cls:"loading", label:function(){return "Exchanging token"},       icon:SPIN},
+    connecting:    {cls:"loading", label:function(){return "Connecting"},             icon:SPIN},
+    error:         {cls:"err",     label:function(){return "Error"},                  icon:CROSS},
+    pending:       {cls:"pending", label:function(){return "Initializing"},           icon:SPIN}
+  };
+  var prev = "";
+  function poll(){
+    fetch("/api/status").then(function(r){return r.json()}).then(function(data){
+      var names = Object.keys(data);
+      var connected = names.filter(function(n){return data[n].status==="connected"}).length;
+      var total = names.length;
+      var pct = total ? Math.round(connected/total*100) : 0;
+      var bar = document.querySelector(".prog-bar");
+      if(bar) bar.style.width = pct+"%";
+      var lbl = document.querySelector(".prog-label");
+      if(lbl) lbl.textContent = connected+"/"+total;
+      var sub = document.querySelector(".hdr-sub");
+      if(sub) sub.textContent = connected===total ? "All services connected. You\\u2019re ready to go." : "Connect your MCP services to get started.";
+      var sig = JSON.stringify(data);
+      if(sig === prev) return;
+      prev = sig;
+      var container = document.querySelector(".cards");
+      if(!container) return;
+      names.forEach(function(name, i){
+        var d = data[name];
+        var cfg = STATUS_CFG[d.status] || STATUS_CFG.pending;
+        var card = container.children[i];
+        if(!card) return;
+        var cls = "card card--"+cfg.cls;
+        if(card.className !== cls) card.className = cls;
+        var icon = card.querySelector(".card-icon");
+        if(icon) icon.innerHTML = cfg.icon;
+        var st = card.querySelector(".card-status");
+        if(st) st.textContent = cfg.label(d);
+        var oldAction = card.querySelector(".card-action");
+        if(d.status==="awaiting_auth" && d.authUrl){
+          if(!oldAction){
+            var a = document.createElement("a");
+            a.className="card-action"; a.target="_blank"; a.href=d.authUrl;
+            a.innerHTML='<span>Connect</span><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 3h7v7M13 3L6 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+            card.querySelector(".card-row").appendChild(a);
+          } else { oldAction.href = d.authUrl; }
+        } else if(oldAction){ oldAction.remove(); }
+        var oldTools = card.querySelector(".tools");
+        if(d.tools && d.tools.length > 0){
+          var html = d.tools.map(function(t){return '<span class="tool-chip">'+t+'</span>'}).join("");
+          if(oldTools){ oldTools.innerHTML = html; }
+          else { var div=document.createElement("div"); div.className="tools"; div.innerHTML=html; card.appendChild(div); }
+        } else if(oldTools){ oldTools.remove(); }
+        var oldErr = card.querySelector(".error-msg");
+        if(d.status==="error" && d.error){
+          if(oldErr){ oldErr.textContent = d.error.substring(0,120); }
+          else { var p=document.createElement("p"); p.className="error-msg"; p.textContent=d.error.substring(0,120); card.appendChild(p); }
+        } else if(oldErr){ oldErr.remove(); }
+      });
+    }).catch(function(){});
+  }
+  setInterval(poll, 3000);
+})();
+</script>
 </body></html>`;
 }
 
@@ -688,7 +756,12 @@ p{font-size:13px;color:var(--muted)}
     res.writeHead(200, { "Content-Type": "application/json" });
     const summary = {};
     for (const [name, s] of Object.entries(state)) {
-      summary[name] = { status: s.status, tools: s.tools.length, error: s.error };
+      summary[name] = {
+        status: s.status,
+        tools: s.tools.map((t) => t.name),
+        error: s.error,
+        authUrl: s.authUrl || null,
+      };
     }
     res.end(JSON.stringify(summary, null, 2));
     return;

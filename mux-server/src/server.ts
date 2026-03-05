@@ -7865,6 +7865,28 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && pathname === "/v1/admin/info") {
+      if (!muxAdminToken) {
+        sendJson(res, 404, { ok: false, error: "not found" });
+        return;
+      }
+      if (!isAdminAuthorized(req)) {
+        metrics.recordAuthFailure("admin");
+        log({ type: "auth_unauthorized", surface: "admin" });
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      const readiness = buildReadinessReport(Date.now());
+      sendJson(res, 200, {
+        ok: true,
+        ...(telegramBotUsername ? { telegramBotUsername } : {}),
+        channels: readiness.channels,
+        ready: readiness.ready,
+        degraded: readiness.degraded,
+      });
+      return;
+    }
+
     if (req.method === "GET" && pathname === "/v1/admin/whatsapp/health") {
       if (!muxAdminToken) {
         sendJson(res, 404, { ok: false, error: "not found" });
