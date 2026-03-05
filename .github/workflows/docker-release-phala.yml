@@ -22,6 +22,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME_OPENCLAW: ${{ github.repository }}
   IMAGE_NAME_MUX: ${{ github.repository_owner }}/mux-server
+  IMAGE_NAME_MCP_DASHBOARD: ${{ github.repository_owner }}/mcp-dashboard
 
 jobs:
   prepare-release:
@@ -258,5 +259,63 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MUX_LC }}-cache:amd64
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MUX_LC }}-cache:amd64,mode=max
+          provenance: false
+          push: true
+
+  release-mcp-dashboard-amd64:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    env:
+      VERSION_FULL: ${{ needs.prepare-release.outputs.version-full }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Normalize image refs
+        run: |
+          echo "IMAGE_NAME_MCP_DASHBOARD_LC=${IMAGE_NAME_MCP_DASHBOARD,,}" >> "$GITHUB_ENV"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MCP_DASHBOARD_LC }}
+          tags: |
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ env.VERSION_FULL }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=ref,event=branch,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=sha-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=sha-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
+
+      - name: Build and push mcp-dashboard amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: mcp-dashboard
+          file: mcp-dashboard/Dockerfile
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MCP_DASHBOARD_LC }}-cache:amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MCP_DASHBOARD_LC }}-cache:amd64,mode=max
           provenance: false
           push: true

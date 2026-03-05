@@ -200,6 +200,10 @@ if [ -f "$CONFIG_FILE" ]; then
   ' "$CONFIG_FILE" || true
 fi
 
+# MCP OAuth servers are configured by the mcp-dashboard sidecar.
+# It writes to /data/.mcporter/mcporter.json (shared volume) after each
+# successful OAuth flow, so mcporter only sees authenticated servers.
+
 # --- Pre-seed device pairing for local CLI ---
 # When MASTER_KEY is set the CLI's device identity is deterministic (HKDF-derived).
 # Pre-approve it so local commands (healthcheck, channels status) don't block on

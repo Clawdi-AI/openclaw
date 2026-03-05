@@ -60,6 +60,21 @@ services:
       - ./state/wa-auth:/wa-auth
     restart: unless-stopped
 
+  mcp-dashboard:
+    build:
+      context: ../../mcp-dashboard
+      dockerfile: Dockerfile
+    container_name: mcp-dashboard-local-e2e
+    ports:
+      - "8900:8900"
+    volumes:
+      - openclaw_data:/data
+    environment:
+      PORT: "8900"
+      PUBLIC_BASE: ${MCP_DASHBOARD_PUBLIC_BASE:-http://localhost:8900}
+      MCP_SERVERS_JSON: ${MCP_SERVERS_JSON:-}
+    restart: unless-stopped
+
 volumes:
   openclaw_data:
   openclaw_docker_data:
