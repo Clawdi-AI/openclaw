@@ -186,9 +186,6 @@ deploy() {
     printf 'AWS_ACCESS_KEY_ID=%s\n' "$AWS_ACCESS_KEY_ID" >> "$DEPLOY_ENV_FILE"
     printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$AWS_SECRET_ACCESS_KEY" >> "$DEPLOY_ENV_FILE"
   fi
-  if [[ -n "${EXA_MCP_URL:-}" ]]; then
-    printf 'EXA_MCP_URL=%s\n' "$EXA_MCP_URL" >> "$DEPLOY_ENV_FILE"
-  fi
   chmod 600 "$DEPLOY_ENV_FILE"
 
   generate_openclaw_config "$DEPLOY_ENV_FILE"
