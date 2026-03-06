@@ -33,6 +33,8 @@ type MessageSendParams = {
   content: string;
   /** Active agent id for per-agent outbound media root scoping. */
   agentId?: string;
+  /** Optional session key for mux transport context. */
+  sessionKey?: string;
   channel?: string;
   mediaUrl?: string;
   mediaUrls?: string[];
@@ -75,6 +77,8 @@ type MessagePollParams = {
   durationHours?: number;
   channel?: string;
   accountId?: string;
+  /** Optional session key for mux transport context. */
+  sessionKey?: string;
   threadId?: string;
   silent?: boolean;
   isAnonymous?: boolean;
@@ -200,6 +204,7 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
       channel: outboundChannel,
       to: resolvedTarget.to,
       agentId: params.agentId,
+      sessionKey: params.sessionKey,
       accountId: params.accountId,
       payloads: normalizedPayloads,
       replyToId: params.replyToId,
@@ -239,7 +244,7 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
       gifPlayback: params.gifPlayback,
       accountId: params.accountId,
       channel,
-      sessionKey: params.mirror?.sessionKey,
+      sessionKey: params.sessionKey ?? params.mirror?.sessionKey,
       idempotencyKey: params.idempotencyKey ?? randomIdempotencyKey(),
     },
   });
@@ -314,6 +319,7 @@ export async function sendPoll(params: MessagePollParams): Promise<MessagePollRe
       isAnonymous: params.isAnonymous,
       channel,
       accountId: params.accountId,
+      sessionKey: params.sessionKey,
       idempotencyKey: params.idempotencyKey ?? randomIdempotencyKey(),
     },
   });

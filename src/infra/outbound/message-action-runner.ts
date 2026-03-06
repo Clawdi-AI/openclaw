@@ -659,6 +659,7 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
     integer: true,
   });
   const maxSelections = allowMultiselect ? Math.max(2, options.length) : 1;
+  const providedSessionKey = normalizeProvidedSessionKey(input.sessionKey);
 
   if (durationSeconds !== undefined && channel !== "telegram") {
     throw new Error("pollDurationSeconds is only supported for Telegram polls");
@@ -693,6 +694,7 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
       channel,
       params,
       accountId: accountId ?? undefined,
+      sessionKey: providedSessionKey,
       gateway,
       toolContext: input.toolContext,
       dryRun,

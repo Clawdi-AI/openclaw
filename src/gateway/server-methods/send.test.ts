@@ -4,6 +4,8 @@ import type { GatewayRequestContext } from "./types.js";
 
 const mocks = vi.hoisted(() => ({
   deliverOutboundPayloads: vi.fn(),
+  sendPoll: vi.fn(),
+  getChannelPlugin: vi.fn(),
   appendAssistantMessageToSessionTranscript: vi.fn(async () => ({ ok: true, sessionFile: "x" })),
   recordSessionMetaFromInbound: vi.fn(async () => ({ ok: true })),
 }));
@@ -18,7 +20,7 @@ vi.mock("../../config/config.js", async () => {
 });
 
 vi.mock("../../channels/plugins/index.js", () => ({
-  getChannelPlugin: () => ({ outbound: {} }),
+  getChannelPlugin: (...args: unknown[]) => mocks.getChannelPlugin(...args),
   normalizeChannelId: (value: string) => (value === "webchat" ? null : value),
 }));
 
@@ -59,9 +61,28 @@ async function runSend(params: Record<string, unknown>) {
   return { respond };
 }
 
+async function runPoll(params: Record<string, unknown>) {
+  const respond = vi.fn();
+  await sendHandlers.poll({
+    params: params as never,
+    respond,
+    context: makeContext(),
+    req: { type: "req", id: "1", method: "poll" },
+    client: null,
+    isWebchatConnect: () => false,
+  });
+  return { respond };
+}
+
 describe("gateway send mirroring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.getChannelPlugin.mockReturnValue({
+      outbound: {
+        sendPoll: mocks.sendPoll,
+      },
+    });
+    mocks.sendPoll.mockResolvedValue({ messageId: "p1" });
   });
 
   it("accepts media-only sends without message", async () => {
@@ -232,6 +253,23 @@ describe("gateway send mirroring", () => {
           sessionKey: "agent:main:slack:channel:resolved",
           agentId: "main",
         }),
+      }),
+    );
+  });
+
+  it("passes provided sessionKey through gateway poll delivery", async () => {
+    await runPoll({
+      to: "channel:C1",
+      question: "Lunch?",
+      options: ["Pizza", "Sushi"],
+      channel: "slack",
+      idempotencyKey: "idem-poll",
+      sessionKey: "agent:main:slack:channel:C123",
+    });
+
+    expect(mocks.sendPoll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "agent:main:slack:channel:c123",
       }),
     );
   });

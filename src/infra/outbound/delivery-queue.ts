@@ -30,6 +30,7 @@ export interface QueuedDelivery {
   enqueuedAt: number;
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  sessionKey?: string | null;
   accountId?: string;
   /**
    * Original payloads before plugin hooks. On recovery, hooks re-run on these
@@ -68,6 +69,7 @@ export async function ensureQueueDir(stateDir?: string): Promise<string> {
 type QueuedDeliveryParams = {
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  sessionKey?: string | null;
   accountId?: string;
   payloads: ReplyPayload[];
   threadId?: string | number | null;
@@ -89,6 +91,7 @@ export async function enqueueDelivery(
     enqueuedAt: Date.now(),
     channel: params.channel,
     to: params.to,
+    sessionKey: params.sessionKey,
     accountId: params.accountId,
     payloads: params.payloads,
     threadId: params.threadId,
@@ -276,6 +279,7 @@ export async function recoverPendingDeliveries(opts: {
         cfg: opts.cfg,
         channel: entry.channel,
         to: entry.to,
+        sessionKey: entry.sessionKey,
         accountId: entry.accountId,
         payloads: entry.payloads,
         threadId: entry.threadId,

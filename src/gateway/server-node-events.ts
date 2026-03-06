@@ -221,6 +221,7 @@ async function sendReceiptAck(params: {
     cfg: params.cfg,
     channel: params.channel,
     to: resolved.to,
+    sessionKey: params.sessionKey,
     payloads: [{ text: params.text }],
     agentId,
     bestEffort: true,

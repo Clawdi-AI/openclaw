@@ -72,6 +72,39 @@ describe("resolveDeliveryTarget", () => {
     expect(result.accountId).toBe("session-account");
   });
 
+  it("prefers the cron job origin session over the agent main session", async () => {
+    vi.mocked(loadSessionStore).mockReturnValue({
+      "agent:test:main": {
+        sessionId: "sess-main",
+        updatedAt: 1000,
+        lastChannel: "telegram",
+        lastTo: "123456",
+        lastAccountId: "default-account",
+      },
+      "agent:main:telegram:direct:123456": {
+        sessionId: "sess-origin",
+        updatedAt: 1001,
+        lastChannel: "telegram",
+        lastTo: "123456",
+        lastAccountId: "mux-account",
+      },
+    });
+
+    const result = await resolveDeliveryTarget(
+      makeCfg(),
+      "agent-b",
+      {
+        channel: "telegram",
+        to: "123456",
+      },
+      {
+        sessionKey: "agent:main:telegram:direct:123456",
+      },
+    );
+
+    expect(result.accountId).toBe("mux-account");
+  });
+
   it("returns undefined accountId when no binding and no session", async () => {
     vi.mocked(loadSessionStore).mockReturnValue({});
 

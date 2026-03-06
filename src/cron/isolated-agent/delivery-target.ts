@@ -22,6 +22,9 @@ export async function resolveDeliveryTarget(
     channel?: "last" | ChannelId;
     to?: string;
   },
+  opts?: {
+    sessionKey?: string;
+  },
 ): Promise<{
   channel: Exclude<OutboundChannel, "none">;
   to?: string;
@@ -38,10 +41,14 @@ export async function resolveDeliveryTarget(
   const mainSessionKey = resolveAgentMainSessionKey({ cfg, agentId });
   const storePath = resolveStorePath(sessionCfg?.store, { agentId });
   const store = loadSessionStore(storePath);
-  const main = store[mainSessionKey];
+  const requestedSessionKey = opts?.sessionKey?.trim();
+  // Prefer the job's origin session when available so multi-account routing
+  // keeps the same delivery context as the original inbound conversation.
+  const sessionEntry =
+    (requestedSessionKey ? store[requestedSessionKey] : undefined) ?? store[mainSessionKey];
 
   const preliminary = resolveSessionDeliveryTarget({
-    entry: main,
+    entry: sessionEntry,
     requestedChannel,
     explicitTo,
     allowMismatchedLastTo,
@@ -59,7 +66,7 @@ export async function resolveDeliveryTarget(
 
   const resolved = fallbackChannel
     ? resolveSessionDeliveryTarget({
-        entry: main,
+        entry: sessionEntry,
         requestedChannel,
         explicitTo,
         fallbackChannel,
