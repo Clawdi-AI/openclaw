@@ -81,7 +81,7 @@ describe("telegram extension mux outbound sendPayload", () => {
           sendPollTelegram,
         },
       },
-    } as PluginRuntime);
+    } as unknown as PluginRuntime);
 
     const cfg = {
       gateway: {

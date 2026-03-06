@@ -57,6 +57,7 @@ describe("deliverSessionMaintenanceWarning", () => {
       } as SessionEntry,
       warning: {
         activeSessionKey: "agent:main:telegram:direct:123",
+        totalEntries: 101,
         pruneAfterMs: 60_000,
         maxEntries: 100,
         wouldPrune: true,
