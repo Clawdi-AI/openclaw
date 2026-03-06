@@ -181,6 +181,25 @@ describe("deliverOutboundPayloads", () => {
     );
   });
 
+  it("persists sessionKey in the queued delivery entry", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" });
+
+    await deliverOutboundPayloads({
+      cfg: telegramChunkConfig,
+      channel: "telegram",
+      to: "123",
+      sessionKey: "agent:main:telegram:direct:123",
+      payloads: [{ text: "hi" }],
+      deps: { sendTelegram },
+    });
+
+    expect(queueMocks.enqueueDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "agent:main:telegram:direct:123",
+      }),
+    );
+  });
+
   it("scopes media local roots to the active agent workspace when agentId is provided", async () => {
     const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" });
 

@@ -90,6 +90,7 @@ export async function scheduleRestartSentinelWake(_params: { deps: CliDeps }) {
       cfg,
       channel,
       to: resolved.to,
+      sessionKey,
       accountId: origin?.accountId,
       threadId,
       payloads: [{ text: message }],

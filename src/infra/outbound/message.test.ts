@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   getChannelPlugin: vi.fn(),
   resolveOutboundTarget: vi.fn(),
   deliverOutboundPayloads: vi.fn(),
+  callGateway: vi.fn(),
 }));
 
 vi.mock("../../channels/plugins/index.js", () => ({
@@ -19,13 +20,19 @@ vi.mock("./deliver.js", () => ({
   deliverOutboundPayloads: mocks.deliverOutboundPayloads,
 }));
 
-import { sendMessage } from "./message.js";
+vi.mock("../../gateway/call.js", () => ({
+  callGateway: (...args: unknown[]) => mocks.callGateway(...args),
+  randomIdempotencyKey: () => "idem-1",
+}));
+
+import { sendMessage, sendPoll } from "./message.js";
 
 describe("sendMessage", () => {
   beforeEach(() => {
     mocks.getChannelPlugin.mockReset();
     mocks.resolveOutboundTarget.mockReset();
     mocks.deliverOutboundPayloads.mockReset();
+    mocks.callGateway.mockReset();
 
     mocks.getChannelPlugin.mockReturnValue({
       outbound: { deliveryMode: "direct" },
@@ -48,6 +55,75 @@ describe("sendMessage", () => {
         agentId: "work",
         channel: "mattermost",
         to: "channel:town-square",
+      }),
+    );
+  });
+
+  it("passes explicit sessionKey to direct outbound delivery without relying on mirror", async () => {
+    await sendMessage({
+      cfg: {},
+      channel: "mattermost",
+      to: "channel:town-square",
+      content: "hi",
+      sessionKey: "agent:main:discord:channel:123",
+    });
+
+    expect(mocks.deliverOutboundPayloads).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "agent:main:discord:channel:123",
+        mirror: undefined,
+      }),
+    );
+  });
+
+  it("passes explicit sessionKey to gateway sends without relying on mirror", async () => {
+    mocks.getChannelPlugin.mockReturnValue({
+      outbound: { deliveryMode: "gateway" },
+    });
+    mocks.callGateway.mockResolvedValue({ messageId: "m-gw" });
+
+    await sendMessage({
+      cfg: {},
+      channel: "mattermost",
+      to: "channel:town-square",
+      content: "hi",
+      sessionKey: "agent:main:discord:channel:123",
+    });
+
+    expect(mocks.callGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "send",
+        params: expect.objectContaining({
+          sessionKey: "agent:main:discord:channel:123",
+        }),
+      }),
+    );
+  });
+
+  it("passes explicit sessionKey to gateway polls", async () => {
+    mocks.getChannelPlugin.mockReturnValue({
+      outbound: {
+        deliveryMode: "gateway",
+        sendPoll: vi.fn(),
+      },
+    });
+    mocks.callGateway.mockResolvedValue({ messageId: "p-gw" });
+
+    await sendPoll({
+      cfg: {},
+      channel: "mattermost",
+      to: "channel:town-square",
+      question: "Lunch?",
+      options: ["Pizza", "Sushi"],
+      sessionKey: "agent:main:discord:channel:123",
+    });
+
+    expect(mocks.callGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "poll",
+        params: expect.objectContaining({
+          sessionKey: "agent:main:discord:channel:123",
+        }),
       }),
     );
   });

@@ -360,10 +360,17 @@ export async function runCronIsolatedAgentTurn(params: {
   const deliveryPlan = resolveCronDeliveryPlan(params.job);
   const deliveryRequested = deliveryPlan.requested;
 
-  const resolvedDelivery = await resolveDeliveryTarget(cfgWithAgentDefaults, agentId, {
-    channel: deliveryPlan.channel ?? "last",
-    to: deliveryPlan.to,
-  });
+  const resolvedDelivery = await resolveDeliveryTarget(
+    cfgWithAgentDefaults,
+    agentId,
+    {
+      channel: deliveryPlan.channel ?? "last",
+      to: deliveryPlan.to,
+    },
+    {
+      sessionKey: params.job.sessionKey,
+    },
+  );
 
   const { formattedTime, timeLine } = resolveCronStyleNow(params.cfg, now);
   const base = `[cron:${params.job.id} ${params.job.name}] ${params.message}`.trim();
@@ -636,6 +643,7 @@ export async function runCronIsolatedAgentTurn(params: {
             cfg: cfgWithAgentDefaults,
             channel: resolvedDelivery.channel,
             to: resolvedDelivery.to,
+            sessionKey: params.job.sessionKey,
             accountId: resolvedDelivery.accountId,
             threadId: resolvedDelivery.threadId,
             payloads: payloadsForDelivery,

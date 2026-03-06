@@ -375,12 +375,13 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
       }
       return { channel: "telegram", ...(finalResult ?? { messageId: "unknown", chatId: to }) };
     },
-    sendPoll: async ({ to, poll, accountId, threadId, silent, isAnonymous }) =>
+    sendPoll: async ({ cfg, to, poll, accountId, sessionKey, threadId, silent, isAnonymous }) =>
       await getTelegramRuntime().channel.telegram.sendPollTelegram(to, poll, {
         accountId: accountId ?? undefined,
         messageThreadId: parseTelegramThreadId(threadId),
         silent: silent ?? undefined,
         isAnonymous: isAnonymous ?? undefined,
+        mux: resolveMuxOpts({ cfg, accountId, sessionKey }),
       }),
   },
   status: {

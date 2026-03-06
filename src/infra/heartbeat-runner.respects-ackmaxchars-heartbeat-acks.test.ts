@@ -508,4 +508,50 @@ describe("resolveHeartbeatIntervalMs", () => {
   ])("$title", async ({ heartbeat, telegram, expectedAccountId }) => {
     await expectTelegramHeartbeatAccountId({ heartbeat, telegram, expectedAccountId });
   });
+
+  it("passes sessionKey through mux telegram heartbeats", async () => {
+    await withTempTelegramHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const cfg = createHeartbeatConfig({
+        tmpDir,
+        storePath,
+        heartbeat: {
+          every: "5m",
+          target: "telegram",
+        },
+        channels: {
+          telegram: {
+            botToken: "test-bot-token-123",
+            mux: { enabled: true },
+          },
+        },
+      });
+      const muxSessionKey = "agent:main:telegram:direct:123456";
+      await seedSessionStore(storePath, muxSessionKey, {
+        lastChannel: "telegram",
+        lastProvider: "telegram",
+        lastTo: "123456",
+      });
+
+      replySpy.mockResolvedValue({ text: "Hello from heartbeat" });
+      const sendTelegram = vi.fn().mockResolvedValue({
+        messageId: "m1",
+        chatId: "123456",
+      });
+
+      await runHeartbeatOnce({
+        cfg,
+        deps: makeTelegramDeps({ sendTelegram }),
+        sessionKey: muxSessionKey,
+      });
+
+      expect(sendTelegram).toHaveBeenCalledWith(
+        "123456",
+        "Hello from heartbeat",
+        expect.objectContaining({
+          mux: expect.objectContaining({ sessionKey: muxSessionKey }),
+          verbose: false,
+        }),
+      );
+    });
+  });
 });

@@ -230,6 +230,7 @@ export async function deliverOutboundPayloads(
   params: DeliverOutboundPayloadsParams,
 ): Promise<OutboundDeliveryResult[]> {
   const { channel, to, payloads } = params;
+  const sessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
 
   // Write-ahead delivery queue: persist before sending, remove after success.
   const queueId = params.skipQueue
@@ -237,6 +238,7 @@ export async function deliverOutboundPayloads(
     : await enqueueDelivery({
         channel,
         to,
+        sessionKey,
         accountId: params.accountId,
         payloads,
         threadId: params.threadId,
