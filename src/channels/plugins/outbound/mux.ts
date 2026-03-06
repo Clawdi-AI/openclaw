@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "../../../config/config.js";
 import { loadOrCreateDeviceIdentity } from "../../../infra/device-identity.js";
 import type { PollInput } from "../../../polls.js";
-import { DEFAULT_ACCOUNT_ID } from "../../../routing/session-key.js";
+import { LEGACY_MUX_ACCOUNT_ID, resolveMuxBusinessAccountId } from "../../../utils/mux-account.js";
 
 type SupportedMuxChannel = "whatsapp" | "telegram" | "discord";
 
@@ -116,20 +116,25 @@ function resolveChannelMuxConfig(params: {
   accountId?: string;
 }): ResolvedChannelMuxConfig {
   const { cfg, channel, accountId } = params;
-  const resolvedAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
   if (channel === "telegram") {
     const channelCfg = cfg.channels?.telegram;
+    const resolvedAccountId = resolveMuxBusinessAccountId({ cfg, channel, accountId });
     const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
-    return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
+    const legacyMuxCfg = channelCfg?.accounts?.[LEGACY_MUX_ACCOUNT_ID]?.mux;
+    return normalizeChannelMuxConfig(channelCfg?.mux ?? accountCfg?.mux ?? legacyMuxCfg);
   }
   if (channel === "discord") {
     const channelCfg = cfg.channels?.discord;
+    const resolvedAccountId = resolveMuxBusinessAccountId({ cfg, channel, accountId });
     const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
-    return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
+    const legacyMuxCfg = channelCfg?.accounts?.[LEGACY_MUX_ACCOUNT_ID]?.mux;
+    return normalizeChannelMuxConfig(channelCfg?.mux ?? accountCfg?.mux ?? legacyMuxCfg);
   }
   const channelCfg = cfg.channels?.whatsapp;
+  const resolvedAccountId = resolveMuxBusinessAccountId({ cfg, channel, accountId });
   const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
-  return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
+  const legacyMuxCfg = channelCfg?.accounts?.[LEGACY_MUX_ACCOUNT_ID]?.mux;
+  return normalizeChannelMuxConfig(channelCfg?.mux ?? accountCfg?.mux ?? legacyMuxCfg);
 }
 
 function resolveDefaultOpenClawId(): string {
@@ -508,10 +513,15 @@ export function __resetMuxRuntimeAuthCacheForTest() {
 }
 
 export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendResponse> {
-  const resolved = requireMuxConfig({
+  const accountId = resolveMuxBusinessAccountId({
     cfg: params.cfg,
     channel: params.channel,
     accountId: params.accountId,
+  });
+  const resolved = requireMuxConfig({
+    cfg: params.cfg,
+    channel: params.channel,
+    accountId,
     sessionKey: params.sessionKey,
   });
 
@@ -520,7 +530,7 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
     requestId,
     channel: params.channel,
     sessionKey: resolved.sessionKey,
-    accountId: params.accountId,
+    accountId,
     to: params.to,
     text: params.text ?? "",
     mediaUrl: params.mediaUrl,
@@ -556,10 +566,15 @@ export async function sendTypingViaMux(params: {
   accountId?: string;
   sessionKey?: string | null;
 }): Promise<void> {
-  const resolved = requireMuxConfig({
+  const accountId = resolveMuxBusinessAccountId({
     cfg: params.cfg,
     channel: params.channel,
     accountId: params.accountId,
+  });
+  const resolved = requireMuxConfig({
+    cfg: params.cfg,
+    channel: params.channel,
+    accountId,
     sessionKey: params.sessionKey,
   });
 
@@ -569,7 +584,7 @@ export async function sendTypingViaMux(params: {
     action: "typing",
     channel: params.channel,
     sessionKey: resolved.sessionKey,
-    accountId: params.accountId,
+    accountId,
     openclawId: resolved.openclawId,
   };
 

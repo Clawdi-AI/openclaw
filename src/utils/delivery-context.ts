@@ -1,5 +1,6 @@
 import { normalizeAccountId } from "./account-id.js";
 import { normalizeMessageChannel } from "./message-channel.js";
+import { normalizeLegacyMuxAccountId } from "./mux-account.js";
 
 export type DeliveryContext = {
   channel?: string;
@@ -26,7 +27,7 @@ export function normalizeDeliveryContext(context?: DeliveryContext): DeliveryCon
       ? (normalizeMessageChannel(context.channel) ?? context.channel.trim())
       : undefined;
   const to = typeof context.to === "string" ? context.to.trim() : undefined;
-  const accountId = normalizeAccountId(context.accountId);
+  const accountId = normalizeLegacyMuxAccountId(normalizeAccountId(context.accountId));
   const threadId =
     typeof context.threadId === "number" && Number.isFinite(context.threadId)
       ? Math.trunc(context.threadId)

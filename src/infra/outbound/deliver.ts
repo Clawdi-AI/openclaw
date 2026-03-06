@@ -27,6 +27,11 @@ import { markdownToSignalTextChunks, type SignalTextStyleRange } from "../../sig
 import { sendMessageSignal } from "../../signal/send.js";
 import type { sendMessageSlack } from "../../slack/send.js";
 import type { sendMessageTelegram } from "../../telegram/send.js";
+import {
+  isLegacyMuxAccountId,
+  isMuxBusinessChannel,
+  resolveMuxBusinessAccountId,
+} from "../../utils/mux-account.js";
 import type { sendMessageWhatsApp } from "../../web/outbound.js";
 import { throwIfAborted } from "./abort.js";
 import { ackDelivery, enqueueDelivery, failDelivery } from "./delivery-queue.js";
@@ -232,6 +237,14 @@ export async function deliverOutboundPayloads(
   params: DeliverOutboundPayloadsParams,
 ): Promise<OutboundDeliveryResult[]> {
   const { channel, to, payloads } = params;
+  const resolvedAccountId =
+    isMuxBusinessChannel(channel) && isLegacyMuxAccountId(params.accountId)
+      ? resolveMuxBusinessAccountId({
+          cfg: params.cfg,
+          channel,
+          accountId: params.accountId,
+        })
+      : params.accountId;
   const providedSessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
   const agentId =
     params.agentId ??
@@ -247,7 +260,7 @@ export async function deliverOutboundPayloads(
         cfg: params.cfg,
         channel,
         agentId,
-        accountId: params.accountId,
+        accountId: resolvedAccountId,
         target: to,
         replyToId: params.replyToId,
         threadId: params.threadId,
@@ -256,6 +269,7 @@ export async function deliverOutboundPayloads(
   const sessionKey = derivedRoute?.sessionKey ?? providedSessionKey;
   const resolvedParams = {
     ...params,
+    accountId: resolvedAccountId,
     agentId,
     sessionKey,
   };
@@ -269,7 +283,7 @@ export async function deliverOutboundPayloads(
         to,
         agentId,
         sessionKey: queueSessionKey,
-        accountId: params.accountId,
+        accountId: resolvedAccountId,
         payloads,
         threadId: params.threadId,
         replyToId: params.replyToId,

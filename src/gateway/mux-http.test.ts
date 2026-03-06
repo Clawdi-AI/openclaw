@@ -323,7 +323,7 @@ describe("handleMuxInboundHttpRequest", () => {
       Surface: "telegram",
       OriginatingChannel: "telegram",
       OriginatingTo: "telegram:123",
-      SessionKey: "main",
+      SessionKey: "agent:main:main",
       MessageSid: "mux-msg-1",
       Body: "hello mux",
       RawBody: "hello mux",
@@ -632,8 +632,8 @@ describe("handleMuxInboundHttpRequest", () => {
       expect(mocks.sendTypingViaMux).toHaveBeenCalledWith({
         cfg: expect.any(Object),
         channel,
-        accountId: "mux",
-        sessionKey: `${channel}:session:1`,
+        accountId: "default",
+        sessionKey: "agent:main:main",
       });
     },
   );
@@ -1218,7 +1218,7 @@ describe("handleMuxInboundHttpRequest", () => {
     const body = parseJsonRequestBody(init);
     expect(body).toMatchObject({
       channel: "telegram",
-      sessionKey: "tg:dm:123",
+      sessionKey: "agent:main:main",
       accountId: "default",
       raw: {
         telegram: {
@@ -1351,7 +1351,7 @@ describe("handleMuxInboundHttpRequest", () => {
     const body = parseJsonRequestBody(init);
     expect(body).toMatchObject({
       channel: "telegram",
-      sessionKey: "tg:group:-100555",
+      sessionKey: "agent:main:telegram:group:-100555",
       accountId: "default",
       raw: {
         telegram: {

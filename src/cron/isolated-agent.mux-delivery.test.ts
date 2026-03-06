@@ -100,7 +100,7 @@ describe("runCronIsolatedAgentTurn mux delivery", () => {
         "123",
         "caption",
         expect.objectContaining({
-          accountId: "mux",
+          accountId: undefined,
           mux: expect.objectContaining({
             sessionKey: "agent:main:main",
           }),
