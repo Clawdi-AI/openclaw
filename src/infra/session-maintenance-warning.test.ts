@@ -42,7 +42,7 @@ describe("deliverSessionMaintenanceWarning", () => {
     }
   });
 
-  it("passes sessionKey through direct warning delivery", async () => {
+  it("relies on agentId-based outbound routing for direct warning delivery", async () => {
     const { deliverSessionMaintenanceWarning } = await import("./session-maintenance-warning.js");
 
     await deliverSessionMaintenanceWarning({
@@ -66,7 +66,7 @@ describe("deliverSessionMaintenanceWarning", () => {
 
     expect(mocks.deliverOutboundPayloads).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionKey: "agent:main:telegram:direct:123",
+        agentId: "main",
       }),
     );
   });

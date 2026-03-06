@@ -24,7 +24,7 @@ describe("runCronIsolatedAgentTurn mux delivery", () => {
     setupIsolatedAgentTurnMocks({ fast: true });
   });
 
-  it("passes the job origin session context into structured telegram mux delivery", async () => {
+  it("uses origin session state to resolve delivery but sends on the derived telegram route", async () => {
     await withTempCronHome(async (home) => {
       const storePath = `${home}/.openclaw/sessions/sessions.json`;
       await fs.mkdir(`${home}/.openclaw/sessions`, { recursive: true });
@@ -102,7 +102,7 @@ describe("runCronIsolatedAgentTurn mux delivery", () => {
         expect.objectContaining({
           accountId: "mux",
           mux: expect.objectContaining({
-            sessionKey: "agent:main:telegram:direct:123",
+            sessionKey: "agent:main:main",
           }),
         }),
       );

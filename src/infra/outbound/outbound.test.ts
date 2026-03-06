@@ -55,7 +55,7 @@ describe("delivery-queue", () => {
         {
           channel: "whatsapp",
           to: "+1555",
-          sessionKey: "agent:main:whatsapp:direct:+1555",
+          agentId: "main",
           payloads: [{ text: "hello" }],
           bestEffort: true,
           gifPlayback: true,
@@ -81,7 +81,7 @@ describe("delivery-queue", () => {
         id,
         channel: "whatsapp",
         to: "+1555",
-        sessionKey: "agent:main:whatsapp:direct:+1555",
+        agentId: "main",
         bestEffort: true,
         gifPlayback: true,
         silent: true,
@@ -282,7 +282,7 @@ describe("delivery-queue", () => {
         {
           channel: "whatsapp",
           to: "+1",
-          sessionKey: "agent:main:whatsapp:direct:+1",
+          agentId: "main",
           payloads: [{ text: "a" }],
           bestEffort: true,
           gifPlayback: true,
@@ -309,7 +309,7 @@ describe("delivery-queue", () => {
 
       expect(deliver).toHaveBeenCalledWith(
         expect.objectContaining({
-          sessionKey: "agent:main:whatsapp:direct:+1",
+          agentId: "main",
           bestEffort: true,
           gifPlayback: true,
           silent: true,

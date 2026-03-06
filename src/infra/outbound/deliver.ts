@@ -1,3 +1,4 @@
+import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
   chunkByParagraph,
   chunkMarkdownTextWithMode,
@@ -30,6 +31,7 @@ import type { sendMessageWhatsApp } from "../../web/outbound.js";
 import { throwIfAborted } from "./abort.js";
 import { ackDelivery, enqueueDelivery, failDelivery } from "./delivery-queue.js";
 import type { OutboundIdentity } from "./identity.js";
+import { resolveOutboundSessionRoute } from "./outbound-session.js";
 import type { NormalizedOutboundPayload } from "./payloads.js";
 import { normalizeReplyPayloadsForDelivery } from "./payloads.js";
 import type { OutboundChannel } from "./targets.js";
@@ -230,7 +232,34 @@ export async function deliverOutboundPayloads(
   params: DeliverOutboundPayloadsParams,
 ): Promise<OutboundDeliveryResult[]> {
   const { channel, to, payloads } = params;
-  const sessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
+  const providedSessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
+  const agentId =
+    params.agentId ??
+    params.mirror?.agentId ??
+    (providedSessionKey
+      ? resolveSessionAgentId({
+          sessionKey: providedSessionKey,
+          config: params.cfg,
+        })
+      : undefined);
+  const derivedRoute = agentId
+    ? await resolveOutboundSessionRoute({
+        cfg: params.cfg,
+        channel,
+        agentId,
+        accountId: params.accountId,
+        target: to,
+        replyToId: params.replyToId,
+        threadId: params.threadId,
+      })
+    : null;
+  const sessionKey = derivedRoute?.sessionKey ?? providedSessionKey;
+  const resolvedParams = {
+    ...params,
+    agentId,
+    sessionKey,
+  };
+  const queueSessionKey = agentId ? undefined : sessionKey;
 
   // Write-ahead delivery queue: persist before sending, remove after success.
   const queueId = params.skipQueue
@@ -238,7 +267,8 @@ export async function deliverOutboundPayloads(
     : await enqueueDelivery({
         channel,
         to,
-        sessionKey,
+        agentId,
+        sessionKey: queueSessionKey,
         accountId: params.accountId,
         payloads,
         threadId: params.threadId,
@@ -256,13 +286,13 @@ export async function deliverOutboundPayloads(
   let hadPartialFailure = false;
   const wrappedParams = params.onError
     ? {
-        ...params,
+        ...resolvedParams,
         onError: (err: unknown, payload: NormalizedOutboundPayload) => {
           hadPartialFailure = true;
           params.onError!(err, payload);
         },
       }
-    : params;
+    : resolvedParams;
 
   try {
     const results = await deliverOutboundPayloadsCore(wrappedParams);
@@ -302,7 +332,7 @@ async function deliverOutboundPayloadsCore(
     params.agentId ?? params.mirror?.agentId,
   );
   const results: OutboundDeliveryResult[] = [];
-  const sessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
+  const sessionKey = params.sessionKey ?? null;
   const handler = await createChannelHandler({
     cfg,
     channel,

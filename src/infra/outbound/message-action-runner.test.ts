@@ -732,7 +732,7 @@ describe("runMessageAction outbound session key selection", () => {
     });
   }
 
-  it("keeps the active whatsapp session key when derived key collapses to main", async () => {
+  it("uses the delivery-layer derived whatsapp session key when dm scope collapses to main", async () => {
     const result = await runWhatsAppMediaSend({
       target: "+15550001111",
       message: "file attached",
@@ -743,7 +743,7 @@ describe("runMessageAction outbound session key selection", () => {
     expect(sendMedia).toHaveBeenCalledTimes(1);
     expect(sendMedia).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionKey: activeSessionKey,
+        sessionKey: "agent:main:main",
       }),
     );
   });

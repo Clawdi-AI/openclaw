@@ -509,7 +509,7 @@ describe("resolveHeartbeatIntervalMs", () => {
     await expectTelegramHeartbeatAccountId({ heartbeat, telegram, expectedAccountId });
   });
 
-  it("passes sessionKey through mux telegram heartbeats", async () => {
+  it("derives mux telegram heartbeats from the resolved outbound route", async () => {
     await withTempTelegramHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const cfg = createHeartbeatConfig({
         tmpDir,
@@ -548,7 +548,7 @@ describe("resolveHeartbeatIntervalMs", () => {
         "123456",
         "Hello from heartbeat",
         expect.objectContaining({
-          mux: expect.objectContaining({ sessionKey: muxSessionKey }),
+          mux: expect.objectContaining({ sessionKey: "agent:main:main" }),
           verbose: false,
         }),
       );

@@ -30,6 +30,7 @@ export interface QueuedDelivery {
   enqueuedAt: number;
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  agentId?: string;
   sessionKey?: string | null;
   accountId?: string;
   /**
@@ -69,6 +70,7 @@ export async function ensureQueueDir(stateDir?: string): Promise<string> {
 type QueuedDeliveryParams = {
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  agentId?: string;
   sessionKey?: string | null;
   accountId?: string;
   payloads: ReplyPayload[];
@@ -91,6 +93,7 @@ export async function enqueueDelivery(
     enqueuedAt: Date.now(),
     channel: params.channel,
     to: params.to,
+    agentId: params.agentId,
     sessionKey: params.sessionKey,
     accountId: params.accountId,
     payloads: params.payloads,
@@ -279,6 +282,7 @@ export async function recoverPendingDeliveries(opts: {
         cfg: opts.cfg,
         channel: entry.channel,
         to: entry.to,
+        agentId: entry.agentId,
         sessionKey: entry.sessionKey,
         accountId: entry.accountId,
         payloads: entry.payloads,

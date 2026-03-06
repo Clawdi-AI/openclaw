@@ -643,7 +643,6 @@ export async function runCronIsolatedAgentTurn(params: {
             cfg: cfgWithAgentDefaults,
             channel: resolvedDelivery.channel,
             to: resolvedDelivery.to,
-            sessionKey: params.job.sessionKey,
             accountId: resolvedDelivery.accountId,
             threadId: resolvedDelivery.threadId,
             payloads: payloadsForDelivery,

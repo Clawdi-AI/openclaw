@@ -105,7 +105,7 @@ describe("agent request receipt delivery", () => {
     });
   });
 
-  it("passes sessionKey through receipt delivery", async () => {
+  it("relies on agentId-based outbound routing for receipt delivery", async () => {
     const ctx = buildCtx();
 
     await handleNodeEvent(ctx, "node-1", {
@@ -122,7 +122,7 @@ describe("agent request receipt delivery", () => {
 
     expect(mocks.deliverOutboundPayloads).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionKey: "agent:main:telegram:direct:123",
+        agentId: "main",
       }),
     );
   });

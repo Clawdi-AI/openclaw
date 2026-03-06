@@ -181,21 +181,52 @@ describe("deliverOutboundPayloads", () => {
     );
   });
 
-  it("persists sessionKey in the queued delivery entry", async () => {
+  it("persists agentId in the queued delivery entry when mux routing can be rederived", async () => {
     const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" });
 
     await deliverOutboundPayloads({
       cfg: telegramChunkConfig,
       channel: "telegram",
       to: "123",
-      sessionKey: "agent:main:telegram:direct:123",
+      agentId: "main",
       payloads: [{ text: "hi" }],
       deps: { sendTelegram },
     });
 
     expect(queueMocks.enqueueDelivery).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionKey: "agent:main:telegram:direct:123",
+        agentId: "main",
+      }),
+    );
+  });
+
+  it("derives mux telegram transport from agentId and outbound target", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "123" });
+    const cfg: OpenClawConfig = {
+      channels: {
+        telegram: {
+          botToken: "tok-1",
+          mux: { enabled: true },
+        },
+      },
+    };
+
+    await deliverOutboundPayloads({
+      cfg,
+      channel: "telegram",
+      to: "123",
+      agentId: "main",
+      payloads: [{ text: "hi" }],
+      deps: { sendTelegram },
+    });
+
+    expect(sendTelegram).toHaveBeenCalledWith(
+      "123",
+      "hi",
+      expect.objectContaining({
+        mux: expect.objectContaining({
+          sessionKey: "agent:main:main",
+        }),
       }),
     );
   });

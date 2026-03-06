@@ -59,7 +59,7 @@ describe("scheduleRestartSentinelWake", () => {
     });
   });
 
-  it("passes the source sessionKey into direct restart delivery", async () => {
+  it("relies on agentId-based outbound routing for direct restart delivery", async () => {
     mocks.consumeRestartSentinel.mockResolvedValue({
       payload: {
         kind: "restart",
@@ -74,7 +74,7 @@ describe("scheduleRestartSentinelWake", () => {
 
     expect(mocks.deliverOutboundPayloads).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionKey: "agent:main:telegram:direct:123",
+        agentId: "main",
       }),
     );
   });

@@ -98,7 +98,6 @@ export async function deliverSessionMaintenanceWarning(params: WarningParams): P
       cfg: params.cfg,
       channel,
       to: target.to,
-      sessionKey: params.sessionKey,
       accountId: target.accountId,
       threadId: target.threadId,
       payloads: [{ text }],

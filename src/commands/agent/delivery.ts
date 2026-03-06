@@ -188,7 +188,6 @@ export async function deliverAgentCommandResult(params: {
         cfg,
         channel: deliveryChannel,
         to: deliveryTarget,
-        sessionKey: opts.sessionKey,
         accountId: resolvedAccountId,
         payloads: deliveryPayloads,
         agentId: deliveryAgentId,

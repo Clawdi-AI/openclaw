@@ -36,7 +36,7 @@ describe("deliverAgentCommandResult", () => {
     mocks.resolveOutboundTarget.mockReturnValue({ ok: true, to: "123" });
   });
 
-  it("passes sessionKey through direct outbound delivery", async () => {
+  it("relies on agentId-based outbound routing for direct delivery", async () => {
     const cfg = {} as OpenClawConfig;
     const deps = {} as CliDeps;
     const runtime = {
@@ -69,7 +69,7 @@ describe("deliverAgentCommandResult", () => {
     });
 
     expect(mocks.deliverOutboundPayloads).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionKey: "agent:main:telegram:direct:123" }),
+      expect.objectContaining({ agentId: "main" }),
     );
   });
 });
