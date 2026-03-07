@@ -1,5 +1,6 @@
 import type { Bot } from "grammy";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../config/config.js";
 import {
   getTelegramSendTestMocks,
   importTelegramSendModule,
@@ -9,10 +10,11 @@ import { clearSentMessageCache, recordSentMessage, wasSentByBot } from "./sent-m
 
 installTelegramSendTestHooks();
 
-const { botApi, botCtorSpy, loadConfig, loadWebMedia } = getTelegramSendTestMocks();
+const { botApi, botCtorSpy, loadConfig, loadWebMedia, sendViaMux } = getTelegramSendTestMocks();
 const {
   buildInlineKeyboard,
   createForumTopicTelegram,
+  deleteMessageTelegram,
   editMessageTelegram,
   reactMessageTelegram,
   sendMessageTelegram,
@@ -1160,6 +1162,28 @@ describe("reactMessageTelegram", () => {
 
     expect(setMessageReaction).toHaveBeenCalledWith("123", 456, []);
   });
+
+  it("passes the chat target through mux reactions", async () => {
+    sendViaMux.mockResolvedValue({ messageId: "mux-1", chatId: "123" });
+
+    await reactMessageTelegram("telegram:123", "456", "✅", {
+      mux: {
+        cfg: {} as OpenClawConfig,
+        sessionKey: "tg:session:1",
+      },
+    });
+
+    expect(sendViaMux).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        sessionKey: "tg:session:1",
+        to: "123",
+        raw: expect.objectContaining({
+          telegram: expect.objectContaining({ method: "setMessageReaction" }),
+        }),
+      }),
+    );
+  });
 });
 
 describe("sendStickerTelegram", () => {
@@ -1280,6 +1304,29 @@ describe("sendStickerTelegram", () => {
 
     expect(sendSticker).toHaveBeenCalledWith(chatId, "fileId123", undefined);
   });
+
+  it("passes the chat target through mux sticker sends", async () => {
+    sendViaMux.mockResolvedValue({ messageId: "mux-1", chatId: "123" });
+
+    const result = await sendStickerTelegram("telegram:123", "fileId123", {
+      mux: {
+        cfg: {} as OpenClawConfig,
+        sessionKey: "tg:session:1",
+      },
+    });
+
+    expect(result).toEqual({ messageId: "mux-1", chatId: "123" });
+    expect(sendViaMux).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        sessionKey: "tg:session:1",
+        to: "123",
+        raw: expect.objectContaining({
+          telegram: expect.objectContaining({ method: "sendSticker" }),
+        }),
+      }),
+    );
+  });
 });
 
 describe("editMessageTelegram", () => {
@@ -1386,6 +1433,29 @@ describe("editMessageTelegram", () => {
       }),
     );
   });
+
+  it("passes the chat target through mux edits", async () => {
+    sendViaMux.mockResolvedValue({ messageId: "mux-1", chatId: "123" });
+
+    const result = await editMessageTelegram("telegram:123", "456", "edited", {
+      mux: {
+        cfg: {} as OpenClawConfig,
+        sessionKey: "tg:session:1",
+      },
+    });
+
+    expect(result).toEqual({ ok: true, messageId: "456", chatId: "123" });
+    expect(sendViaMux).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        sessionKey: "tg:session:1",
+        to: "123",
+        raw: expect.objectContaining({
+          telegram: expect.objectContaining({ method: "editMessageText" }),
+        }),
+      }),
+    );
+  });
 });
 
 describe("sendPollTelegram", () => {
@@ -1450,6 +1520,33 @@ describe("sendPollTelegram", () => {
 
     expect(api.sendPoll).not.toHaveBeenCalled();
   });
+
+  it("passes the chat target through mux poll sends", async () => {
+    sendViaMux.mockResolvedValue({ messageId: "mux-1", chatId: "123", pollId: "poll-1" });
+
+    const result = await sendPollTelegram(
+      "telegram:123",
+      { question: "Q", options: ["A", "B"] },
+      {
+        mux: {
+          cfg: {} as OpenClawConfig,
+          sessionKey: "tg:session:1",
+        },
+      },
+    );
+
+    expect(result).toEqual({ messageId: "mux-1", chatId: "123" });
+    expect(sendViaMux).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        sessionKey: "tg:session:1",
+        to: "123",
+        raw: expect.objectContaining({
+          telegram: expect.objectContaining({ method: "sendPoll" }),
+        }),
+      }),
+    );
+  });
 });
 
 describe("createForumTopicTelegram", () => {
@@ -1491,5 +1588,80 @@ describe("createForumTopicTelegram", () => {
       icon_color: 0x6fb9f0,
       icon_custom_emoji_id: "1234567890",
     });
+  });
+
+  it("passes the base chat target through mux forum topic creation", async () => {
+    sendViaMux.mockResolvedValue({ messageId: "mux-1", message_thread_id: 301 } as never);
+
+    await createForumTopicTelegram("telegram:group:-1001234567890:topic:271", "Roadmap", {
+      mux: {
+        cfg: {} as OpenClawConfig,
+        sessionKey: "tg:session:1",
+      },
+    });
+
+    expect(sendViaMux).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        sessionKey: "tg:session:1",
+        to: "-1001234567890",
+        raw: expect.objectContaining({
+          telegram: expect.objectContaining({ method: "createForumTopic" }),
+        }),
+      }),
+    );
+  });
+});
+
+describe("mux target propagation", () => {
+  it("passes the chat target through mux media sends", async () => {
+    loadWebMedia.mockResolvedValue({
+      buffer: Buffer.from("pdf"),
+      contentType: "application/pdf",
+      fileName: "dummy.pdf",
+    });
+    sendViaMux.mockResolvedValue({ messageId: "mux-1", chatId: "123" });
+
+    const result = await sendMessageTelegram("telegram:123", "document", {
+      mediaUrl: "https://example.com/dummy.pdf",
+      mux: {
+        cfg: {} as OpenClawConfig,
+        sessionKey: "tg:session:1",
+      },
+    });
+
+    expect(result).toEqual({ messageId: "mux-1", chatId: "123" });
+    expect(sendViaMux).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        sessionKey: "tg:session:1",
+        to: "123",
+        raw: expect.objectContaining({
+          telegram: expect.objectContaining({ method: "sendDocument" }),
+        }),
+      }),
+    );
+  });
+
+  it("passes the chat target through mux deletes", async () => {
+    sendViaMux.mockResolvedValue({ messageId: "mux-1", chatId: "123" });
+
+    await deleteMessageTelegram("telegram:123", "456", {
+      mux: {
+        cfg: {} as OpenClawConfig,
+        sessionKey: "tg:session:1",
+      },
+    });
+
+    expect(sendViaMux).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "telegram",
+        sessionKey: "tg:session:1",
+        to: "123",
+        raw: expect.objectContaining({
+          telegram: expect.objectContaining({ method: "deleteMessage" }),
+        }),
+      }),
+    );
   });
 });

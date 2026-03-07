@@ -29,15 +29,10 @@ function normalizeResolvedDefaultAccountId(value: string): string {
   return isLegacyMuxAccountId(value) ? DEFAULT_ACCOUNT_ID : value;
 }
 
-export function resolveMuxBusinessAccountId(params: {
+function resolveMuxDefaultAccountId(params: {
   cfg: OpenClawConfig;
   channel: MuxBusinessChannel;
-  accountId?: string | null;
 }): string {
-  const normalized = normalizeLegacyMuxAccountId(params.accountId);
-  if (normalized) {
-    return normalized;
-  }
   if (params.channel === "telegram") {
     return normalizeResolvedDefaultAccountId(resolveDefaultTelegramAccountId(params.cfg));
   }
@@ -45,4 +40,28 @@ export function resolveMuxBusinessAccountId(params: {
     return normalizeResolvedDefaultAccountId(resolveDefaultDiscordAccountId(params.cfg));
   }
   return normalizeResolvedDefaultAccountId(resolveDefaultWhatsAppAccountId(params.cfg));
+}
+
+export function resolveMuxBusinessAccountId(params: {
+  cfg: OpenClawConfig;
+  channel: MuxBusinessChannel;
+  accountId?: string | null;
+}): string {
+  void params.accountId;
+  // Mux is a singleton transport mounted on the channel's default business
+  // account. We intentionally ignore non-default account ids here so mux
+  // follows the vanilla single-account path.
+  return resolveMuxDefaultAccountId(params);
+}
+
+export function isMuxDefaultBusinessAccount(params: {
+  cfg: OpenClawConfig;
+  channel: MuxBusinessChannel;
+  accountId?: string | null;
+}): boolean {
+  const normalized = normalizeLegacyMuxAccountId(params.accountId);
+  if (!normalized) {
+    return true;
+  }
+  return normalized === resolveMuxDefaultAccountId(params);
 }

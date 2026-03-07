@@ -21,6 +21,7 @@ import {
 import type { sendMessageDiscord } from "../../discord/send.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import type { sendMessageIMessage } from "../../imessage/send.js";
+import { logWarn } from "../../logger.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { markdownToSignalTextChunks, type SignalTextStyleRange } from "../../signal/format.js";
@@ -267,6 +268,11 @@ export async function deliverOutboundPayloads(
       })
     : null;
   const sessionKey = derivedRoute?.sessionKey ?? providedSessionKey;
+  if (providedSessionKey && !derivedRoute) {
+    logWarn(
+      `outbound-delivery: using caller-provided sessionKey fallback channel=${channel} target=${to} agentId=${agentId ?? "unknown"}`,
+    );
+  }
   const resolvedParams = {
     ...params,
     accountId: resolvedAccountId,

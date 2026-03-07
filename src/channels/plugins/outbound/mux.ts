@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "../../../config/config.js";
 import { loadOrCreateDeviceIdentity } from "../../../infra/device-identity.js";
 import type { PollInput } from "../../../polls.js";
-import { LEGACY_MUX_ACCOUNT_ID, resolveMuxBusinessAccountId } from "../../../utils/mux-account.js";
+import {
+  isMuxDefaultBusinessAccount,
+  LEGACY_MUX_ACCOUNT_ID,
+  resolveMuxBusinessAccountId,
+} from "../../../utils/mux-account.js";
 
 type SupportedMuxChannel = "whatsapp" | "telegram" | "discord";
 
@@ -164,6 +168,9 @@ export function isMuxEnabled(params: {
   channel: SupportedMuxChannel;
   accountId?: string;
 }): boolean {
+  if (!isMuxDefaultBusinessAccount(params)) {
+    return false;
+  }
   return resolveChannelMuxConfig(params).enabled;
 }
 

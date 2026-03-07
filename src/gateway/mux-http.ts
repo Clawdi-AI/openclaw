@@ -357,6 +357,7 @@ async function sendTelegramEditViaMux(params: {
   cfg: OpenClawConfig;
   sessionKey: string;
   accountId?: string;
+  to: string;
   messageId: number;
   text: string;
   buttons: TelegramCallbackButtons;
@@ -371,6 +372,7 @@ async function sendTelegramEditViaMux(params: {
     channel: "telegram",
     sessionKey: params.sessionKey,
     accountId: params.accountId,
+    to: params.to,
     raw: {
       telegram: telegramEdit,
     },
@@ -573,6 +575,7 @@ export async function handleMuxInboundHttpRequest(
           cfg,
           sessionKey,
           accountId,
+          to: originatingTo,
           messageId: callbackPayload.callbackMessageId,
           text: callbackAction.text,
           buttons: callbackAction.buttons,
@@ -812,6 +815,7 @@ async function dispatchMuxTelegram(params: {
           channel: "telegram",
           sessionKey,
           accountId: ctx.AccountId,
+          to: originatingTo,
           raw: {
             telegram: {
               method: "sendMessage",
@@ -830,6 +834,7 @@ async function dispatchMuxTelegram(params: {
           channel: "telegram",
           sessionKey,
           accountId: ctx.AccountId,
+          to: originatingTo,
           raw: {
             telegram: {
               method: "editMessageText",

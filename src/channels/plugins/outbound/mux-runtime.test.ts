@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
-import { __resetMuxRuntimeAuthCacheForTest, sendViaMux, sendTypingViaMux } from "./mux.js";
+import {
+  __resetMuxRuntimeAuthCacheForTest,
+  isMuxEnabled,
+  sendViaMux,
+  sendTypingViaMux,
+} from "./mux.js";
 
 vi.mock("../../../infra/device-identity.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../infra/device-identity.js")>();
@@ -71,6 +76,15 @@ function resolveFetchUrl(input: string | URL | Request): string {
 }
 
 describe("mux runtime auth", () => {
+  it("only enables mux on the default-account path", () => {
+    const cfg = runtimeMuxConfig();
+
+    expect(isMuxEnabled({ cfg, channel: "telegram" })).toBe(true);
+    expect(isMuxEnabled({ cfg, channel: "telegram", accountId: "mux" })).toBe(true);
+    expect(isMuxEnabled({ cfg, channel: "telegram", accountId: "default" })).toBe(true);
+    expect(isMuxEnabled({ cfg, channel: "telegram", accountId: "work" })).toBe(false);
+  });
+
   it("registers once and sends outbound request with runtime jwt auth", async () => {
     const now = Date.now();
     const fetchSpy = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -204,5 +218,39 @@ describe("mux runtime auth", () => {
     expect(result.messageId).toBe("mx-retry-1");
     expect(registerCount).toBe(2);
     expect(outboundCount).toBe(2);
+  });
+
+  it("normalizes direct mux sends back to the default business account", async () => {
+    const now = Date.now();
+    const fetchSpy = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: "runtime-token-1",
+          expiresAtMs: now + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        expect(parseJsonRequestBody(init ?? {})).toMatchObject({
+          channel: "telegram",
+          sessionKey: "tg:session:1",
+          accountId: "default",
+          openclawId: "openclaw-instance-1",
+        });
+        return jsonResponse({ messageId: "mx-1", chatId: "chat-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await sendViaMux({
+      cfg: runtimeMuxConfig(),
+      channel: "telegram",
+      accountId: "work",
+      sessionKey: "tg:session:1",
+      text: "hello runtime",
+    });
   });
 });

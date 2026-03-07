@@ -171,6 +171,8 @@ type ResolvedBoundRoute<T> = {
   via: "session" | "route";
 };
 
+type OutboundResolutionMode = "session-first" | "target-first";
+
 type TenantInboundTarget = {
   url: string;
   timeoutMs: number;
@@ -542,6 +544,9 @@ const telegramApiBaseUrl = (
 const discordApiBaseUrl = (
   process.env.MUX_DISCORD_API_BASE_URL || "https://discord.com/api/v10"
 ).replace(/\/+$/, "");
+const outboundResolutionMode = resolveOutboundResolutionMode(
+  process.env.MUX_OUTBOUND_RESOLUTION_MODE,
+);
 // OpenClaw account id for mux-routed inbound events. Keep this separate from
 // platform account ids so direct channel bots can remain unchanged.
 const openclawMuxAccountId = readNonEmptyString(process.env.MUX_OPENCLAW_ACCOUNT_ID) || "default";
@@ -3695,24 +3700,29 @@ function uniqueRouteKeys(routeKeys: Array<string | null | undefined>): string[] 
   return unique;
 }
 
-function resolveSessionRouteBinding(params: {
+function resolveOutboundResolutionMode(value: unknown): OutboundResolutionMode {
+  const normalized = readNonEmptyString(value)?.toLowerCase();
+  return normalized === "target-first" ? "target-first" : "session-first";
+}
+
+function resolveRouteKeyBySession(params: {
   tenantId: string;
   channel: "telegram" | "discord" | "whatsapp";
   sessionKey: string;
-  routeKeys?: string[];
-}): { routeKey: string; via: "session" | "route" } | null {
+}): string | null {
   const exactRow = stmtResolveSessionRouteBinding.get(
     params.tenantId,
     params.channel,
     params.sessionKey,
   ) as SessionRouteBindingRow | undefined;
-  if (exactRow) {
-    return {
-      routeKey: resolveBoundRouteKeyFromSession(exactRow),
-      via: "session",
-    };
-  }
+  return exactRow ? resolveBoundRouteKeyFromSession(exactRow) : null;
+}
 
+function resolveRouteKeyByTarget(params: {
+  tenantId: string;
+  channel: "telegram" | "discord" | "whatsapp";
+  routeKeys?: string[];
+}): string | null {
   for (const routeKey of uniqueRouteKeys(params.routeKeys ?? [])) {
     const row = stmtSelectActiveBindingByTenantAndRoute.get(
       params.tenantId,
@@ -3722,6 +3732,37 @@ function resolveSessionRouteBinding(params: {
     if (!row?.binding_id || row.status !== "active") {
       continue;
     }
+    return routeKey;
+  }
+  return null;
+}
+
+function resolveSessionRouteBinding(params: {
+  tenantId: string;
+  channel: "telegram" | "discord" | "whatsapp";
+  sessionKey: string;
+  routeKeys?: string[];
+  mode?: OutboundResolutionMode;
+}): { routeKey: string; via: "session" | "route" } | null {
+  const mode = params.mode ?? "session-first";
+  if (mode === "target-first") {
+    const routeKey = resolveRouteKeyByTarget(params);
+    if (routeKey) {
+      return { routeKey, via: "route" };
+    }
+    const exactRouteKey = resolveRouteKeyBySession(params);
+    if (exactRouteKey) {
+      return { routeKey: exactRouteKey, via: "session" };
+    }
+    return null;
+  }
+
+  const exactRouteKey = resolveRouteKeyBySession(params);
+  if (exactRouteKey) {
+    return { routeKey: exactRouteKey, via: "session" };
+  }
+  const routeKey = resolveRouteKeyByTarget(params);
+  if (routeKey) {
     return { routeKey, via: "route" };
   }
 
@@ -3850,6 +3891,7 @@ function resolveTelegramBoundRoute(params: {
   channel: "telegram";
   sessionKey: string;
   routeKeys?: string[];
+  mode?: OutboundResolutionMode;
 }): ResolvedBoundRoute<TelegramBoundRoute> | null {
   const resolved = resolveSessionRouteBinding(params);
   if (!resolved) {
@@ -3864,6 +3906,7 @@ async function resolveDiscordBoundRoute(params: {
   channel: "discord";
   sessionKey: string;
   routeKeys?: string[];
+  mode?: OutboundResolutionMode;
 }): Promise<ResolvedBoundRoute<DiscordBoundRoute> | null> {
   const resolved = resolveSessionRouteBinding(params);
   if (!resolved) {
@@ -3878,6 +3921,7 @@ function resolveWhatsAppBoundRoute(params: {
   channel: "whatsapp";
   sessionKey: string;
   routeKeys?: string[];
+  mode?: OutboundResolutionMode;
 }): ResolvedBoundRoute<WhatsAppBoundRoute> | null {
   const resolved = resolveSessionRouteBinding(params);
   if (!resolved) {
@@ -8454,6 +8498,7 @@ const server = http.createServer(async (req, res) => {
           tenantId: tenant.id,
           channel,
           sessionKey,
+          mode: outboundResolutionMode,
           routeKeys: listTelegramOutboundRouteKeys({
             requestedTo: payload.to,
             rawBody: telegramRawBody ?? undefined,
@@ -8470,7 +8515,7 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
-        if (resolvedRoute.via === "route") {
+        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
           log({
             type: "outbound_route_fallback",
             tenantId: tenant.id,
@@ -8602,6 +8647,7 @@ const server = http.createServer(async (req, res) => {
           tenantId: tenant.id,
           channel,
           sessionKey,
+          mode: outboundResolutionMode,
           routeKeys: await listDiscordOutboundRouteKeys({
             requestedTo: payload.to,
             requestedThreadId: requestedDiscordThreadId,
@@ -8617,7 +8663,7 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
-        if (resolvedRoute.via === "route") {
+        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
           log({
             type: "outbound_route_fallback",
             tenantId: tenant.id,
@@ -8736,6 +8782,7 @@ const server = http.createServer(async (req, res) => {
           tenantId: tenant.id,
           channel,
           sessionKey,
+          mode: outboundResolutionMode,
           routeKeys: listWhatsAppOutboundRouteKeys({
             requestedTo: payload.to,
             accountId: readNonEmptyString(payload.accountId),
@@ -8751,7 +8798,7 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
-        if (resolvedRoute.via === "route") {
+        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
           log({
             type: "outbound_route_fallback",
             tenantId: tenant.id,
