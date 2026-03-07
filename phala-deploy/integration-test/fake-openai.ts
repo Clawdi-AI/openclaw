@@ -11,6 +11,7 @@ export type FakeOpenAiRequest = {
   lastUserText: string;
   inputItems: unknown[];
   functionCallOutputs: FakeOpenAiFunctionCallOutput[];
+  allFunctionCallOutputs: FakeOpenAiFunctionCallOutput[];
   turn: number;
 };
 
@@ -30,6 +31,28 @@ export type FakeOpenAiResponseItem =
 
 export type FakeOpenAiResponsePlan = FakeOpenAiResponseItem | FakeOpenAiResponseItem[] | string;
 
+export type FakeOpenAiScriptContext = {
+  request: FakeOpenAiRequest;
+  toolOutputs: FakeOpenAiFunctionCallOutput[];
+};
+
+export type FakeOpenAiScriptStep =
+  | {
+      type: "tool_call";
+      name: string;
+      callId?: string;
+      id?: string;
+      args:
+        | Record<string, unknown>
+        | string
+        | ((context: FakeOpenAiScriptContext) => Record<string, unknown> | string);
+    }
+  | {
+      type: "final_text";
+      id?: string;
+      text: string | ((context: FakeOpenAiScriptContext) => string);
+    };
+
 export function textResponsePlan(text: string, id?: string): FakeOpenAiResponseItem {
   return { kind: "message", text, id };
 }
@@ -47,6 +70,57 @@ export function functionCallResponsePlan(params: {
     callId: params.callId,
     id: params.id,
   };
+}
+
+export function getFunctionCallOutput(
+  outputs: FakeOpenAiFunctionCallOutput[],
+  callId: string,
+): string | undefined {
+  return outputs.find((entry) => entry.callId === callId)?.output;
+}
+
+export function createSequentialResponseScript(
+  steps: FakeOpenAiScriptStep[],
+): (request: FakeOpenAiRequest) => FakeOpenAiResponsePlan {
+  return (request) => {
+    const context = {
+      request,
+      toolOutputs: request.allFunctionCallOutputs,
+    } satisfies FakeOpenAiScriptContext;
+    const step = steps[context.toolOutputs.length];
+    if (!step) {
+      throw new Error(
+        `sequential OpenAI script exhausted at turn ${request.turn} with ${context.toolOutputs.length} tool outputs`,
+      );
+    }
+    if (step.type === "final_text") {
+      const text = typeof step.text === "function" ? step.text(context) : step.text;
+      return textResponsePlan(text, step.id);
+    }
+    const args = typeof step.args === "function" ? step.args(context) : step.args;
+    return functionCallResponsePlan({
+      name: step.name,
+      args,
+      callId: step.callId,
+      id: step.id,
+    });
+  };
+}
+
+function mergeFunctionCallOutputs(
+  requests: FakeOpenAiRequest[],
+  outputs: FakeOpenAiFunctionCallOutput[],
+): FakeOpenAiFunctionCallOutput[] {
+  const merged = new Map<string, FakeOpenAiFunctionCallOutput>();
+  for (const request of requests) {
+    for (const output of request.allFunctionCallOutputs ?? request.functionCallOutputs) {
+      merged.set(output.callId, output);
+    }
+  }
+  for (const output of outputs) {
+    merged.set(output.callId, output);
+  }
+  return [...merged.values()];
 }
 
 function extractLastUserTextFromArray(input: unknown[]): string {
@@ -247,6 +321,10 @@ export class FakeOpenAiResponsesServer {
         lastUserText: extractLastUserText(raw),
         inputItems,
         functionCallOutputs: extractFunctionCallOutputs(raw),
+        allFunctionCallOutputs: mergeFunctionCallOutputs(
+          instance?.requests ?? [],
+          extractFunctionCallOutputs(raw),
+        ),
         turn: instance.requests.length + 1,
       } satisfies FakeOpenAiRequest;
       instance.requests.push(request);

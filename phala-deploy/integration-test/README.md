@@ -25,10 +25,12 @@ Implemented today:
 - real mux-server started as a child process
 - fake Telegram Bot API server
 - fake OpenAI Responses server
+- generic sequential OpenAI script runner for multi-turn tool-call scenarios
 - Telegram DM round-trip coverage in both resolver modes for:
   - plain text reply
   - reaction via `message` tool
   - document send via `message` tool
+  - reaction -> document -> final text in one scripted multi-tool exchange
 - assertions on:
   - final Telegram outbound request
   - OpenAI prompt receipt
@@ -91,6 +93,7 @@ OpenAI fixtures:
 
 - synthetic deterministic responses are acceptable
 - the important part is protocol compatibility with the Responses API event stream
+- prefer generic sequential tool-call scripts over bespoke per-scenario branching logic
 
 Telegram fixtures:
 

@@ -1,9 +1,5 @@
-import type {
-  FakeOpenAiRequest,
-  FakeOpenAiResponsePlan,
-  FakeOpenAiFunctionCallOutput,
-} from "./fake-openai.js";
-import { functionCallResponsePlan, textResponsePlan } from "./fake-openai.js";
+import type { FakeOpenAiRequest, FakeOpenAiResponsePlan } from "./fake-openai.js";
+import { createSequentialResponseScript, getFunctionCallOutput } from "./fake-openai.js";
 import { loadJsonFixture } from "./fixtures.js";
 import type { MuxOpenClawHarness } from "./mux-openclaw-harness.js";
 
@@ -60,13 +56,6 @@ function loadFixture<T>(relativePath: string): T {
   return loadJsonFixture<T>(relativePath);
 }
 
-function lastToolOutput(
-  outputs: FakeOpenAiFunctionCallOutput[],
-  callId: string,
-): string | undefined {
-  return outputs.find((entry) => entry.callId === callId)?.output;
-}
-
 function buildTelegramDmTextUpdate(params: {
   chatId: string;
   inboundText: string;
@@ -100,7 +89,7 @@ function assertDefaultTelegramSessionEntry(params: {
   }
 }
 
-function buildMessageToolCall(params: {
+function buildMessageToolArgs(params: {
   action: string;
   chatId: string;
   messageId?: string;
@@ -109,8 +98,7 @@ function buildMessageToolCall(params: {
   message?: string;
   pollQuestion?: string;
   pollOption?: string[];
-  callId: string;
-}): FakeOpenAiResponsePlan {
+}): Record<string, unknown> {
   const args: Record<string, unknown> = {
     action: params.action,
     target: `telegram:${params.chatId}`,
@@ -133,11 +121,7 @@ function buildMessageToolCall(params: {
   if (params.pollOption) {
     args.pollOption = params.pollOption;
   }
-  return functionCallResponsePlan({
-    name: "message",
-    args,
-    callId: params.callId,
-  });
+  return args;
 }
 
 async function assertPlainTextOutbound(params: ScenarioContext): Promise<void> {
@@ -173,10 +157,8 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     chatId: "424242",
     buildInboundUpdate: buildTelegramDmTextUpdate,
     claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
-    openAiResponder:
-      ({ expectedReply }) =>
-      () =>
-        textResponsePlan(expectedReply),
+    openAiResponder: ({ expectedReply }) =>
+      createSequentialResponseScript([{ type: "final_text", text: expectedReply }]),
     assertOutbound: assertPlainTextOutbound,
     assertOpenAi: assertDefaultOpenAiRequest,
     assertSessionEntry: ({ chatId, sessionEntry }) => {
@@ -189,24 +171,29 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     chatId: "424242",
     buildInboundUpdate: buildTelegramDmTextUpdate,
     claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
-    openAiResponder:
-      ({ chatId }) =>
-      (request) => {
-        const callId = "call_react_1";
-        if (request.functionCallOutputs.length === 0) {
-          return buildMessageToolCall({
+    openAiResponder: ({ chatId }) =>
+      createSequentialResponseScript([
+        {
+          type: "tool_call",
+          name: "message",
+          callId: "call_react_1",
+          args: buildMessageToolArgs({
             action: "react",
             chatId,
             messageId: "900001",
             emoji: "👍",
-            callId,
-          });
-        }
-        if (!lastToolOutput(request.functionCallOutputs, callId)) {
-          throw new Error("missing message tool output for reaction script");
-        }
-        return textResponsePlan("");
-      },
+          }),
+        },
+        {
+          type: "final_text",
+          text: ({ toolOutputs }) => {
+            if (!getFunctionCallOutput(toolOutputs, "call_react_1")) {
+              throw new Error("missing message tool output for reaction script");
+            }
+            return "";
+          },
+        },
+      ]),
     assertOutbound: async ({ harness, chatId }) => {
       const reaction = await harness.telegram.waitForMethodCall(
         "setMessageReaction",
@@ -244,24 +231,29 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     workspaceFiles: {
       "fixtures/report.txt": "integration document payload\n",
     },
-    openAiResponder:
-      ({ chatId }) =>
-      (request) => {
-        const callId = "call_document_1";
-        if (request.functionCallOutputs.length === 0) {
-          return buildMessageToolCall({
+    openAiResponder: ({ chatId }) =>
+      createSequentialResponseScript([
+        {
+          type: "tool_call",
+          name: "message",
+          callId: "call_document_1",
+          args: buildMessageToolArgs({
             action: "send",
             chatId,
             path: "fixtures/report.txt",
             message: "report",
-            callId,
-          });
-        }
-        if (!lastToolOutput(request.functionCallOutputs, callId)) {
-          throw new Error("missing message tool output for document script");
-        }
-        return textResponsePlan("");
-      },
+          }),
+        },
+        {
+          type: "final_text",
+          text: ({ toolOutputs }) => {
+            if (!getFunctionCallOutput(toolOutputs, "call_document_1")) {
+              throw new Error("missing message tool output for document script");
+            }
+            return "";
+          },
+        },
+      ]),
     assertOutbound: async ({ harness, chatId }) => {
       const document = await harness.telegram.waitForMethodCall(
         "sendDocument",
@@ -285,6 +277,111 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
         OPENAI_TIMEOUT_MS,
       );
       await harness.openai.waitForRequestCount(2, OUTBOUND_TIMEOUT_MS);
+    },
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
+    },
+  },
+  {
+    id: "dm-react-document-text-sequential",
+    name: "Telegram DM reaction, document, and final text in sequence",
+    chatId: "424242",
+    buildInboundUpdate: buildTelegramDmTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    workspaceFiles: {
+      "fixtures/report.txt": "integration document payload\n",
+    },
+    openAiResponder: ({ chatId, expectedReply }) =>
+      createSequentialResponseScript([
+        {
+          type: "tool_call",
+          name: "message",
+          callId: "call_react_seq_1",
+          args: buildMessageToolArgs({
+            action: "react",
+            chatId,
+            messageId: "900001",
+            emoji: "👍",
+          }),
+        },
+        {
+          type: "tool_call",
+          name: "message",
+          callId: "call_document_seq_1",
+          args: ({ toolOutputs }) => {
+            if (!getFunctionCallOutput(toolOutputs, "call_react_seq_1")) {
+              throw new Error("missing reaction tool output for sequential script");
+            }
+            return buildMessageToolArgs({
+              action: "send",
+              chatId,
+              path: "fixtures/report.txt",
+              message: "CONFIRMED_FILE",
+            });
+          },
+        },
+        {
+          type: "final_text",
+          text: ({ toolOutputs }) => {
+            if (!getFunctionCallOutput(toolOutputs, "call_document_seq_1")) {
+              throw new Error("missing document tool output for sequential script");
+            }
+            return expectedReply;
+          },
+        },
+      ]),
+    assertOutbound: async ({ harness, chatId, expectedReply }) => {
+      const reaction = await harness.telegram.waitForMethodCall(
+        "setMessageReaction",
+        (request) =>
+          String(request.body.chat_id) === chatId && String(request.body.message_id) === "900001",
+        OUTBOUND_TIMEOUT_MS,
+      );
+      if (String(reaction.body.chat_id) !== chatId) {
+        throw new Error(`expected reaction chat_id=${chatId}`);
+      }
+      const document = await harness.telegram.waitForMethodCall(
+        "sendDocument",
+        (request) => String(request.body.chat_id) === chatId,
+        OUTBOUND_TIMEOUT_MS,
+      );
+      if (document.body.document !== "<<multipart-file>>") {
+        throw new Error("expected multipart document upload");
+      }
+      const caption = typeof document.body.caption === "string" ? document.body.caption : "";
+      if (caption !== "CONFIRMED_FILE") {
+        throw new Error("expected document caption to equal CONFIRMED_FILE");
+      }
+      const outboundSend = await harness.telegram.waitForMethodCall(
+        "sendMessage",
+        (request) =>
+          String(request.body.chat_id) === chatId &&
+          String(request.body.text).includes(expectedReply),
+        OUTBOUND_TIMEOUT_MS,
+      );
+      if (!String(outboundSend.body.text).includes(expectedReply)) {
+        throw new Error(`expected sendMessage text to contain ${expectedReply}`);
+      }
+    },
+    assertOpenAi: async ({ harness, inboundText, expectedReply }) => {
+      await harness.openai.waitForRequest(
+        (request) => request.lastUserText.includes(inboundText),
+        OPENAI_TIMEOUT_MS,
+      );
+      const requests = await harness.openai.waitForRequestCount(3, OUTBOUND_TIMEOUT_MS);
+      if (
+        !requests[2]?.allFunctionCallOutputs.find((entry) => entry.callId === "call_react_seq_1")
+      ) {
+        throw new Error("expected third OpenAI turn to retain reaction output context");
+      }
+      if (
+        !requests[2]?.allFunctionCallOutputs.find((entry) => entry.callId === "call_document_seq_1")
+      ) {
+        throw new Error("expected third OpenAI turn to retain document output context");
+      }
+      if (requests[2]?.lastUserText && requests[2].lastUserText.includes(expectedReply)) {
+        throw new Error("final assistant text should not appear as user input");
+      }
     },
     assertSessionEntry: ({ chatId, sessionEntry }) => {
       assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
