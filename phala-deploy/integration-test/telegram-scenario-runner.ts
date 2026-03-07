@@ -1,4 +1,3 @@
-import { buildAgentMainSessionKey } from "../../src/routing/session-key.js";
 import { withMuxOpenClawHarness } from "./mux-openclaw-harness.js";
 import { TELEGRAM_MUX_ROUND_TRIP_SCENARIOS } from "./telegram-scenarios.js";
 
@@ -24,6 +23,7 @@ async function main(): Promise<void> {
     {
       chatId: scenario.chatId,
       claimedSessionKey: scenario.claimSessionKey(scenario.chatId),
+      pairingRouteKey: scenario.pairingRouteKey?.(scenario.chatId),
       llmReplyText: expectedReply,
       resolutionMode,
       openAiResponder: scenario.openAiResponder({
@@ -54,7 +54,7 @@ async function main(): Promise<void> {
         expectedReply,
       });
 
-      const canonicalSessionKey = buildAgentMainSessionKey({ agentId: "main" });
+      const canonicalSessionKey = scenario.expectedSessionKey(scenario.chatId);
       const sessionEntry = await harness.waitForSessionStoreEntry(canonicalSessionKey);
       scenario.assertSessionEntry({
         harness,

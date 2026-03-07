@@ -39,8 +39,10 @@ export type TelegramMuxRoundTripScenario = {
   id: string;
   name: string;
   chatId: string;
+  pairingRouteKey?: (chatId: string) => string;
   buildInboundUpdate: (params: { chatId: string; inboundText: string }) => Record<string, unknown>;
   claimSessionKey: (chatId: string) => string;
+  expectedSessionKey: (chatId: string) => string;
   openAiResponder: (params: {
     chatId: string;
     inboundText: string;
@@ -68,6 +70,37 @@ function buildTelegramDmTextUpdate(params: {
   return update as unknown as Record<string, unknown>;
 }
 
+function buildTelegramGroupTextUpdate(params: {
+  chatId: string;
+  inboundText: string;
+}): Record<string, unknown> {
+  const update = loadFixture<TelegramMessageUpdate>("telegram/inbound/group-text.template.json");
+  const chatId = Number(params.chatId);
+  update.message.text = `@integration_bot ${params.inboundText}`;
+  (
+    update.message as TelegramMessageUpdate["message"] & {
+      entities?: Array<{ type: string; offset: number; length: number }>;
+    }
+  ).entities = [{ type: "mention", offset: 0, length: 16 }];
+  update.message.chat.id = chatId;
+  return update as unknown as Record<string, unknown>;
+}
+
+function buildTelegramForumTopicTextUpdate(params: {
+  chatId: string;
+  inboundText: string;
+}): Record<string, unknown> {
+  const update = loadFixture<Record<string, unknown>>(
+    "telegram/inbound/forum-topic-text.template.json",
+  );
+  const message = update.message as Record<string, unknown>;
+  const chat = message.chat as Record<string, unknown>;
+  message.text = `@integration_bot ${params.inboundText}`;
+  message.entities = [{ type: "mention", offset: 0, length: 16 }];
+  chat.id = Number(params.chatId);
+  return update;
+}
+
 function assertDefaultTelegramSessionEntry(params: {
   chatId: string;
   sessionEntry: Record<string, unknown>;
@@ -85,6 +118,31 @@ function assertDefaultTelegramSessionEntry(params: {
   if (params.sessionEntry.lastAccountId !== "default") {
     throw new Error(
       `expected lastAccountId=default, got ${String(params.sessionEntry.lastAccountId)}`,
+    );
+  }
+}
+
+function assertTelegramGroupSessionEntry(params: {
+  chatId: string;
+  sessionEntry: Record<string, unknown>;
+}): void {
+  assertDefaultTelegramSessionEntry(params);
+  if (params.sessionEntry.lastTo !== `telegram:${params.chatId}`) {
+    throw new Error(
+      `expected lastTo=telegram:${params.chatId}, got ${String(params.sessionEntry.lastTo)}`,
+    );
+  }
+}
+
+function assertTelegramForumSessionEntry(params: {
+  chatId: string;
+  threadId: number;
+  sessionEntry: Record<string, unknown>;
+}): void {
+  assertTelegramGroupSessionEntry(params);
+  if (Number(params.sessionEntry.lastThreadId) !== params.threadId) {
+    throw new Error(
+      `expected lastThreadId=${params.threadId}, got ${String(params.sessionEntry.lastThreadId)}`,
     );
   }
 }
@@ -157,6 +215,7 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     chatId: "424242",
     buildInboundUpdate: buildTelegramDmTextUpdate,
     claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    expectedSessionKey: () => "agent:main:main",
     openAiResponder: ({ expectedReply }) =>
       createSequentialResponseScript([{ type: "final_text", text: expectedReply }]),
     assertOutbound: assertPlainTextOutbound,
@@ -171,6 +230,7 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     chatId: "424242",
     buildInboundUpdate: buildTelegramDmTextUpdate,
     claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    expectedSessionKey: () => "agent:main:main",
     openAiResponder: ({ chatId }) =>
       createSequentialResponseScript([
         {
@@ -228,6 +288,7 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     chatId: "424242",
     buildInboundUpdate: buildTelegramDmTextUpdate,
     claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    expectedSessionKey: () => "agent:main:main",
     workspaceFiles: {
       "fixtures/report.txt": "integration document payload\n",
     },
@@ -288,6 +349,7 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     chatId: "424242",
     buildInboundUpdate: buildTelegramDmTextUpdate,
     claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    expectedSessionKey: () => "agent:main:main",
     workspaceFiles: {
       "fixtures/report.txt": "integration document payload\n",
     },
@@ -385,6 +447,50 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     },
     assertSessionEntry: ({ chatId, sessionEntry }) => {
       assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
+    },
+  },
+  {
+    id: "group-text-legacy-binding",
+    name: "Telegram group with legacy transport session binding",
+    chatId: "-100555",
+    pairingRouteKey: (chatId) => `telegram:default:chat:${chatId}`,
+    buildInboundUpdate: buildTelegramGroupTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:group:${chatId}`,
+    expectedSessionKey: (chatId) => `agent:main:telegram:group:${chatId}`,
+    openAiResponder: ({ expectedReply }) =>
+      createSequentialResponseScript([{ type: "final_text", text: expectedReply }]),
+    assertOutbound: assertPlainTextOutbound,
+    assertOpenAi: assertDefaultOpenAiRequest,
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertTelegramGroupSessionEntry({ chatId, sessionEntry });
+    },
+  },
+  {
+    id: "forum-topic-text-legacy-binding",
+    name: "Telegram forum topic with legacy transport session binding",
+    chatId: "-100777",
+    pairingRouteKey: (chatId) => `telegram:default:chat:${chatId}:topic:2`,
+    buildInboundUpdate: buildTelegramForumTopicTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:group:${chatId}:topic:2`,
+    expectedSessionKey: (chatId) => `agent:main:telegram:group:${chatId}:topic:2`,
+    openAiResponder: ({ expectedReply }) =>
+      createSequentialResponseScript([{ type: "final_text", text: expectedReply }]),
+    assertOutbound: async ({ harness, chatId, expectedReply }) => {
+      const outboundSend = await harness.telegram.waitForMethodCall(
+        "sendMessage",
+        (request) =>
+          String(request.body.chat_id) === chatId &&
+          String(request.body.text).includes(expectedReply) &&
+          Number(request.body.message_thread_id) === 2,
+        OUTBOUND_TIMEOUT_MS,
+      );
+      if (Number(outboundSend.body.message_thread_id) !== 2) {
+        throw new Error("expected sendMessage message_thread_id=2");
+      }
+    },
+    assertOpenAi: assertDefaultOpenAiRequest,
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertTelegramForumSessionEntry({ chatId, threadId: 2, sessionEntry });
     },
   },
 ];

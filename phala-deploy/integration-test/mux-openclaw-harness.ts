@@ -63,6 +63,7 @@ type HarnessPaths = {
 type StartHarnessParams = {
   chatId: string;
   claimedSessionKey: string;
+  pairingRouteKey?: string;
   llmReplyText: string;
   resolutionMode: "session-first" | "target-first";
   openAiResponder?: (request: FakeOpenAiRequest) => FakeOpenAiResponsePlan;
@@ -137,11 +138,12 @@ function buildHarnessConfig(params: {
       telegram: {
         dmPolicy: "open",
         allowFrom: ["*"],
+        groupPolicy: "open",
         reactionLevel: "minimal",
         actions: { reactions: true },
         mux: { enabled: true, timeoutMs: 10_000 },
         accounts: {
-          default: { enabled: true },
+          default: { enabled: true, groupPolicy: "open" },
         },
       },
     },
@@ -153,7 +155,7 @@ async function startMuxServer(params: {
   tempDir: string;
   gatewayPort: number;
   openclawId: string;
-  chatId: string;
+  pairingRouteKey: string;
   telegramBaseUrl: string;
   resolutionMode: "session-first" | "target-first";
 }): Promise<StartedMuxServer> {
@@ -187,7 +189,7 @@ async function startMuxServer(params: {
         {
           code: CLAIM_CODE,
           channel: "telegram",
-          routeKey: `telegram:default:chat:${params.chatId}`,
+          routeKey: params.pairingRouteKey,
           scope: "chat",
         },
       ]),
@@ -317,7 +319,7 @@ export async function startMuxOpenClawHarness(
       tempDir,
       gatewayPort,
       openclawId,
-      chatId: params.chatId,
+      pairingRouteKey: params.pairingRouteKey ?? `telegram:default:chat:${params.chatId}`,
       telegramBaseUrl: telegram.url,
       resolutionMode: params.resolutionMode,
     });

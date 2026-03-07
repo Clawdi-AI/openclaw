@@ -26,11 +26,13 @@ Implemented today:
 - fake Telegram Bot API server
 - fake OpenAI Responses server
 - generic sequential OpenAI script runner for multi-turn tool-call scenarios
-- Telegram DM round-trip coverage in both resolver modes for:
+- Telegram round-trip coverage in both resolver modes for:
   - plain text reply
   - reaction via `message` tool
   - document send via `message` tool
   - reaction -> document -> final text in one scripted multi-tool exchange
+  - group plain-text reply
+  - forum-topic plain-text reply
 - assertions on:
   - final Telegram outbound request
   - OpenAI prompt receipt
@@ -51,7 +53,6 @@ Current test files:
 
 Not covered yet:
 
-- Telegram group and forum-topic mocked round-trip
 - Telegram callback/edit round-trip
 - Telegram media/voice mocked round-trip
 - Telegram poll round-trip from the real current-channel prompt/tool surface
@@ -100,7 +101,7 @@ Telegram fixtures:
 - the long-term source of truth should be sanitized real Bot API payloads
 - hand-authored payloads should be treated as temporary or minimal-contract fixtures
 
-The current DM integration tests load a reusable JSON template fixture and then apply scenario-specific overrides. That is a better framework shape than inline payload literals, but it is still only an interim step until we replace the template with sanitized real Bot API captures.
+The current Telegram integration tests load reusable JSON template fixtures and then apply scenario-specific overrides. That is a better framework shape than inline payload literals, but it is still only an interim step until we replace those templates with sanitized real Bot API captures.
 
 ## Recommended fixture model
 
