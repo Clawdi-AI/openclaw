@@ -1319,6 +1319,114 @@ describe("mux server", () => {
     });
   });
 
+  test("telegram outbound falls back to the request route without sticking a shared canonical session", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/sendMessage") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9902 },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-COMPAT-1",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:1001",
+          scope: "chat",
+        },
+        {
+          code: "PAIR-TG-COMPAT-2",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:2002",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-TG-COMPAT-1",
+          sessionKey: "agent:main:telegram:direct:1001",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-TG-COMPAT-2",
+          sessionKey: "agent:main:telegram:direct:2002",
+        })
+      ).status,
+    ).toBe(200);
+
+    const first = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:main",
+        raw: {
+          telegram: {
+            method: "sendMessage",
+            body: {
+              chat_id: "1001",
+              text: "first canonical send",
+            },
+          },
+        },
+      }),
+    });
+    expect(first.status).toBe(200);
+
+    const second = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:main",
+        raw: {
+          telegram: {
+            method: "sendMessage",
+            body: {
+              chat_id: "2002",
+              text: "second canonical send",
+            },
+          },
+        },
+      }),
+    });
+    expect(second.status).toBe(200);
+
+    expect(telegramRequests).toHaveLength(2);
+    expect(telegramRequests.map((body) => toSafeString(body.chat_id))).toEqual(["1001", "2002"]);
+  });
+
   test("telegram outbound raw sendMessage retries without HTML parse_mode on parse errors", async () => {
     const telegramRequests: Array<Record<string, unknown>> = [];
     const telegramApi = await startHttpServer(async (req, res) => {
@@ -2117,6 +2225,106 @@ describe("mux server", () => {
       ok: false,
       error: "discord outbound requires raw.discord.body or raw.discord.send",
     });
+  });
+
+  test("discord outbound falls back to the request target for canonical sessions", async () => {
+    const discordRequests: Array<{
+      method: string;
+      url: string;
+      body: Record<string, unknown>;
+    }> = [];
+    const discordApi = await startHttpServer(async (req, res) => {
+      const url = req.url ?? "";
+      if (req.method === "POST" && url === "/users/@me/channels") {
+        discordRequests.push({
+          method: "POST",
+          url,
+          body: await readJsonBody(req),
+        });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: "2001" }));
+        return;
+      }
+      if (req.method === "POST" && url === "/channels/2001/messages") {
+        discordRequests.push({
+          method: "POST",
+          url,
+          body: await readJsonBody(req),
+        });
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: "7008", channel_id: "2001" }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-DISCORD-COMPAT",
+          channel: "discord",
+          routeKey: "discord:default:dm:user:42",
+          scope: "dm",
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+      },
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-DISCORD-COMPAT",
+          sessionKey: "dc:dm:42",
+        })
+      ).status,
+    ).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "discord",
+        sessionKey: "agent:main:main",
+        to: "user:42",
+        raw: {
+          discord: {
+            send: {
+              text: "compat fallback",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "7008",
+      channelId: "2001",
+      rawPassthrough: true,
+    });
+    expect(discordRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: "POST",
+          url: "/users/@me/channels",
+          body: { recipient_id: "42" },
+        }),
+        expect.objectContaining({
+          method: "POST",
+          url: "/channels/2001/messages",
+        }),
+      ]),
+    );
   });
 
   test("sends discord outbound through guild-bound route and enforces guild lock", async () => {
@@ -5430,6 +5638,57 @@ describe("mux server", () => {
     });
     expect(outbound.status).toBe(502);
     expect(await outbound.json()).toMatchObject({
+      ok: false,
+      error: "whatsapp send failed",
+    });
+  });
+
+  test("whatsapp outbound falls back to the request target for canonical sessions", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-COMPAT",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550001111@s.whatsapp.net",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-WA-COMPAT",
+          sessionKey: "agent:main:whatsapp:direct:+15550001111",
+        })
+      ).status,
+    ).toBe(200);
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "whatsapp",
+        sessionKey: "agent:main:main",
+        to: "15550001111@s.whatsapp.net",
+        raw: {
+          whatsapp: {
+            send: {
+              text: "hello wa from canonical session",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
       ok: false,
       error: "whatsapp send failed",
     });
