@@ -322,6 +322,92 @@ describe("delivery-queue", () => {
       );
     });
 
+    it("replays legacy queue entries that only persist sessionKey", async () => {
+      const queueDir = path.join(tmpDir, "delivery-queue");
+      fs.mkdirSync(queueDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(queueDir, "legacy-entry.json"),
+        JSON.stringify(
+          {
+            id: "legacy-entry",
+            enqueuedAt: 1,
+            channel: "telegram",
+            to: "123",
+            sessionKey: "agent:main:telegram:direct:123",
+            payloads: [{ text: "legacy" }],
+            retryCount: 0,
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+
+      const deliver = vi.fn().mockResolvedValue([]);
+      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+      await recoverPendingDeliveries({
+        deliver,
+        log,
+        cfg: baseCfg,
+        stateDir: tmpDir,
+        delay: noopDelay,
+      });
+
+      expect(deliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: "telegram",
+          to: "123",
+          agentId: undefined,
+          sessionKey: "agent:main:telegram:direct:123",
+          skipQueue: true,
+        }),
+      );
+    });
+
+    it("replays canonical queue entries that persist agentId without top-level sessionKey", async () => {
+      const queueDir = path.join(tmpDir, "delivery-queue");
+      fs.mkdirSync(queueDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(queueDir, "canonical-entry.json"),
+        JSON.stringify(
+          {
+            id: "canonical-entry",
+            enqueuedAt: 1,
+            channel: "telegram",
+            to: "123",
+            agentId: "main",
+            payloads: [{ text: "canonical" }],
+            retryCount: 0,
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+
+      const deliver = vi.fn().mockResolvedValue([]);
+      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+      await recoverPendingDeliveries({
+        deliver,
+        log,
+        cfg: baseCfg,
+        stateDir: tmpDir,
+        delay: noopDelay,
+      });
+
+      expect(deliver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: "telegram",
+          to: "123",
+          agentId: "main",
+          sessionKey: undefined,
+          skipQueue: true,
+        }),
+      );
+    });
+
     it("respects maxRecoveryMs time budget", async () => {
       await enqueueDelivery({ channel: "whatsapp", to: "+1", payloads: [{ text: "a" }] }, tmpDir);
       await enqueueDelivery({ channel: "telegram", to: "2", payloads: [{ text: "b" }] }, tmpDir);

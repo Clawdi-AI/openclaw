@@ -109,6 +109,51 @@ describe("mux outbound routing", () => {
     });
   });
 
+  it("bypasses mux for telegram non-default accounts", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({
+      messageId: "native-tg-1",
+      chatId: "tg-chat-native-1",
+    });
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      ...gatewayMuxConfig(),
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = await telegramOutbound.sendText!({
+      cfg,
+      to: "telegram:123",
+      text: "hello",
+      accountId: "work",
+      sessionKey: "sess-tg-work",
+      deps: { sendTelegram },
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(sendTelegram).toHaveBeenCalledOnce();
+    expect(sendTelegram).toHaveBeenCalledWith(
+      "telegram:123",
+      "hello",
+      expect.objectContaining({
+        accountId: "work",
+        mux: undefined,
+      }),
+    );
+    expect(result).toMatchObject({
+      channel: "telegram",
+      messageId: "native-tg-1",
+      chatId: "tg-chat-native-1",
+    });
+  });
+
   it("routes discord outbound through mux when enabled", async () => {
     const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
@@ -180,6 +225,50 @@ describe("mux outbound routing", () => {
     });
   });
 
+  it("bypasses mux for discord non-default accounts", async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const sendDiscord = vi.fn().mockResolvedValue({
+      messageId: "native-discord-1",
+      channelId: "dc-channel-native-1",
+    });
+    const cfg = {
+      ...gatewayMuxConfig(),
+      channels: {
+        discord: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = await discordOutbound.sendText!({
+      cfg,
+      to: "discord:chan",
+      text: "hello",
+      accountId: "work",
+      sessionKey: "sess-discord-work",
+      deps: { sendDiscord },
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(sendDiscord).toHaveBeenCalledOnce();
+    expect(sendDiscord).toHaveBeenCalledWith(
+      "discord:chan",
+      "hello",
+      expect.objectContaining({
+        accountId: "work",
+      }),
+    );
+    expect(result).toMatchObject({
+      channel: "discord",
+      messageId: "native-discord-1",
+      channelId: "dc-channel-native-1",
+    });
+  });
+
   it("routes whatsapp outbound through mux when enabled", async () => {
     const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);
@@ -244,6 +333,50 @@ describe("mux outbound routing", () => {
           },
         },
       },
+    });
+  });
+
+  it("bypasses mux for whatsapp non-default accounts", async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const sendWhatsApp = vi.fn().mockResolvedValue({
+      messageId: "native-wa-1",
+      toJid: "jid-native-1",
+    });
+    const cfg = {
+      ...gatewayMuxConfig(),
+      channels: {
+        whatsapp: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = await whatsappOutbound.sendText!({
+      cfg,
+      to: "+15555550100",
+      text: "hello",
+      accountId: "work",
+      sessionKey: "sess-wa-work",
+      deps: { sendWhatsApp },
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(sendWhatsApp).toHaveBeenCalledOnce();
+    expect(sendWhatsApp).toHaveBeenCalledWith(
+      "+15555550100",
+      "hello",
+      expect.objectContaining({
+        accountId: "work",
+      }),
+    );
+    expect(result).toMatchObject({
+      channel: "whatsapp",
+      messageId: "native-wa-1",
+      toJid: "jid-native-1",
     });
   });
 

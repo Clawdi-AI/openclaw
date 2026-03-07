@@ -37,6 +37,9 @@ const queueMocks = vi.hoisted(() => ({
   ackDelivery: vi.fn(async () => {}),
   failDelivery: vi.fn(async () => {}),
 }));
+const loggerMocks = vi.hoisted(() => ({
+  logWarn: vi.fn(),
+}));
 
 vi.mock("../../config/sessions.js", async () => {
   const actual = await vi.importActual<typeof import("../../config/sessions.js")>(
@@ -59,6 +62,13 @@ vi.mock("./delivery-queue.js", () => ({
   ackDelivery: queueMocks.ackDelivery,
   failDelivery: queueMocks.failDelivery,
 }));
+vi.mock("../../logger.js", async () => {
+  const actual = await vi.importActual<typeof import("../../logger.js")>("../../logger.js");
+  return {
+    ...actual,
+    logWarn: loggerMocks.logWarn,
+  };
+});
 
 const { deliverOutboundPayloads, normalizeOutboundPayloads } = await import("./deliver.js");
 
@@ -101,6 +111,7 @@ describe("deliverOutboundPayloads", () => {
     queueMocks.ackDelivery.mockResolvedValue(undefined);
     queueMocks.failDelivery.mockReset();
     queueMocks.failDelivery.mockResolvedValue(undefined);
+    loggerMocks.logWarn.mockReset();
   });
 
   afterEach(() => {
@@ -196,6 +207,7 @@ describe("deliverOutboundPayloads", () => {
     expect(queueMocks.enqueueDelivery).toHaveBeenCalledWith(
       expect.objectContaining({
         agentId: "main",
+        sessionKey: undefined,
       }),
     );
   });
@@ -228,6 +240,28 @@ describe("deliverOutboundPayloads", () => {
           sessionKey: "agent:main:main",
         }),
       }),
+    );
+  });
+
+  it("warns when outbound delivery falls back to the caller-provided sessionKey", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" });
+
+    await deliverOutboundPayloads({
+      cfg: telegramChunkConfig,
+      channel: "telegram",
+      to: "telegram:",
+      sessionKey: "agent:main:main",
+      payloads: [{ text: "hi" }],
+      deps: { sendTelegram },
+    });
+
+    expect(loggerMocks.logWarn).toHaveBeenCalledWith(
+      expect.stringContaining("using caller-provided sessionKey fallback"),
+    );
+    expect(sendTelegram).toHaveBeenCalledWith(
+      "telegram:",
+      "hi",
+      expect.objectContaining({ verbose: false, textMode: "html" }),
     );
   });
 
