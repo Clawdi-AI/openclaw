@@ -28,6 +28,7 @@ Implemented today:
 - generic sequential OpenAI script runner for multi-turn tool-call scenarios
 - Telegram round-trip coverage in both resolver modes for:
   - plain text reply
+  - AI streaming preview -> final edit
   - reaction via `message` tool
   - document send via `message` tool
   - reaction -> document -> final text in one scripted multi-tool exchange

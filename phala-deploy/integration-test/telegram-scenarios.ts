@@ -1,5 +1,9 @@
 import type { FakeOpenAiRequest, FakeOpenAiResponsePlan } from "./fake-openai.js";
-import { createSequentialResponseScript, getFunctionCallOutput } from "./fake-openai.js";
+import {
+  createSequentialResponseScript,
+  getFunctionCallOutput,
+  streamingTextResponsePlan,
+} from "./fake-openai.js";
 import { loadJsonFixture } from "./fixtures.js";
 import type { MuxOpenClawHarness } from "./mux-openclaw-harness.js";
 
@@ -274,6 +278,30 @@ async function assertPlainTextOutbound(params: ScenarioContext): Promise<void> {
   }
 }
 
+async function assertStreamingTextPreviewAndFinalize(params: ScenarioContext): Promise<void> {
+  const previewText = params.expectedReply.slice(0, 34);
+  const preview = await params.harness.telegram.waitForMethodCall(
+    "sendMessage",
+    (request) =>
+      String(request.body.chat_id) === params.chatId && String(request.body.text) === previewText,
+    OUTBOUND_TIMEOUT_MS,
+  );
+  if (String(preview.body.chat_id) !== params.chatId) {
+    throw new Error(`expected preview sendMessage chat_id=${params.chatId}`);
+  }
+  const finalEdit = await params.harness.telegram.waitForMethodCall(
+    "editMessageText",
+    (request) =>
+      String(request.body.chat_id) === params.chatId &&
+      Number(request.body.message_id) === 1000 &&
+      String(request.body.text) === params.expectedReply,
+    OUTBOUND_TIMEOUT_MS,
+  );
+  if (String(finalEdit.body.chat_id) !== params.chatId) {
+    throw new Error(`expected final edit chat_id=${params.chatId}`);
+  }
+}
+
 async function assertDefaultOpenAiRequest(params: ScenarioContext): Promise<void> {
   const llmRequest = await params.harness.openai.waitForRequest(
     (request) => request.lastUserText.includes(params.inboundText),
@@ -302,6 +330,29 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     openAiResponder: ({ expectedReply }) =>
       createSequentialResponseScript([{ type: "final_text", text: expectedReply }]),
     assertOutbound: assertPlainTextOutbound,
+    assertOpenAi: assertDefaultOpenAiRequest,
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
+    },
+  },
+  {
+    id: "dm-streaming-preview-final-edit",
+    name: "Telegram DM streaming preview finalizes via edit",
+    chatId: "424242",
+    buildInboundUpdate: buildTelegramDmTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    expectedSessionKey: () => "agent:main:main",
+    openAiResponder:
+      ({ expectedReply }) =>
+      () => {
+        const previewText = expectedReply.slice(0, 34);
+        const remainder = expectedReply.slice(previewText.length);
+        return streamingTextResponsePlan({
+          text: expectedReply,
+          deltas: [previewText, { text: remainder, delayMs: 50 }],
+        });
+      },
+    assertOutbound: assertStreamingTextPreviewAndFinalize,
     assertOpenAi: assertDefaultOpenAiRequest,
     assertSessionEntry: ({ chatId, sessionEntry }) => {
       assertDefaultTelegramSessionEntry({ chatId, sessionEntry });

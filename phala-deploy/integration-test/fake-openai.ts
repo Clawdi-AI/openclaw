@@ -20,6 +20,13 @@ export type FakeOpenAiResponseItem =
       kind: "message";
       text: string;
       id?: string;
+      deltas?: Array<
+        | string
+        | {
+            text: string;
+            delayMs?: number;
+          }
+      >;
     }
   | {
       kind: "function_call";
@@ -55,6 +62,25 @@ export type FakeOpenAiScriptStep =
 
 export function textResponsePlan(text: string, id?: string): FakeOpenAiResponseItem {
   return { kind: "message", text, id };
+}
+
+export function streamingTextResponsePlan(params: {
+  text: string;
+  deltas: Array<
+    | string
+    | {
+        text: string;
+        delayMs?: number;
+      }
+  >;
+  id?: string;
+}): FakeOpenAiResponseItem {
+  return {
+    kind: "message",
+    text: params.text,
+    deltas: params.deltas,
+    id: params.id,
+  };
 }
 
 export function functionCallResponsePlan(params: {
@@ -202,8 +228,27 @@ function normalizeResponseItems(
   return items;
 }
 
-function buildMessageEvents(item: Extract<FakeOpenAiResponseItem, { kind: "message" }>) {
+type FakeOpenAiSseFrame = {
+  event: unknown;
+  delayMs?: number;
+};
+
+function normalizeMessageDeltas(
+  item: Extract<FakeOpenAiResponseItem, { kind: "message" }>,
+): Array<{ text: string; delayMs?: number }> {
+  return (item.deltas ?? [item.text]).map((delta) =>
+    typeof delta === "string" ? { text: delta } : delta,
+  );
+}
+
+function buildMessageEvents(
+  item: Extract<FakeOpenAiResponseItem, { kind: "message" }>,
+  index: number,
+) {
   const id = item.id ?? `msg_${Date.now()}`;
+  const outputIndex = index - 1;
+  const contentIndex = 0;
+  const contentPart = { type: "output_text", text: "", annotations: [] };
   const completedItem = {
     type: "message",
     id,
@@ -211,21 +256,59 @@ function buildMessageEvents(item: Extract<FakeOpenAiResponseItem, { kind: "messa
     status: "completed",
     content: [{ type: "output_text", text: item.text, annotations: [] }],
   };
+  const deltaFrames: FakeOpenAiSseFrame[] = normalizeMessageDeltas(item).map((delta) => ({
+    event: {
+      type: "response.output_text.delta",
+      delta: delta.text,
+      item_id: id,
+      output_index: outputIndex,
+      content_index: contentIndex,
+      logprobs: [],
+    },
+    delayMs: delta.delayMs,
+  }));
   return {
     events: [
       {
-        type: "response.output_item.added",
-        item: {
-          type: "message",
-          id,
-          role: "assistant",
-          status: "in_progress",
-          content: [],
+        event: {
+          type: "response.output_item.added",
+          output_index: outputIndex,
+          item: {
+            type: "message",
+            id,
+            role: "assistant",
+            status: "in_progress",
+            content: [],
+          },
         },
       },
-      { type: "response.output_text.delta", delta: item.text },
-      { type: "response.output_text.done", text: item.text },
-      { type: "response.output_item.done", item: completedItem },
+      {
+        event: {
+          type: "response.content_part.added",
+          item_id: id,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part: contentPart,
+        },
+      },
+      ...deltaFrames,
+      {
+        event: {
+          type: "response.output_text.done",
+          text: item.text,
+          item_id: id,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          logprobs: [],
+        },
+      },
+      {
+        event: {
+          type: "response.output_item.done",
+          item: completedItem,
+          output_index: outputIndex,
+        },
+      },
     ],
     output: completedItem,
   };
@@ -238,6 +321,7 @@ function buildFunctionCallEvents(
   const id = item.id ?? `fc_${index}`;
   const callId = item.callId ?? `call_${index}`;
   const args = typeof item.args === "string" ? item.args : JSON.stringify(item.args);
+  const outputIndex = index - 1;
   const completedItem = {
     type: "function_call",
     id,
@@ -248,46 +332,111 @@ function buildFunctionCallEvents(
   return {
     events: [
       {
-        type: "response.output_item.added",
-        item: {
-          type: "function_call",
-          id,
-          call_id: callId,
-          name: item.name,
-          arguments: "",
+        event: {
+          type: "response.output_item.added",
+          output_index: outputIndex,
+          item: {
+            type: "function_call",
+            id,
+            call_id: callId,
+            name: item.name,
+            arguments: "",
+          },
         },
       },
-      { type: "response.function_call_arguments.delta", delta: args },
-      { type: "response.output_item.done", item: completedItem },
+      {
+        event: {
+          type: "response.function_call_arguments.delta",
+          delta: args,
+          item_id: id,
+          output_index: outputIndex,
+        },
+      },
+      {
+        event: {
+          type: "response.function_call_arguments.done",
+          arguments: args,
+          item_id: id,
+          output_index: outputIndex,
+        },
+      },
+      {
+        event: {
+          type: "response.output_item.done",
+          item: completedItem,
+          output_index: outputIndex,
+        },
+      },
     ],
     output: completedItem,
   };
 }
 
-function buildSseResponse(plan: FakeOpenAiResponsePlan, turn: number): string {
+function buildSseFrames(plan: FakeOpenAiResponsePlan, turn: number): FakeOpenAiSseFrame[] {
   const items = normalizeResponseItems(plan, turn);
-  const events: unknown[] = [];
+  const frames: FakeOpenAiSseFrame[] = [];
   const output: unknown[] = [];
+
+  frames.push({
+    event: {
+      type: "response.created",
+      response: {
+        id: `resp_${turn}`,
+        object: "response",
+        status: "in_progress",
+        output: [],
+      },
+    },
+  });
 
   items.forEach((item, index) => {
     const built =
       item.kind === "function_call"
         ? buildFunctionCallEvents(item, index + 1)
-        : buildMessageEvents(item);
-    events.push(...built.events);
+        : buildMessageEvents(item, index + 1);
+    frames.push(...built.events);
     output.push(built.output);
   });
 
-  events.push({
-    type: "response.completed",
-    response: {
-      status: "completed",
-      output,
-      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+  frames.push({
+    event: {
+      type: "response.completed",
+      response: {
+        id: `resp_${turn}`,
+        object: "response",
+        status: "completed",
+        output,
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      },
     },
   });
 
-  return `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+  return frames.map((frame, index) => {
+    const eventRecord =
+      frame.event && typeof frame.event === "object"
+        ? ({ ...(frame.event as Record<string, unknown>) } as Record<string, unknown>)
+        : undefined;
+    if (eventRecord) {
+      eventRecord.sequence_number = index + 1;
+    }
+    return eventRecord ? { ...frame, event: eventRecord } : frame;
+  });
+}
+
+async function writeSseResponse(
+  res: http.ServerResponse,
+  plan: FakeOpenAiResponsePlan,
+  turn: number,
+): Promise<void> {
+  const frames = buildSseFrames(plan, turn);
+  res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+  for (const frame of frames) {
+    if ((frame.delayMs ?? 0) > 0) {
+      await new Promise((resolve) => setTimeout(resolve, frame.delayMs));
+    }
+    res.write(`data: ${JSON.stringify(frame.event)}\n\n`);
+  }
+  res.end("data: [DONE]\n\n");
 }
 
 export class FakeOpenAiResponsesServer {
@@ -329,9 +478,7 @@ export class FakeOpenAiResponsesServer {
       } satisfies FakeOpenAiRequest;
       instance.requests.push(request);
 
-      const sse = buildSseResponse(responder(request), request.turn);
-      res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
-      res.end(sse);
+      await writeSseResponse(res, responder(request), request.turn);
     });
     await new Promise<void>((resolveServer, reject) => {
       server.once("error", reject);
