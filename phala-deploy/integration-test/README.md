@@ -42,6 +42,9 @@ Implemented today:
   - restart recovery after queued Telegram failure for:
     - gateway `send`
     - agent-generated final replies
+  - mixed semantics on one mux-server instance:
+    - legacy inbound traffic through a legacy transport-session binding
+    - canonical outbound `gateway send` traffic to the same paired chat
 - assertions on:
   - final Telegram outbound request
   - OpenAI prompt receipt
@@ -63,7 +66,6 @@ Current test files:
 Not covered yet:
 
 - Telegram poll round-trip from the real current-channel prompt/tool surface
-- mixed old/new OpenClaw fleets against one mux-server instance
 - Discord and WhatsApp mocked round-trip
 
 ## Architecture
@@ -168,7 +170,7 @@ Near term:
 
 1. add table-driven Telegram scenarios that run in both resolver modes
 2. extend restart and delayed-send coverage beyond gateway `send`
-3. add mixed-semantics coverage against one mux-server instance
+3. broaden mixed-fleet coverage beyond Telegram DM
 
 Next:
 

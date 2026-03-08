@@ -399,7 +399,7 @@ Still incomplete:
 - Current status: plain text, reaction, document, photo, and voice scripted Telegram DM scenarios are covered; plain-text group/forum-topic scenarios are covered in both resolver modes; and callback-driven Telegram command/edit flows are covered for `/reasoning` and `/models`. Poll is still pending because the real current-channel Telegram message-tool schema does not expose `poll` yet, so a mocked poll round-trip should wait for a real prompt-surface path instead of testing an artificial one.
 - Current captured-fixture status:
   - golden real payloads are in place for DM text, group text, forum-topic text, callback query, photo, document, and voice
-- Current mocked Telegram priority after restart/send recovery: broader safety cases, then mixed-fleet coverage.
+- Current mocked Telegram priority after restart/send recovery: broader safety cases outside Telegram DM, then non-Telegram parity.
 
 ### A. Required automated coverage: OpenClaw unit/contract tests
 
@@ -600,9 +600,9 @@ Run the local Telegram E2E suite and require all current checks to pass:
 
 Add or keep targeted local coverage for:
 
-- old-style mux session traffic
-- new canonical-session outbound traffic
-- both against the same mux-server instance
+- [x] old-style mux session traffic
+- [x] new canonical-session outbound traffic
+- [x] both against the same mux-server instance
 
 Also keep the mocked integration harness under `phala-deploy/integration-test` as the fast path for repeated mixed-semantics validation without live Telegram dependencies.
 
