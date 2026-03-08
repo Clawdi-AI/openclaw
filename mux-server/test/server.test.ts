@@ -3225,6 +3225,78 @@ describe("mux server", () => {
     });
   });
 
+  test("discord guild-bound raw send rejects thread target outside the bound channel", async () => {
+    const discordApi = await startHttpServer(async (req, res) => {
+      const url = req.url ?? "";
+      if (req.method === "GET" && url === "/channels/3003") {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            id: "3003",
+            guild_id: "9001",
+            parent_id: "2002",
+            type: 11,
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-DISCORD-THREAD-LOCK",
+          channel: "discord",
+          routeKey: "discord:default:guild:9001:channel:2001",
+          scope: "guild",
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+      },
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-DISCORD-THREAD-LOCK",
+          sessionKey: "dc:guild:9001:channel:2001",
+        })
+      ).status,
+    ).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "discord",
+        sessionKey: "dc:guild:9001:channel:2001",
+        threadId: "3003",
+        raw: {
+          discord: {
+            send: {
+              text: "wrong sibling thread",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(403);
+    expect(await outbound.json()).toEqual({
+      ok: false,
+      error: "discord channel not allowed for this bound guild",
+    });
+  });
+
   test("discord outbound prefers exact session binding in session-first mode when request target conflicts", async () => {
     const discordRequests: Array<{
       method: string;
@@ -7219,6 +7291,76 @@ describe("mux server", () => {
           whatsapp: {
             send: {
               text: "wrong explicit whatsapp target",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
+  });
+
+  test("whatsapp canonical fallback rejects conflicting explicit targets even when both chats are bound", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-CONFLICT-A",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550001111@s.whatsapp.net",
+          scope: "chat",
+        },
+        {
+          code: "PAIR-WA-CONFLICT-B",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550002222@s.whatsapp.net",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-WA-CONFLICT-A",
+          sessionKey: "agent:main:whatsapp:direct:+15550001111",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-WA-CONFLICT-B",
+          sessionKey: "agent:main:whatsapp:direct:+15550002222",
+        })
+      ).status,
+    ).toBe(200);
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "whatsapp",
+        sessionKey: "agent:main:main",
+        to: "15550001111@s.whatsapp.net",
+        accountId: "mux",
+        raw: {
+          whatsapp: {
+            send: {
+              to: "15550002222@s.whatsapp.net",
+              text: "conflicting explicit whatsapp targets",
             },
           },
         },

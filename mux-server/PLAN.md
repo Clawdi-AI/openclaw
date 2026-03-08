@@ -399,7 +399,7 @@ Still incomplete:
 - Current status: plain text, reaction, document, photo, and voice scripted Telegram DM scenarios are covered; plain-text group/forum-topic scenarios are covered in both resolver modes; and callback-driven Telegram command/edit flows are covered for `/reasoning` and `/models`. Poll is still pending because the real current-channel Telegram message-tool schema does not expose `poll` yet, so a mocked poll round-trip should wait for a real prompt-surface path instead of testing an artificial one.
 - Current captured-fixture status:
   - golden real payloads are in place for DM text, group text, forum-topic text, callback query, photo, document, and voice
-- Current mocked Telegram priority after restart/send recovery: broader safety cases outside Telegram DM, then non-Telegram parity.
+- Current mocked Telegram priority after restart/send recovery: broader safety cases outside Telegram DM. Non-Telegram mux-server parity now has targeted Discord and WhatsApp safety coverage; the next gap is full mocked non-Telegram round-trip.
 
 ### A. Required automated coverage: OpenClaw unit/contract tests
 

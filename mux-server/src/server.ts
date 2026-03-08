@@ -3939,6 +3939,21 @@ async function listDiscordOutboundRouteKeys(params: {
   }
 }
 
+async function resolveDiscordExplicitThreadParentId(
+  threadId: string | undefined,
+): Promise<string | undefined> {
+  const normalizedThreadId = readUnsignedNumericString(threadId);
+  if (!normalizedThreadId) {
+    return undefined;
+  }
+  try {
+    const info = await resolveDiscordChannelInfo(normalizedThreadId);
+    return info.parentId ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function parseWhatsAppOutboundChatJid(value: unknown): string | null {
   const raw = readNonEmptyString(value);
   if (!raw) {
@@ -3958,8 +3973,16 @@ function parseWhatsAppOutboundChatJid(value: unknown): string | null {
 function listWhatsAppOutboundRouteKeys(params: {
   requestedTo?: unknown;
   accountId?: string | null;
+  rawSend?: Record<string, unknown> | null;
 }): string[] {
-  const chatJid = parseWhatsAppOutboundChatJid(params.requestedTo);
+  const outerChatJid = parseWhatsAppOutboundChatJid(params.requestedTo);
+  const innerChatJid =
+    parseWhatsAppOutboundChatJid(params.rawSend?.to) ??
+    parseWhatsAppOutboundChatJid(params.rawSend?.chatJid);
+  if (outerChatJid && innerChatJid && outerChatJid !== innerChatJid) {
+    return [];
+  }
+  const chatJid = outerChatJid;
   if (!chatJid) {
     return [];
   }
@@ -4024,6 +4047,20 @@ async function resolveDiscordOutboundChannelId(params: {
 
   let channelId =
     params.boundRoute.threadId ?? params.requestedThreadId ?? params.boundRoute.channelId;
+  const explicitThreadParentId = await resolveDiscordExplicitThreadParentId(
+    params.requestedThreadId,
+  );
+  if (
+    params.boundRoute.channelId &&
+    explicitThreadParentId &&
+    explicitThreadParentId !== params.boundRoute.channelId
+  ) {
+    return {
+      ok: false,
+      statusCode: 403,
+      error: "discord channel not allowed for this bound guild",
+    };
+  }
   if (!channelId) {
     const target = parseDiscordOutboundTarget(params.requestedTo);
     if (target?.kind === "user") {
@@ -8883,6 +8920,7 @@ const server = http.createServer(async (req, res) => {
           routeKeys: listWhatsAppOutboundRouteKeys({
             requestedTo: payload.to,
             accountId: readNonEmptyString(payload.accountId),
+            rawSend: whatsappRawSend,
           }),
         });
         if (!resolvedRoute) {
