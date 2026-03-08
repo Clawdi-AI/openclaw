@@ -1519,6 +1519,59 @@ describe("mux server", () => {
     });
   });
 
+  test("telegram canonical fallback rejects explicit chat targets with no bound route", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-WRONG-TARGET",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:1001",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-TG-WRONG-TARGET",
+          sessionKey: "agent:main:telegram:direct:1001",
+        })
+      ).status,
+    ).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:main",
+        raw: {
+          telegram: {
+            method: "sendMessage",
+            body: {
+              chat_id: "9999",
+              text: "wrong explicit telegram target",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(403);
+    expect(await outbound.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
+  });
+
   test("telegram outbound falls back to prefixed request targets for canonical sessions", async () => {
     const telegramRequests: Array<Record<string, unknown>> = [];
     const telegramApi = await startHttpServer(async (req, res) => {
@@ -2787,6 +2840,58 @@ describe("mux server", () => {
           discord: {
             send: {
               text: "missing explicit discord target",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(403);
+    expect(await outbound.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
+  });
+
+  test("discord canonical fallback rejects explicit DM targets with no bound route", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-DISCORD-WRONG-TARGET",
+          channel: "discord",
+          routeKey: "discord:default:dm:user:42",
+          scope: "dm",
+        },
+      ]),
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-DISCORD-WRONG-TARGET",
+          sessionKey: "dc:dm:42",
+        })
+      ).status,
+    ).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "discord",
+        sessionKey: "agent:main:main",
+        to: "user:99",
+        raw: {
+          discord: {
+            body: {
+              content: "wrong explicit discord target",
             },
           },
         },
@@ -6492,6 +6597,58 @@ describe("mux server", () => {
           whatsapp: {
             send: {
               text: "missing explicit whatsapp target",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
+  });
+
+  test("whatsapp canonical fallback rejects explicit chat targets with no bound route", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-WRONG-TARGET",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550001111@s.whatsapp.net",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-WA-WRONG-TARGET",
+          sessionKey: "agent:main:whatsapp:direct:+15550001111",
+        })
+      ).status,
+    ).toBe(200);
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "whatsapp",
+        sessionKey: "agent:main:main",
+        to: "+15550009999",
+        raw: {
+          whatsapp: {
+            send: {
+              text: "wrong explicit whatsapp target",
             },
           },
         },
