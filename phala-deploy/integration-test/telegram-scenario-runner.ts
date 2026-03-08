@@ -41,28 +41,29 @@ async function main(): Promise<void> {
         }),
       );
 
-      await scenario.assertOpenAi?.({
-        harness,
-        chatId: scenario.chatId,
-        inboundText,
-        expectedReply,
-      });
       await scenario.assertOutbound({
         harness,
         chatId: scenario.chatId,
         inboundText,
         expectedReply,
       });
-
-      const canonicalSessionKey = scenario.expectedSessionKey(scenario.chatId);
-      const sessionEntry = await harness.waitForSessionStoreEntry(canonicalSessionKey);
-      scenario.assertSessionEntry({
+      await scenario.assertOpenAi?.({
         harness,
         chatId: scenario.chatId,
         inboundText,
         expectedReply,
-        sessionEntry,
       });
+      if (scenario.expectedSessionKey && scenario.assertSessionEntry) {
+        const canonicalSessionKey = scenario.expectedSessionKey(scenario.chatId);
+        const sessionEntry = await harness.waitForSessionStoreEntry(canonicalSessionKey);
+        scenario.assertSessionEntry({
+          harness,
+          chatId: scenario.chatId,
+          inboundText,
+          expectedReply,
+          sessionEntry,
+        });
+      }
     },
   );
 

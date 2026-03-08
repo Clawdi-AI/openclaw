@@ -369,6 +369,7 @@ Already covered:
 - mux-server resolver-mode behavior for `session-first` and `target-first`
 - real local Telegram E2E for pairing, DM round-trip, multi-action reply, file proxy, and forum/topic routing
 - mocked Telegram DM/group/forum round-trip integration with real OpenClaw + real mux-server in both resolver modes
+- mocked Telegram command-menu and callback-edit round-trip integration in both resolver modes
 - full OpenClaw inbound normalization matrix across Telegram, Discord, and WhatsApp channel shapes
 - full non-default-account mux bypass matrix across Telegram, Discord, and WhatsApp adapters
 - full old/new queue persistence compatibility matrix
@@ -393,7 +394,7 @@ Still incomplete:
   - tool call -> tool output -> final text
   - tool call sequences that trigger reactions, documents/files, polls, and other message actions
 - OpenAI fixture design should prioritize protocol compatibility and path coverage over model realism.
-- Current status: plain text, reaction, and document scripted Telegram DM scenarios are covered, and plain-text group/forum-topic scenarios are covered in both resolver modes. Poll is still pending because the real current-channel Telegram message-tool schema does not expose `poll` yet, so a mocked poll round-trip should wait for a real prompt-surface path instead of testing an artificial one.
+- Current status: plain text, reaction, and document scripted Telegram DM scenarios are covered; plain-text group/forum-topic scenarios are covered in both resolver modes; and callback-driven Telegram command/edit flows are covered for `/reasoning` and `/models`. Poll is still pending because the real current-channel Telegram message-tool schema does not expose `poll` yet, so a mocked poll round-trip should wait for a real prompt-surface path instead of testing an artificial one.
 
 ### A. Required automated coverage: OpenClaw unit/contract tests
 

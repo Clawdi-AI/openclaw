@@ -1519,6 +1519,86 @@ describe("mux server", () => {
     });
   });
 
+  test("telegram outbound falls back to prefixed request targets for canonical sessions", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/editMessageText") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: 9903, chat: { id: 1001 } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-PREFIXED-TARGET",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:1001",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-TG-PREFIXED-TARGET",
+          sessionKey: "agent:main:telegram:direct:1001",
+        })
+      ).status,
+    ).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:main",
+        to: "telegram:1001",
+        raw: {
+          telegram: {
+            method: "editMessageText",
+            body: {
+              message_id: 321,
+              text: "edited through prefixed target",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(200);
+    expect(await outbound.json()).toMatchObject({
+      ok: true,
+      messageId: "9903",
+      rawPassthrough: true,
+    });
+    expect(telegramRequests).toHaveLength(1);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "1001",
+      message_id: 321,
+      text: "edited through prefixed target",
+    });
+  });
+
   test("telegram outbound prefers exact session binding in session-first mode when request target conflicts", async () => {
     const telegramRequests: Array<Record<string, unknown>> = [];
     const telegramApi = await startHttpServer(async (req, res) => {

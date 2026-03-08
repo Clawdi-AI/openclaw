@@ -3770,7 +3770,12 @@ function resolveSessionRouteBinding(params: {
 }
 
 function parseTelegramOutboundChatId(value: unknown): string | null {
-  return readSignedNumericString(value) ?? null;
+  const direct = readSignedNumericString(value);
+  if (direct) {
+    return direct;
+  }
+  const prefixed = readNonEmptyString(value)?.match(/^(?:telegram|tg):(-?\d+)$/i);
+  return prefixed?.[1] ?? null;
 }
 
 function listTelegramOutboundRouteKeys(params: {

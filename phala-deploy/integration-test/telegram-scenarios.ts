@@ -25,6 +25,40 @@ type TelegramMessageUpdate = {
   };
 };
 
+type TelegramCallbackQueryUpdate = {
+  update_id: number;
+  callback_query: {
+    id: string;
+    from: {
+      id: number;
+      first_name?: string;
+      last_name?: string;
+      username?: string;
+    };
+    data: string;
+    message: {
+      message_id: number;
+      date: number;
+      text?: string;
+      from?: {
+        id: number;
+        is_bot?: boolean;
+        first_name?: string;
+        username?: string;
+      };
+      chat: {
+        id: number;
+        type: string;
+        first_name?: string;
+        last_name?: string;
+        username?: string;
+        is_forum?: boolean;
+      };
+      message_thread_id?: number;
+    };
+  };
+};
+
 type ScenarioContext = {
   chatId: string;
   inboundText: string;
@@ -42,7 +76,7 @@ export type TelegramMuxRoundTripScenario = {
   pairingRouteKey?: (chatId: string) => string;
   buildInboundUpdate: (params: { chatId: string; inboundText: string }) => Record<string, unknown>;
   claimSessionKey: (chatId: string) => string;
-  expectedSessionKey: (chatId: string) => string;
+  expectedSessionKey?: (chatId: string) => string;
   openAiResponder: (params: {
     chatId: string;
     inboundText: string;
@@ -51,7 +85,9 @@ export type TelegramMuxRoundTripScenario = {
   workspaceFiles?: Record<string, string | Uint8Array>;
   assertOutbound: (params: ScenarioContext) => Promise<void>;
   assertOpenAi?: (params: ScenarioContext) => Promise<void>;
-  assertSessionEntry: (params: ScenarioContext & { sessionEntry: Record<string, unknown> }) => void;
+  assertSessionEntry?: (
+    params: ScenarioContext & { sessionEntry: Record<string, unknown> },
+  ) => void;
 };
 
 function loadFixture<T>(relativePath: string): T {
@@ -99,6 +135,46 @@ function buildTelegramForumTopicTextUpdate(params: {
   message.entities = [{ type: "mention", offset: 0, length: 16 }];
   chat.id = Number(params.chatId);
   return update;
+}
+
+function buildTelegramDmReasoningCommandUpdate(params: {
+  chatId: string;
+}): Record<string, unknown> {
+  const update = loadFixture<TelegramMessageUpdate>("telegram/inbound/dm-text.template.json");
+  const chatId = Number(params.chatId);
+  update.message.text = "/reasoning";
+  update.message.from.id = chatId;
+  update.message.chat.id = chatId;
+  return update as unknown as Record<string, unknown>;
+}
+
+function buildTelegramDmModelsCommandUpdate(params: { chatId: string }): Record<string, unknown> {
+  const update = loadFixture<TelegramMessageUpdate>("telegram/inbound/dm-text.template.json");
+  const chatId = Number(params.chatId);
+  update.message.text = "/models";
+  update.message.from.id = chatId;
+  update.message.chat.id = chatId;
+  return update as unknown as Record<string, unknown>;
+}
+
+function buildTelegramDmCallbackQueryUpdate(params: {
+  chatId: string;
+  callbackData: string;
+  updateId?: number;
+  callbackMessageId?: number;
+  callbackMessageText?: string;
+}): Record<string, unknown> {
+  const update = loadFixture<TelegramCallbackQueryUpdate>(
+    "telegram/inbound/callback-query.template.json",
+  );
+  const chatId = Number(params.chatId);
+  update.update_id = params.updateId ?? 700002;
+  update.callback_query.data = params.callbackData;
+  update.callback_query.from.id = chatId;
+  update.callback_query.message.chat.id = chatId;
+  update.callback_query.message.message_id = params.callbackMessageId ?? 900010;
+  update.callback_query.message.text = params.callbackMessageText ?? "Choose an option";
+  return update as unknown as Record<string, unknown>;
 }
 
 function assertDefaultTelegramSessionEntry(params: {
@@ -205,6 +281,13 @@ async function assertDefaultOpenAiRequest(params: ScenarioContext): Promise<void
   );
   if (!llmRequest.lastUserText.includes(params.inboundText)) {
     throw new Error(`expected lastUserText to contain ${params.inboundText}`);
+  }
+}
+
+async function assertNoOpenAiRequests(params: ScenarioContext): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 750));
+  if (params.harness.openai.requests.length > 0) {
+    throw new Error(`expected no OpenAI requests, got ${params.harness.openai.requests.length}`);
   }
 }
 
@@ -466,6 +549,43 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     },
   },
   {
+    id: "dm-reasoning-command-menu",
+    name: "Telegram DM /reasoning renders inline button menu",
+    chatId: "424242",
+    buildInboundUpdate: ({ chatId }) => buildTelegramDmReasoningCommandUpdate({ chatId }),
+    claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    openAiResponder: () => createSequentialResponseScript([{ type: "final_text", text: "" }]),
+    assertOutbound: async ({ harness, chatId }) => {
+      const outboundSend = await harness.telegram.waitForMethodCall(
+        "sendMessage",
+        (request) =>
+          String(request.body.chat_id) === chatId &&
+          typeof request.body.reply_markup === "object" &&
+          request.body.reply_markup !== null,
+        OUTBOUND_TIMEOUT_MS,
+      );
+      const replyMarkup = outboundSend.body.reply_markup as {
+        inline_keyboard?: Array<Array<{ callback_data?: string; text?: string }>>;
+      };
+      const callbackData = new Set(
+        (replyMarkup.inline_keyboard ?? [])
+          .flat()
+          .map((button) => button.callback_data)
+          .filter((value): value is string => typeof value === "string"),
+      );
+      if (!callbackData.has("/reasoning on")) {
+        throw new Error("expected /reasoning on button");
+      }
+      if (!callbackData.has("/reasoning off")) {
+        throw new Error("expected /reasoning off button");
+      }
+      if (!callbackData.has("/reasoning stream")) {
+        throw new Error("expected /reasoning stream button");
+      }
+    },
+    assertOpenAi: assertNoOpenAiRequests,
+  },
+  {
     id: "forum-topic-text-legacy-binding",
     name: "Telegram forum topic with legacy transport session binding",
     chatId: "-100777",
@@ -492,5 +612,71 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     assertSessionEntry: ({ chatId, sessionEntry }) => {
       assertTelegramForumSessionEntry({ chatId, threadId: 2, sessionEntry });
     },
+  },
+  {
+    id: "dm-models-callback-edit",
+    name: "Telegram DM /models callback edits the original message with model buttons",
+    chatId: "424242",
+    buildInboundUpdate: ({ chatId }) => buildTelegramDmModelsCommandUpdate({ chatId }),
+    claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    openAiResponder: () => createSequentialResponseScript([{ type: "final_text", text: "" }]),
+    assertOutbound: async ({ harness, chatId }) => {
+      const initialSend = await harness.telegram.waitForMethodCall(
+        "sendMessage",
+        (request) =>
+          String(request.body.chat_id) === chatId &&
+          String(request.body.text).includes("Select a provider"),
+        OUTBOUND_TIMEOUT_MS,
+      );
+      const initialReplyMarkup = initialSend.body.reply_markup as {
+        inline_keyboard?: Array<Array<{ callback_data?: string; text?: string }>>;
+      };
+      const initialCallbackData = (initialReplyMarkup.inline_keyboard ?? [])
+        .flat()
+        .map((button) => button.callback_data)
+        .filter((value): value is string => typeof value === "string");
+      if (!initialCallbackData.includes("mdl_list_openai_1")) {
+        throw new Error("expected initial /models provider button for openai");
+      }
+      harness.telegram.enqueueUpdate(
+        buildTelegramDmCallbackQueryUpdate({
+          chatId,
+          updateId: 700002,
+          callbackData: "mdl_list_openai_1",
+          callbackMessageId: 1000,
+          callbackMessageText:
+            typeof initialSend.body.text === "string"
+              ? initialSend.body.text
+              : "Select a provider:",
+        }),
+      );
+      const callbackAnswer = await harness.telegram.waitForMethodCall(
+        "answerCallbackQuery",
+        (request) => String(request.body.callback_query_id) === "cbq-900010",
+        OUTBOUND_TIMEOUT_MS,
+      );
+      if (String(callbackAnswer.body.callback_query_id) !== "cbq-900010") {
+        throw new Error("expected callback query acknowledgement");
+      }
+      const edit = await harness.telegram.waitForMethodCall(
+        "editMessageText",
+        (request) =>
+          String(request.body.chat_id) === chatId &&
+          Number(request.body.message_id) === 1000 &&
+          String(request.body.text).includes("Models (openai)"),
+        OUTBOUND_TIMEOUT_MS,
+      );
+      const replyMarkup = edit.body.reply_markup as {
+        inline_keyboard?: Array<Array<{ callback_data?: string; text?: string }>>;
+      };
+      const callbackData = (replyMarkup.inline_keyboard ?? [])
+        .flat()
+        .map((button) => button.callback_data)
+        .filter((value): value is string => typeof value === "string");
+      if (!callbackData.some((value) => value.startsWith("mdl_sel_openai/"))) {
+        throw new Error("expected model selection buttons after callback edit");
+      }
+    },
+    assertOpenAi: assertNoOpenAiRequests,
   },
 ];

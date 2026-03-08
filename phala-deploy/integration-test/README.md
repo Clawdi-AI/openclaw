@@ -33,6 +33,8 @@ Implemented today:
   - reaction -> document -> final text in one scripted multi-tool exchange
   - group plain-text reply
   - forum-topic plain-text reply
+  - `/reasoning` command menu with inline buttons
+  - `/models` callback query -> callback acknowledgement -> `editMessageText`
 - assertions on:
   - final Telegram outbound request
   - OpenAI prompt receipt
@@ -53,7 +55,6 @@ Current test files:
 
 Not covered yet:
 
-- Telegram callback/edit round-trip
 - Telegram media/voice mocked round-trip
 - Telegram poll round-trip from the real current-channel prompt/tool surface
 - mixed old/new OpenClaw fleets against one mux-server instance
@@ -134,8 +135,7 @@ Near term:
 2. add table-driven Telegram scenarios that run in both resolver modes
 3. replace the DM template fixture with a sanitized real DM payload
 4. add mocked media/voice round-trip cases
-5. add mocked callback/edit cases
-6. add restart and delayed-send coverage
+5. add restart and delayed-send coverage
 
 Next:
 

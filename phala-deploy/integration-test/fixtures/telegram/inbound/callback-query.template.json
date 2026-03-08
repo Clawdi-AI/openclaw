@@ -1,0 +1,30 @@
+{
+  "update_id": 700002,
+  "callback_query": {
+    "id": "cbq-900010",
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Integration",
+      "username": "integration_user"
+    },
+    "data": "mdl_prov",
+    "message": {
+      "message_id": 900010,
+      "date": 1700000000,
+      "text": "Browse providers",
+      "from": {
+        "id": 999001,
+        "is_bot": true,
+        "first_name": "Integration Bot",
+        "username": "integration_bot"
+      },
+      "chat": {
+        "id": 424242,
+        "type": "private",
+        "first_name": "Integration",
+        "username": "integration_user"
+      }
+    }
+  }
+}
