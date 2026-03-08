@@ -2855,4 +2855,206 @@ describe("handleMuxInboundHttpRequest", () => {
       expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
     });
   });
+
+  test("treats a mux-paired whatsapp DM as authorized without re-pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        whatsapp: {
+          ...cfg.channels?.whatsapp,
+          dmPolicy: "pairing",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:direct:+15550001111",
+          accountId: "mux",
+          to: "whatsapp:+15551230000",
+          from: "whatsapp:+15550001111",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:wa-dm-1",
+          chatType: "direct",
+          channelData: {
+            routeKey: "whatsapp:default:chat:+15550001111",
+            pairing: { kind: "post-pair" },
+          },
+        },
+      });
+
+      expect(await readChannelAllowFromStore("whatsapp", process.env, "default")).toContain(
+        "+15550001111",
+      );
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:main",
+          accountId: "mux",
+          to: "whatsapp:+15551230000",
+          from: "whatsapp:+15550001111",
+          body: "hello from paired whatsapp dm",
+          messageId: "wa-dm-followup",
+          chatType: "direct",
+          channelData: {
+            routeKey: "whatsapp:default:chat:+15550001111",
+          },
+        },
+      });
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:main",
+          accountId: "mux",
+          to: "whatsapp:+15551230000",
+          from: "whatsapp:+15559990000",
+          body: "unauthorized whatsapp dm",
+          messageId: "wa-dm-blocked",
+          chatType: "direct",
+          channelData: {
+            routeKey: "whatsapp:default:chat:+15559990000",
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("treats a mux-paired whatsapp group as allowlisted while keeping sender gating", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        whatsapp: {
+          ...cfg.channels?.whatsapp,
+          groupPolicy: "allowlist",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15550001111",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:wa-group-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+            pairing: { kind: "post-pair" },
+          },
+        },
+      });
+
+      expect(
+        await readMuxPairedSenders({
+          channel: "whatsapp",
+          accountId: "default",
+          routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+        }),
+      ).toEqual(["+15550001111"]);
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15550001111",
+          body: "/model openai/gpt-5",
+          messageId: "wa-group-followup",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+          },
+        },
+      });
+      expect(call, JSON.stringify(mocks.warn.mock.calls)).toBeDefined();
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15559990000",
+          body: "blocked whatsapp group sender",
+          messageId: "wa-group-blocked",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("preserves explicit whatsapp groupAllowFrom after group pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        whatsapp: {
+          ...cfg.channels?.whatsapp,
+          groupPolicy: "allowlist",
+          groupAllowFrom: ["+15550002222"],
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15550001111",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:wa-group-override-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+            pairing: { kind: "post-pair" },
+          },
+        },
+      });
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15550001111",
+          body: "/model openai/gpt-5",
+          messageId: "wa-group-override-blocked",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
 });

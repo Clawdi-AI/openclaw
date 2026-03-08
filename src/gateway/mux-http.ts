@@ -95,7 +95,9 @@ import {
   sendMessageTelegram,
   type MuxTransportOpts,
 } from "../telegram/send.js";
+import { normalizeE164 } from "../utils.js";
 import { isMuxBusinessChannel, resolveMuxBusinessAccountId } from "../utils/mux-account.js";
+import { resolveWhatsAppAccount } from "../web/accounts.js";
 import { normalizeWhatsAppTarget, isWhatsAppGroupJid } from "../whatsapp/normalize.js";
 import { readJsonBody } from "./hooks.js";
 import { verifyMuxInboundJwt } from "./mux-jwt.js";
@@ -389,6 +391,21 @@ function resolveWhatsAppInboundPeerId(params: { payload: MuxInboundPayload }): {
   };
 }
 
+function normalizeWhatsAppAllowList(values: string[] | undefined): {
+  hasEntries: boolean;
+  hasWildcard: boolean;
+  entries: string[];
+} {
+  const list = Array.isArray(values) ? values : [];
+  const hasWildcard = list.some((entry) => String(entry).trim() === "*");
+  const entries = list.map((entry) => normalizeE164(String(entry).trim())).filter(Boolean);
+  return {
+    hasEntries: hasWildcard || entries.length > 0,
+    hasWildcard,
+    entries,
+  };
+}
+
 function resolveMuxInboundBusinessSessionKey(params: {
   cfg: OpenClawConfig;
   channel: "telegram" | "discord" | "whatsapp";
@@ -552,7 +569,11 @@ async function bootstrapMuxPairedSender(params: {
   }
 
   if ((params.chatType || "direct") === "direct") {
-    if (params.channel === "telegram" || params.channel === "discord") {
+    if (
+      params.channel === "telegram" ||
+      params.channel === "discord" ||
+      params.channel === "whatsapp"
+    ) {
       await addChannelAllowFromStoreEntry({
         channel: params.channel,
         entry: senderId,
@@ -928,6 +949,95 @@ async function resolveDiscordMuxAccess(params: {
   };
 }
 
+async function resolveWhatsAppMuxAccess(params: {
+  cfg: OpenClawConfig;
+  accountId: string;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  chatType: string;
+}): Promise<{ allowed: false } | { allowed: true; commandAuthorized: boolean }> {
+  const account = resolveWhatsAppAccount({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
+  const peer = resolveWhatsAppInboundPeerId({ payload: params.payload });
+  const senderId = normalizeWhatsAppTarget(readMuxNonEmptyString(params.payload.from) ?? "");
+  const isGroup = (params.chatType || "direct") !== "direct";
+
+  if (!isGroup) {
+    const dmPolicy = account.dmPolicy ?? "pairing";
+    if (dmPolicy === "disabled") {
+      return { allowed: false };
+    }
+    if (dmPolicy === "open") {
+      return { allowed: true, commandAuthorized: true };
+    }
+    const storeAllowFrom = await readChannelAllowFromStore(
+      "whatsapp",
+      process.env,
+      account.accountId,
+    ).catch(() => []);
+    const effectiveDmAllow = normalizeWhatsAppAllowList([
+      ...(account.allowFrom ?? []),
+      ...storeAllowFrom,
+    ]);
+    if (!effectiveDmAllow.hasEntries) {
+      return { allowed: true, commandAuthorized: true };
+    }
+    if (!senderId) {
+      return { allowed: false };
+    }
+    const senderAllowed =
+      effectiveDmAllow.hasWildcard || effectiveDmAllow.entries.includes(senderId);
+    if (!senderAllowed) {
+      return { allowed: false };
+    }
+    return { allowed: true, commandAuthorized: true };
+  }
+
+  const groupPolicy = account.groupPolicy ?? params.cfg.channels?.defaults?.groupPolicy ?? "open";
+  if (groupPolicy === "disabled") {
+    return { allowed: false };
+  }
+  const configuredGroupAllowFrom =
+    account.groupAllowFrom ??
+    (account.allowFrom && account.allowFrom.length > 0 ? account.allowFrom : undefined);
+  const routeKey =
+    readMuxNonEmptyString(params.channelData?.routeKey) ??
+    (peer ? `whatsapp:${account.accountId}:chat:${peer.id}` : undefined);
+  const pairedSenders =
+    routeKey == null
+      ? []
+      : await readMuxPairedSenders({
+          channel: "whatsapp",
+          accountId: account.accountId,
+          routeKey,
+        }).catch(() => []);
+  const runtimePairedSenders =
+    configuredGroupAllowFrom && configuredGroupAllowFrom.length > 0 ? [] : pairedSenders;
+  const effectiveGroupAllow = normalizeWhatsAppAllowList([
+    ...(configuredGroupAllowFrom ?? []),
+    ...runtimePairedSenders,
+  ]);
+  const senderAllowed = Boolean(
+    senderId && (effectiveGroupAllow.hasWildcard || effectiveGroupAllow.entries.includes(senderId)),
+  );
+  if (groupPolicy === "allowlist") {
+    if (!effectiveGroupAllow.hasEntries || !senderAllowed) {
+      return { allowed: false };
+    }
+  }
+
+  if (!useAccessGroups) {
+    return { allowed: true, commandAuthorized: true };
+  }
+  return {
+    allowed: true,
+    commandAuthorized: senderAllowed,
+  };
+}
+
 async function sendTelegramEditViaMux(params: {
   cfg: OpenClawConfig;
   sessionKey: string;
@@ -1248,6 +1358,18 @@ export async function handleMuxInboundHttpRequest(
         if (typeof discordAccess.effectiveWasMentioned === "boolean") {
           ctx.WasMentioned = discordAccess.effectiveWasMentioned;
         }
+      } else if (channel === "whatsapp") {
+        const whatsappAccess = await resolveWhatsAppMuxAccess({
+          cfg,
+          accountId,
+          payload,
+          channelData,
+          chatType: String(ctx.ChatType ?? "direct"),
+        });
+        if (!whatsappAccess.allowed) {
+          return;
+        }
+        ctx.CommandAuthorized = whatsappAccess.commandAuthorized;
       }
 
       // Resolve attachments to temp files (same pattern as vanilla TG channel).
