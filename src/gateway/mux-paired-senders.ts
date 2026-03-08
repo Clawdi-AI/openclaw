@@ -94,9 +94,11 @@ export function resolveMuxPairingAnchorRouteKey(routeKey: string): string {
   if (telegram?.[1]) {
     return telegram[1];
   }
-  const discordGuild = raw.match(/^discord:[^:]+:guild:\d+(?::channel:\d+)?(?::thread:\d+)?$/i);
+  const discordGuild = raw.match(
+    /^discord:[^:]+:guild:[^:]+(?::channel:[^:]+)?(?::thread:[^:]+)?$/i,
+  );
   if (discordGuild) {
-    const guildOnly = raw.match(/^(discord:[^:]+:guild:\d+)/i);
+    const guildOnly = raw.match(/^(discord:[^:]+:guild:[^:]+)/i);
     return guildOnly?.[1] ?? raw;
   }
   return raw;

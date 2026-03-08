@@ -27,6 +27,8 @@ const mocks = vi.hoisted(() => ({
   resolveTelegramCallbackAction: vi.fn(),
   sendTypingViaMux: vi.fn(async () => {}),
   fetchMuxFileStream: vi.fn(async () => new Response("", { status: 200 })),
+  warn: vi.fn(),
+  logVerbose: vi.fn(),
 }));
 
 vi.mock("../config/config.js", async (importOriginal) => {
@@ -68,6 +70,15 @@ vi.mock("../channels/plugins/outbound/mux.js", async (importOriginal) => {
     ...actual,
     sendTypingViaMux: mocks.sendTypingViaMux,
     fetchMuxFileStream: mocks.fetchMuxFileStream,
+  };
+});
+
+vi.mock("../globals.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../globals.js")>();
+  return {
+    ...actual,
+    warn: mocks.warn,
+    logVerbose: mocks.logVerbose,
   };
 });
 
@@ -140,13 +151,15 @@ afterEach(() => {
   mocks.resolveTelegramCallbackAction.mockReset();
   mocks.sendTypingViaMux.mockReset();
   mocks.fetchMuxFileStream.mockReset();
+  mocks.warn.mockReset();
+  mocks.logVerbose.mockReset();
   __resetMuxJwksCacheForTest();
   __resetMuxRuntimeAuthCacheForTest();
   vi.unstubAllGlobals();
 });
 
 async function waitForAsyncDispatch(): Promise<void> {
-  await new Promise((resolveSleep) => setTimeout(resolveSleep, 20));
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, 80));
 }
 
 function parseJsonRequestBody(init: RequestInit): Record<string, unknown> {
@@ -233,6 +246,13 @@ function createMuxInboundConfig(): OpenClawConfig {
         },
       },
       discord: {
+        dmPolicy: "open",
+        groupPolicy: "open",
+        guilds: {
+          "*": {
+            requireMention: false,
+          },
+        },
         accounts: {
           default: {},
           work: {},
@@ -2090,6 +2110,7 @@ describe("handleMuxInboundHttpRequest", () => {
           },
         },
       });
+      expect(call, JSON.stringify(mocks.warn.mock.calls)).toBeDefined();
       expect(call?.ctx?.CommandAuthorized).toBe(true);
 
       mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
@@ -2463,6 +2484,375 @@ describe("handleMuxInboundHttpRequest", () => {
           routeKey: "telegram:default:chat:-100555:topic:3",
         }),
       ).toEqual(["42"]);
+    });
+  });
+
+  test("treats a mux-paired discord DM as authorized without re-pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        discord: {
+          ...cfg.channels?.discord,
+          dmPolicy: "pairing",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:direct:4242",
+          accountId: "mux",
+          to: "discord:dm:4242",
+          from: "discord:4242",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:discord-dm-1",
+          chatType: "direct",
+          channelData: {
+            routeKey: "discord:default:dm:user:4242",
+            pairing: { kind: "post-pair" },
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+
+      expect(await readChannelAllowFromStore("discord", process.env, "default")).toContain("4242");
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:direct:4242",
+          accountId: "mux",
+          to: "discord:dm:4242",
+          from: "discord:4242",
+          body: "hello from paired discord dm",
+          messageId: "dc-dm-followup",
+          chatType: "direct",
+          channelData: {
+            routeKey: "discord:default:dm:user:4242",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:direct:9999",
+          accountId: "mux",
+          to: "discord:dm:9999",
+          from: "discord:9999",
+          body: "unauthorized discord dm",
+          messageId: "dc-dm-blocked",
+          chatType: "direct",
+          channelData: {
+            routeKey: "discord:default:dm:user:9999",
+            discord: {
+              rawMessage: {
+                author: { id: "9999", username: "stranger", discriminator: "0002" },
+              },
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("treats a mux-paired discord guild as allowlisted while keeping mention gating", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        discord: {
+          ...cfg.channels?.discord,
+          groupPolicy: "allowlist",
+          guilds: {
+            "guild-1": {
+              requireMention: true,
+            },
+          },
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:discord-guild-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "discord:default:guild:guild-1",
+            pairing: { kind: "post-pair" },
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "guild message without mention",
+          messageId: "dc-guild-no-mention",
+          chatType: "group",
+          wasMentioned: false,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777101",
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "guild message with mention",
+          messageId: "dc-guild-with-mention",
+          chatType: "group",
+          wasMentioned: true,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777101",
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+      expect(call, JSON.stringify(mocks.warn.mock.calls)).toBeDefined();
+      expect(call?.ctx?.CommandAuthorized).toBe(false);
+      expect(call?.ctx?.WasMentioned).toBe(true);
+    });
+  });
+
+  test("scopes discord paired-sender bootstrap to the whole paired guild for control commands", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        discord: {
+          ...cfg.channels?.discord,
+          groupPolicy: "allowlist",
+          guilds: {
+            "guild-1": {
+              requireMention: true,
+            },
+          },
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:discord-cmd-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777101",
+            pairing: { kind: "post-pair" },
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+
+      expect(
+        await readMuxPairedSenders({
+          channel: "discord",
+          accountId: "default",
+          routeKey: "discord:default:guild:guild-1:channel:777001:thread:777102",
+        }),
+      ).toEqual(["4242"]);
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777102",
+          accountId: "mux",
+          to: "discord:channel:777102",
+          from: "discord:4242",
+          body: "/model openai/gpt-5",
+          messageId: "dc-guild-command",
+          chatType: "group",
+          wasMentioned: false,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777102",
+            guildId: "guild-1",
+            channelId: "777102",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+      expect(call, JSON.stringify(mocks.warn.mock.calls)).toBeDefined();
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+      expect(call?.ctx?.WasMentioned).toBe(true);
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777102",
+          accountId: "mux",
+          to: "discord:channel:777102",
+          from: "discord:5555",
+          body: "/model openai/gpt-5",
+          messageId: "dc-guild-command-blocked",
+          chatType: "group",
+          wasMentioned: false,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777102",
+            guildId: "guild-1",
+            channelId: "777102",
+            discord: {
+              rawMessage: {
+                author: { id: "5555", username: "stranger", discriminator: "0002" },
+              },
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("preserves narrower discord channel user restrictions after guild pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        discord: {
+          ...cfg.channels?.discord,
+          groupPolicy: "allowlist",
+          guilds: {
+            "guild-1": {
+              requireMention: false,
+              channels: {
+                "777001": {
+                  users: ["77"],
+                },
+              },
+            },
+          },
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:discord-restrict-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777101",
+            pairing: { kind: "post-pair" },
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+                member: { roles: [] },
+              },
+            },
+          },
+        },
+      });
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777102",
+          accountId: "mux",
+          to: "discord:channel:777102",
+          from: "discord:4242",
+          body: "paired sender should still be blocked by channel users",
+          messageId: "dc-guild-users-blocked",
+          chatType: "group",
+          wasMentioned: true,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777102",
+            guildId: "guild-1",
+            channelId: "777102",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+                member: { roles: [] },
+              },
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
     });
   });
 });

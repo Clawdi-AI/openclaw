@@ -48,6 +48,16 @@ import {
   resolveChannelGroupPolicy,
   resolveChannelGroupRequireMention,
 } from "../config/group-policy.js";
+import {
+  isDiscordGroupAllowedByPolicy,
+  normalizeDiscordAllowList,
+  resolveDiscordChannelConfigWithFallback,
+  resolveDiscordMemberAccessState,
+  resolveDiscordShouldRequireMention,
+  allowListMatches,
+  normalizeDiscordSlug,
+  type DiscordGuildEntryResolved,
+} from "../discord/monitor/allow-list.js";
 import { logVerbose, warn } from "../globals.js";
 import {
   addChannelAllowFromStoreEntry,
@@ -282,6 +292,80 @@ function resolveDiscordInboundPeerId(params: {
     id: channelId,
     guildId: guildId ?? undefined,
   };
+}
+
+function resolveDiscordMuxSender(params: {
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+}): { senderId?: string; senderName?: string; senderTag?: string; memberRoleIds: string[] } {
+  const discordData = asMuxRecord(params.channelData?.discord);
+  const rawMessage = asMuxRecord(discordData?.rawMessage);
+  const author = asMuxRecord(rawMessage?.author);
+  const member = asMuxRecord(rawMessage?.member);
+  const senderId =
+    readMuxNonEmptyString(author?.id) ??
+    (typeof author?.id === "number" && Number.isFinite(author.id)
+      ? String(Math.trunc(author.id))
+      : undefined) ??
+    readMuxNonEmptyString(params.payload.from)?.replace(/^discord:(user:|dm:)?/i, "");
+  const senderName =
+    readMuxNonEmptyString(author?.username) ?? readMuxNonEmptyString(author?.global_name);
+  const discriminator = readMuxNonEmptyString(author?.discriminator);
+  const senderTag = senderName
+    ? discriminator && discriminator !== "0"
+      ? `${senderName}#${discriminator}`
+      : senderName
+    : undefined;
+  const rawRoles = Array.isArray(member?.roles) ? member.roles : [];
+  const memberRoleIds = rawRoles
+    .map((roleId) =>
+      typeof roleId === "string"
+        ? roleId.trim()
+        : typeof roleId === "number" && Number.isFinite(roleId)
+          ? String(Math.trunc(roleId))
+          : "",
+    )
+    .filter(Boolean);
+  return {
+    senderId,
+    senderName,
+    senderTag,
+    memberRoleIds,
+  };
+}
+
+function resolveDiscordGuildInfo(params: {
+  cfg: OpenClawConfig;
+  guildId?: string;
+}): DiscordGuildEntryResolved | null {
+  if (!params.guildId) {
+    return null;
+  }
+  const guildEntries = params.cfg.channels?.discord?.guilds;
+  if (!guildEntries) {
+    return null;
+  }
+  const match =
+    guildEntries[params.guildId] ??
+    guildEntries[normalizeDiscordSlug(params.guildId)] ??
+    guildEntries["*"];
+  if (!match) {
+    return null;
+  }
+  return {
+    ...match,
+    id: params.guildId,
+    slug: normalizeDiscordSlug(params.guildId),
+  };
+}
+
+function parseDiscordParentChannelIdFromRouteKey(routeKey: string | undefined): string | undefined {
+  const trimmed = readMuxNonEmptyString(routeKey);
+  if (!trimmed) {
+    return undefined;
+  }
+  const match = trimmed.match(/^discord:[^:]+:guild:[^:]+:channel:([^:]+):thread:[^:]+$/i);
+  return match?.[1]?.trim() || undefined;
 }
 
 function resolveWhatsAppInboundPeerId(params: { payload: MuxInboundPayload }): {
@@ -685,6 +769,165 @@ async function resolveTelegramMuxAccess(params: {
   };
 }
 
+async function resolveDiscordMuxAccess(params: {
+  cfg: OpenClawConfig;
+  accountId: string;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  body: string;
+  chatType: string;
+  wasMentioned: boolean;
+}): Promise<
+  | { allowed: false }
+  | { allowed: true; commandAuthorized: boolean; effectiveWasMentioned?: boolean }
+> {
+  const discordCfg = params.cfg.channels?.discord ?? {};
+  const hasControlCommandInMessage = hasControlCommand(params.body, params.cfg, {});
+  const sender = resolveDiscordMuxSender({
+    payload: params.payload,
+    channelData: params.channelData,
+  });
+  const isDirect = (params.chatType || "direct") === "direct";
+  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
+
+  if (isDirect) {
+    const dmPolicy = discordCfg.dmPolicy ?? discordCfg.dm?.policy ?? "pairing";
+    if (dmPolicy === "disabled") {
+      return { allowed: false };
+    }
+    if (dmPolicy === "open") {
+      return { allowed: true, commandAuthorized: true };
+    }
+    const storeAllowFrom = await readChannelAllowFromStore(
+      "discord",
+      process.env,
+      params.accountId,
+    ).catch(() => []);
+    const configuredAllowFrom = discordCfg.allowFrom ?? discordCfg.dm?.allowFrom ?? [];
+    const allowList = normalizeDiscordAllowList(
+      [...configuredAllowFrom.map(String), ...storeAllowFrom],
+      ["discord:", "user:", "pk:"],
+    );
+    if (!allowList) {
+      return { allowed: true, commandAuthorized: true };
+    }
+    const allowed = allowListMatches(allowList, {
+      id: sender.senderId ?? "",
+      name: sender.senderName,
+      tag: sender.senderTag,
+    });
+    if (!allowed) {
+      return { allowed: false };
+    }
+    return { allowed: true, commandAuthorized: true };
+  }
+
+  const guildId = readMuxNonEmptyString(params.channelData?.guildId);
+  const channelId = readMuxNonEmptyString(params.channelData?.channelId);
+  if (!guildId || !channelId) {
+    return { allowed: false };
+  }
+  const guildInfo = resolveDiscordGuildInfo({ cfg: params.cfg, guildId });
+  const routeKey = readMuxNonEmptyString(params.channelData?.routeKey);
+  const parentChannelId = parseDiscordParentChannelIdFromRouteKey(routeKey);
+  const channelConfig = resolveDiscordChannelConfigWithFallback({
+    guildInfo,
+    channelId,
+    channelSlug: "",
+    ...(parentChannelId ? { parentId: parentChannelId, scope: "thread" as const } : {}),
+  });
+
+  const channelAllowlistConfigured =
+    Boolean(guildInfo?.channels) && Object.keys(guildInfo?.channels ?? {}).length > 0;
+  const channelAllowed = channelConfig?.allowed !== false;
+  if (
+    !isDiscordGroupAllowedByPolicy({
+      groupPolicy: discordCfg.groupPolicy ?? params.cfg.channels?.defaults?.groupPolicy ?? "open",
+      guildAllowlisted: true,
+      channelAllowlistConfigured,
+      channelAllowed,
+    })
+  ) {
+    return { allowed: false };
+  }
+  if (channelConfig?.enabled === false || channelConfig?.allowed === false) {
+    return { allowed: false };
+  }
+
+  const { hasAccessRestrictions, memberAllowed } = resolveDiscordMemberAccessState({
+    channelConfig,
+    guildInfo,
+    memberRoleIds: sender.memberRoleIds,
+    sender: {
+      id: sender.senderId ?? "",
+      name: sender.senderName,
+      tag: sender.senderTag,
+    },
+  });
+  if (hasAccessRestrictions && !memberAllowed) {
+    return { allowed: false };
+  }
+
+  const pairedSenders = await readMuxPairedSenders({
+    channel: "discord",
+    accountId: params.accountId,
+    routeKey: routeKey ?? `discord:default:guild:${guildId}`,
+  }).catch(() => []);
+  const configuredOwnerAllow = discordCfg.allowFrom?.map(String) ?? discordCfg.dm?.allowFrom ?? [];
+  const ownerAllow =
+    configuredOwnerAllow.length > 0
+      ? configuredOwnerAllow.map(String)
+      : hasControlCommandInMessage
+        ? [...configuredOwnerAllow.map(String), ...pairedSenders]
+        : [];
+  const ownerAllowList = normalizeDiscordAllowList(ownerAllow, ["discord:", "user:", "pk:"]);
+  const ownerOk = ownerAllowList
+    ? allowListMatches(ownerAllowList, {
+        id: sender.senderId ?? "",
+        name: sender.senderName,
+        tag: sender.senderTag,
+      })
+    : false;
+  const commandGate = resolveControlCommandGate({
+    useAccessGroups,
+    authorizers: [
+      { configured: ownerAllowList != null, allowed: ownerOk },
+      { configured: hasAccessRestrictions, allowed: memberAllowed },
+    ],
+    modeWhenAccessGroupsOff: "configured",
+    allowTextCommands: true,
+    hasControlCommand: hasControlCommandInMessage,
+  });
+  if (commandGate.shouldBlock) {
+    return { allowed: false };
+  }
+
+  const requireMention = resolveDiscordShouldRequireMention({
+    isGuildMessage: true,
+    isThread: parentChannelId != null,
+    channelConfig,
+    guildInfo,
+  });
+  const mentionGate = resolveMentionGatingWithBypass({
+    isGroup: true,
+    requireMention,
+    canDetectMention: true,
+    wasMentioned: params.wasMentioned,
+    hasAnyMention: params.wasMentioned,
+    allowTextCommands: true,
+    hasControlCommand: hasControlCommandInMessage,
+    commandAuthorized: commandGate.commandAuthorized,
+  });
+  if (mentionGate.shouldSkip) {
+    return { allowed: false };
+  }
+  return {
+    allowed: true,
+    commandAuthorized: commandGate.commandAuthorized,
+    effectiveWasMentioned: mentionGate.effectiveWasMentioned,
+  };
+}
+
 async function sendTelegramEditViaMux(params: {
   cfg: OpenClawConfig;
   sessionKey: string;
@@ -987,6 +1230,23 @@ export async function handleMuxInboundHttpRequest(
         ctx.CommandAuthorized = telegramAccess.commandAuthorized;
         if (typeof telegramAccess.effectiveWasMentioned === "boolean") {
           ctx.WasMentioned = telegramAccess.effectiveWasMentioned;
+        }
+      } else if (channel === "discord") {
+        const discordAccess = await resolveDiscordMuxAccess({
+          cfg,
+          accountId,
+          payload,
+          channelData,
+          body: inboundBody,
+          chatType: String(ctx.ChatType ?? "direct"),
+          wasMentioned: payload.wasMentioned === true,
+        });
+        if (!discordAccess.allowed) {
+          return;
+        }
+        ctx.CommandAuthorized = discordAccess.commandAuthorized;
+        if (typeof discordAccess.effectiveWasMentioned === "boolean") {
+          ctx.WasMentioned = discordAccess.effectiveWasMentioned;
         }
       }
 
