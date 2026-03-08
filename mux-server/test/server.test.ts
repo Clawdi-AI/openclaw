@@ -5562,7 +5562,7 @@ describe("mux server", () => {
     });
   }, 15_000);
 
-  test("maps discord guild threads to thread-scoped sessions from route-less pairing", async () => {
+  test("maps discord guild threads to thread-scoped sessions from guild-scoped pairing", async () => {
     const inboundRequests: Array<Record<string, unknown>> = [];
     const inbound = await startHttpServer(async (req, res) => {
       if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
@@ -5835,6 +5835,257 @@ describe("mux server", () => {
 
     expect(pairingNotices.some((notice) => toSafeString(notice.content).includes("Paired"))).toBe(
       true,
+    );
+
+    const pairings = await listPairings({ port: server.port, apiKey: "tenant-a-key" });
+    expect(pairings.status).toBe(200);
+    expect(await pairings.json()).toEqual({
+      items: [
+        {
+          bindingId: expect.stringContaining("bind_"),
+          channel: "discord",
+          scope: "guild",
+          routeKey: `discord:default:guild:${guildId}`,
+        },
+      ],
+    });
+  }, 30_000);
+
+  test("keeps legacy discord channel-scoped guild bindings routable during migration", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push(await readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const guildId = "9010";
+    const guildChannelId = "22345";
+    const threadAId = "887101";
+    const threadBId = "887102";
+    const guildUserId = "5252";
+
+    const gatewayState: {
+      socket: WebSocket | null;
+      identified: boolean;
+      dispatched: boolean;
+    } = {
+      socket: null,
+      identified: false,
+      dispatched: false,
+    };
+
+    const dispatchGatewayMessages = () => {
+      if (!gatewayState.socket || !gatewayState.identified || gatewayState.dispatched) {
+        return;
+      }
+      gatewayState.dispatched = true;
+      const socket = gatewayState.socket;
+      const author = {
+        id: guildUserId,
+        bot: false,
+        username: "legacy-guild-user",
+      };
+      const buildMessage = (
+        id: string,
+        channelId: string,
+        content: string,
+        isoTimestamp: string,
+      ) => ({
+        id,
+        channel_id: channelId,
+        guild_id: guildId,
+        type: 0,
+        content,
+        author,
+        thread: {
+          id: channelId,
+          parent_id: guildChannelId,
+        },
+        attachments: [],
+        mentions: [],
+        mention_roles: [],
+        timestamp: isoTimestamp,
+      });
+      setTimeout(() => {
+        socket.send(
+          JSON.stringify({
+            op: 0,
+            t: "MESSAGE_CREATE",
+            s: 2,
+            d: buildMessage("3001", threadAId, "hello legacy thread a", "2026-01-01T00:02:01.000Z"),
+          }),
+        );
+      }, 80);
+      setTimeout(() => {
+        socket.send(
+          JSON.stringify({
+            op: 0,
+            t: "MESSAGE_CREATE",
+            s: 3,
+            d: buildMessage("3002", threadBId, "hello legacy thread b", "2026-01-01T00:02:02.000Z"),
+          }),
+        );
+      }, 220);
+    };
+
+    const gateway = await startWsServer((socket) => {
+      gatewayState.socket = socket;
+      socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 60_000 } }));
+      socket.on("message", (raw) => {
+        const payloadText =
+          typeof raw === "string"
+            ? raw
+            : Buffer.isBuffer(raw)
+              ? raw.toString("utf8")
+              : Array.isArray(raw)
+                ? Buffer.concat(raw).toString("utf8")
+                : Buffer.from(raw).toString("utf8");
+        const frame = JSON.parse(payloadText) as { op?: unknown };
+        if (Number(frame.op) !== 2) {
+          return;
+        }
+        gatewayState.identified = true;
+        socket.send(
+          JSON.stringify({
+            op: 0,
+            t: "READY",
+            s: 1,
+            d: { session_id: "gateway-session-legacy-channel-binding" },
+          }),
+        );
+        dispatchGatewayMessages();
+      });
+      socket.on("close", () => {
+        gatewayState.socket = null;
+        gatewayState.identified = false;
+      });
+    });
+
+    const discordApi = await startHttpServer(async (req, res) => {
+      const method = req.method ?? "GET";
+      const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+
+      if (method === "GET" && requestUrl.pathname === "/gateway/bot") {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ url: gateway.url }));
+        return;
+      }
+
+      const channelMessagesMatch = requestUrl.pathname.match(/^\/channels\/(\d+)\/messages$/);
+      if (channelMessagesMatch && method === "GET") {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify([]));
+        return;
+      }
+
+      const channelMatch = requestUrl.pathname.match(/^\/channels\/(\d+)$/);
+      if (method === "GET" && channelMatch) {
+        const channelId = channelMatch[1];
+        if (channelId === threadAId || channelId === threadBId) {
+          res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              id: channelId,
+              guild_id: guildId,
+              parent_id: guildChannelId,
+              type: 11,
+            }),
+          );
+          return;
+        }
+        if (channelId === guildChannelId) {
+          res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              id: channelId,
+              guild_id: guildId,
+              type: 0,
+            }),
+          );
+          return;
+        }
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "LEGACYCH",
+          tenantId: "tenant-a",
+          channel: "discord",
+          scope: "channel",
+          routeKey: `discord:default:guild:${guildId}:channel:${guildChannelId}`,
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+        MUX_DISCORD_POLL_INTERVAL_MS: "50",
+        MUX_DISCORD_BOOTSTRAP_LATEST: "false",
+        MUX_DISCORD_GATEWAY_DM_ENABLED: "false",
+        MUX_DISCORD_GATEWAY_GUILD_ENABLED: "true",
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "LEGACYCH",
+      sessionKey: `agent:main:discord:channel:${guildChannelId}`,
+    });
+    expect(claim.status).toBe(200);
+
+    await waitForCondition(
+      () => filterRealInbound(inboundRequests).length >= 2,
+      25_000,
+      "timed out waiting for discord legacy channel binding inbound forwards",
+    );
+
+    const realInbound = filterRealInbound(inboundRequests);
+    expect(realInbound).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channel: "discord",
+          sessionKey: `agent:main:discord:channel:${threadAId}`,
+          body: "hello legacy thread a",
+          threadId: threadAId,
+          chatType: "group",
+          channelData: expect.objectContaining({
+            channelId: threadAId,
+            guildId,
+            routeKey: `discord:default:guild:${guildId}:channel:${guildChannelId}:thread:${threadAId}`,
+          }),
+        }),
+        expect.objectContaining({
+          channel: "discord",
+          sessionKey: `agent:main:discord:channel:${threadBId}`,
+          body: "hello legacy thread b",
+          threadId: threadBId,
+          chatType: "group",
+          channelData: expect.objectContaining({
+            channelId: threadBId,
+            guildId,
+            routeKey: `discord:default:guild:${guildId}:channel:${guildChannelId}:thread:${threadBId}`,
+          }),
+        }),
+      ]),
     );
 
     const pairings = await listPairings({ port: server.port, apiKey: "tenant-a-key" });

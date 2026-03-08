@@ -3557,14 +3557,9 @@ function buildDiscordThreadScopedSessionKey(baseSessionKey: string, threadId: st
 function resolveDiscordBindingRouteKeyForClaim(params: {
   incomingRoute: DiscordBoundRoute;
 }): string {
-  if (
-    params.incomingRoute.kind === "guild" &&
-    params.incomingRoute.threadId &&
-    params.incomingRoute.channelId
-  ) {
+  if (params.incomingRoute.kind === "guild") {
     return buildDiscordGuildRouteKey({
       guildId: params.incomingRoute.guildId,
-      channelId: params.incomingRoute.channelId,
     });
   }
   return buildDiscordRouteKey(params.incomingRoute);
