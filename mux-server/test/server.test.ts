@@ -1572,6 +1572,76 @@ describe("mux server", () => {
     });
   });
 
+  test("telegram canonical fallback rejects conflicting explicit chat targets even when both chats are bound", async () => {
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-CONFLICT-A",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:1001",
+          scope: "chat",
+        },
+        {
+          code: "PAIR-TG-CONFLICT-B",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:9999",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-TG-CONFLICT-A",
+          sessionKey: "agent:main:telegram:direct:1001",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-TG-CONFLICT-B",
+          sessionKey: "agent:main:telegram:direct:9999",
+        })
+      ).status,
+    ).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:main",
+        to: "telegram:1001",
+        raw: {
+          telegram: {
+            method: "sendMessage",
+            body: {
+              chat_id: "9999",
+              text: "conflicting explicit telegram targets",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(403);
+    expect(await outbound.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
+  });
+
   test("telegram outbound falls back to prefixed request targets for canonical sessions", async () => {
     const telegramRequests: Array<Record<string, unknown>> = [];
     const telegramApi = await startHttpServer(async (req, res) => {
@@ -3062,6 +3132,85 @@ describe("mux server", () => {
           discord: {
             body: {
               content: "wrong explicit discord target",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(403);
+    expect(await outbound.json()).toEqual({
+      ok: false,
+      error: "route not bound",
+      code: "ROUTE_NOT_BOUND",
+    });
+  });
+
+  test("discord canonical fallback rejects conflicting explicit guild targets", async () => {
+    const discordApi = await startHttpServer(async (req, res) => {
+      const url = req.url ?? "";
+      if (req.method === "GET" && url === "/channels/2001") {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ id: "2001", guild_id: "9001" }));
+        return;
+      }
+      if (req.method === "GET" && url === "/channels/3002") {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            id: "3002",
+            guild_id: "9001",
+            parent_id: "2002",
+            type: 11,
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-DISCORD-CONFLICTING-GUILD",
+          channel: "discord",
+          routeKey: "discord:default:guild:9001",
+          scope: "guild",
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+      },
+    });
+
+    expect(
+      (
+        await claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-DISCORD-CONFLICTING-GUILD",
+          sessionKey: "dc:guild:9001",
+        })
+      ).status,
+    ).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "discord",
+        sessionKey: "agent:main:main",
+        to: "channel:2001",
+        threadId: "3002",
+        raw: {
+          discord: {
+            send: {
+              text: "conflicting explicit discord targets",
             },
           },
         },

@@ -3827,24 +3827,56 @@ function listTelegramOutboundRouteKeys(params: {
   rawBody?: Record<string, unknown>;
   requestedThreadId?: number;
 }): string[] {
-  const chatId =
-    parseTelegramOutboundChatId(params.rawBody?.chat_id) ??
-    parseTelegramOutboundChatId(params.requestedTo);
+  const rawChatId = parseTelegramOutboundChatId(params.rawBody?.chat_id);
+  const requestedChatId = parseTelegramOutboundChatId(params.requestedTo);
+  if (rawChatId && requestedChatId && rawChatId !== requestedChatId) {
+    return [];
+  }
+  const rawThreadId = readPositiveInt(params.rawBody?.message_thread_id);
+  if (rawThreadId && params.requestedThreadId && rawThreadId !== params.requestedThreadId) {
+    return [];
+  }
+  const chatId = rawChatId ?? requestedChatId;
   if (!chatId) {
     return [];
   }
-  const topicId =
-    readPositiveInt(params.rawBody?.message_thread_id) ?? params.requestedThreadId ?? undefined;
+  const topicId = rawThreadId ?? params.requestedThreadId ?? undefined;
   return uniqueRouteKeys([
     topicId ? buildTelegramRouteKey(chatId, topicId) : null,
     buildTelegramRouteKey(chatId),
   ]);
 }
 
+async function hasDiscordOutboundTargetConflict(params: {
+  requestedTo?: unknown;
+  requestedThreadId?: string;
+}): Promise<boolean> {
+  const target = parseDiscordOutboundTarget(params.requestedTo);
+  const threadId = readUnsignedNumericString(params.requestedThreadId);
+  if (!target || !threadId) {
+    return false;
+  }
+  if (target.kind === "user") {
+    return true;
+  }
+  if (target.id === threadId) {
+    return false;
+  }
+  try {
+    const threadInfo = await resolveDiscordChannelInfo(threadId);
+    return threadInfo.parentId !== target.id;
+  } catch {
+    return false;
+  }
+}
+
 async function listDiscordOutboundRouteKeys(params: {
   requestedTo?: unknown;
   requestedThreadId?: string;
 }): Promise<string[]> {
+  if (await hasDiscordOutboundTargetConflict(params)) {
+    return [];
+  }
   const threadId = readUnsignedNumericString(params.requestedThreadId);
   if (threadId) {
     try {
