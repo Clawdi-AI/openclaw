@@ -296,6 +296,24 @@ function resolveDiscordInboundPeerId(params: {
   };
 }
 
+function resolveMuxInboundOriginatingTarget(params: {
+  channel: "telegram" | "discord" | "whatsapp";
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+}): string | null {
+  if (params.channel === "discord") {
+    const peer = resolveDiscordInboundPeerId({
+      payload: params.payload,
+      channelData: params.channelData,
+    });
+    if (!peer) {
+      return null;
+    }
+    return peer.kind === "direct" ? `user:${peer.id}` : `channel:${peer.id}`;
+  }
+  return readMuxNonEmptyString(params.payload.to);
+}
+
 function resolveDiscordMuxSender(params: {
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
@@ -1186,7 +1204,6 @@ export async function handleMuxInboundHttpRequest(
   const payload = toMuxInboundPayload(body.value);
   const channel = normalizeChannelId(readMuxNonEmptyString(payload.channel));
   const transportSessionKey = readMuxNonEmptyString(payload.sessionKey);
-  const originatingTo = readMuxNonEmptyString(payload.to);
   const messageId =
     readMuxNonEmptyString(payload.messageId ?? payload.eventId) ?? `mux:${Date.now()}`;
   const rawMessage = typeof payload.body === "string" ? payload.body : "";
@@ -1206,6 +1223,11 @@ export async function handleMuxInboundHttpRequest(
     sendJson(res, 400, { ok: false, error: "unsupported mux channel" });
     return true;
   }
+  const originatingTo = resolveMuxInboundOriginatingTarget({
+    channel,
+    payload,
+    channelData,
+  });
   if (!transportSessionKey) {
     sendJson(res, 400, { ok: false, error: "sessionKey required" });
     return true;

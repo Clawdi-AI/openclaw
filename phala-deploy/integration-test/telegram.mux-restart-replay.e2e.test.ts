@@ -67,7 +67,7 @@ describe("mux Telegram restart recovery", () => {
             minimalGateway: false,
           },
           async (harness) => {
-            harness.telegram.failNextMethod("sendMessage", {
+            harness.telegram.setMethodFailure("sendMessage", {
               status: 500,
             });
 
@@ -105,6 +105,7 @@ describe("mux Telegram restart recovery", () => {
             expect(pendingEntry.channel).toBe("telegram");
             expect(pendingEntry.to).toBe(`telegram:${scenario.chatId}`);
             expect(pendingEntry.agentId).toBe("main");
+            harness.telegram.setMethodFailure("sendMessage", null);
 
             await rewriteQueuedDelivery(harness.stateDir, pendingEntry);
             await harness.restartGateway();
@@ -156,7 +157,7 @@ describe("mux Telegram restart recovery", () => {
             telegramStreamMode: "off",
           },
           async (harness) => {
-            harness.telegram.failNextMethod("sendMessage", {
+            harness.telegram.setMethodFailure("sendMessage", {
               status: 500,
             });
             harness.telegram.enqueueUpdate(
@@ -196,6 +197,7 @@ describe("mux Telegram restart recovery", () => {
             }
             expect(pendingEntry.agentId).toBe("main");
             expect(harness.openai.requests).toHaveLength(1);
+            harness.telegram.setMethodFailure("sendMessage", null);
 
             await rewriteQueuedDelivery(harness.stateDir, pendingEntry);
             await harness.restartGateway();

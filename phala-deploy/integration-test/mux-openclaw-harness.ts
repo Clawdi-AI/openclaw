@@ -13,9 +13,11 @@ import { __resetMuxJwksCacheForTest } from "../../src/gateway/mux-jwt.js";
 import { buildOpenAiResponsesProviderConfig } from "../../src/gateway/test-openai-responses-model.js";
 import { loadOrCreateDeviceIdentity } from "../../src/infra/device-identity.js";
 import { captureEnv } from "../../src/test-utils/env.js";
+import { FakeDiscordApi } from "./fake-discord.js";
 import { FakeOpenAiResponsesServer } from "./fake-openai.js";
 import type { FakeOpenAiRequest, FakeOpenAiResponsePlan } from "./fake-openai.js";
 import { FakeTelegramApi } from "./fake-telegram.js";
+import { FakeWhatsAppApi } from "./fake-whatsapp.js";
 import {
   AsyncCleanupStack,
   getFreePort,
@@ -61,6 +63,7 @@ type HarnessPaths = {
 };
 
 type StartHarnessParams = {
+  channel?: "telegram" | "discord" | "whatsapp";
   chatId: string;
   claimedSessionKey: string;
   pairingRouteKey?: string;
@@ -84,9 +87,18 @@ function buildHarnessPaths(tempDir: string): HarnessPaths {
 
 function buildHarnessEnv(
   paths: HarnessPaths,
-  params?: { minimalGateway?: boolean },
+  params?: {
+    channel?: "telegram" | "discord" | "whatsapp";
+    minimalGateway?: boolean;
+  },
 ): Record<string, string> {
   const isMinimalGateway = params?.minimalGateway !== false;
+  const integrationChannels =
+    params?.channel === "discord"
+      ? "discord"
+      : params?.channel === "whatsapp"
+        ? "whatsapp"
+        : "telegram";
   return {
     HOME: paths.tempDir,
     USERPROFILE: paths.tempDir,
@@ -97,16 +109,21 @@ function buildHarnessEnv(
     OPENCLAW_SKIP_BROWSER_CONTROL_SERVER: "1",
     OPENCLAW_SKIP_GMAIL_WATCHER: "1",
     OPENCLAW_SKIP_CANVAS_HOST: "1",
-    OPENCLAW_SKIP_PROVIDERS: "1",
     OPENCLAW_SKIP_CRON: "1",
     OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
+    OPENCLAW_INTEGRATION_CHANNELS: integrationChannels,
     ...(isMinimalGateway
-      ? { OPENCLAW_SKIP_CHANNELS: "1", OPENCLAW_TEST_MINIMAL_GATEWAY: "1" }
+      ? {
+          OPENCLAW_SKIP_CHANNELS: "1",
+          OPENCLAW_SKIP_PROVIDERS: "1",
+          OPENCLAW_TEST_MINIMAL_GATEWAY: "1",
+        }
       : {}),
   };
 }
 
 function buildHarnessConfig(params: {
+  channel: "telegram" | "discord" | "whatsapp";
   workspaceDir: string;
   openAiBaseUrl: string;
   muxPort: number;
@@ -149,30 +166,55 @@ function buildHarnessConfig(params: {
         memory: "none",
       },
     },
-    channels: {
-      telegram: {
-        dmPolicy: "open",
-        allowFrom: ["*"],
-        groupPolicy: "open",
-        streamMode: params.telegramStreamMode,
-        reactionLevel: "minimal",
-        actions: { reactions: true },
-        mux: { enabled: true, timeoutMs: 10_000 },
-        accounts: {
-          default: { enabled: true, groupPolicy: "open" },
-        },
-      },
-    },
+    channels:
+      params.channel === "telegram"
+        ? {
+            telegram: {
+              dmPolicy: "open",
+              allowFrom: ["*"],
+              groupPolicy: "open",
+              streamMode: params.telegramStreamMode,
+              reactionLevel: "minimal",
+              actions: { reactions: true },
+              mux: { enabled: true, timeoutMs: 10_000 },
+              accounts: {
+                default: { enabled: true, groupPolicy: "open" },
+              },
+            },
+          }
+        : params.channel === "discord"
+          ? {
+              discord: {
+                dmPolicy: "open",
+                allowFrom: ["*"],
+                groupPolicy: "open",
+                mux: { enabled: true, timeoutMs: 10_000 },
+                guilds: {
+                  "*": { requireMention: false },
+                },
+              },
+            }
+          : {
+              whatsapp: {
+                dmPolicy: "open",
+                allowFrom: ["*"],
+                groupPolicy: "open",
+                mux: { enabled: true, timeoutMs: 10_000 },
+              },
+            },
   };
 }
 
 async function startMuxServer(params: {
+  channel: "telegram" | "discord" | "whatsapp";
   port: number;
   tempDir: string;
   gatewayPort: number;
   openclawId: string;
   pairingRouteKey: string;
-  telegramBaseUrl: string;
+  telegramBaseUrl?: string;
+  discordBaseUrl?: string;
+  whatsappControlUrl?: string;
   resolutionMode: "session-first" | "target-first";
 }): Promise<StartedMuxServer> {
   const started = startNodeTsxProcess({
@@ -180,18 +222,43 @@ async function startMuxServer(params: {
     entrypoint: "src/server.ts",
     env: {
       NODE_ENV: "test",
-      TELEGRAM_BOT_TOKEN,
-      MUX_TELEGRAM_BOT_USERNAME: "integration_bot",
-      MUX_TELEGRAM_API_BASE_URL: params.telegramBaseUrl,
-      MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
-      MUX_TELEGRAM_POLL_RETRY_MS: "50",
-      MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+      ...(params.discordBaseUrl ? { DISCORD_BOT_TOKEN: "dummy-discord-token" } : {}),
       MUX_ADMIN_TOKEN: "integration-admin-token",
       MUX_REGISTER_KEY,
       MUX_PORT: String(params.port),
       MUX_LOG_PATH: path.join(params.tempDir, "mux-server.log"),
       MUX_DB_PATH: path.join(params.tempDir, "mux-server.sqlite"),
       MUX_OUTBOUND_RESOLUTION_MODE: params.resolutionMode,
+      ...(params.telegramBaseUrl
+        ? {
+            TELEGRAM_BOT_TOKEN,
+            MUX_TELEGRAM_BOT_USERNAME: "integration_bot",
+            MUX_TELEGRAM_API_BASE_URL: params.telegramBaseUrl,
+            MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
+            MUX_TELEGRAM_POLL_RETRY_MS: "50",
+            MUX_TELEGRAM_BOOTSTRAP_LATEST: "false",
+          }
+        : {}),
+      ...(params.discordBaseUrl
+        ? {
+            MUX_DISCORD_API_BASE_URL: params.discordBaseUrl,
+            MUX_DISCORD_POLL_INTERVAL_MS: "50",
+            MUX_DISCORD_BOOTSTRAP_LATEST: "false",
+            MUX_DISCORD_GATEWAY_DM_ENABLED: "false",
+            MUX_DISCORD_GATEWAY_GUILD_ENABLED: "false",
+          }
+        : {}),
+      ...(params.whatsappControlUrl
+        ? {
+            MUX_WEB_RUNTIME_MODULE_PATH: path.resolve(
+              path.dirname(fileURLToPath(import.meta.url)),
+              "fake-whatsapp-runtime.ts",
+            ),
+            MUX_FAKE_WHATSAPP_CONTROL_URL: params.whatsappControlUrl,
+            MUX_FAKE_WHATSAPP_POLL_INTERVAL_MS: "50",
+            MUX_WHATSAPP_AUTH_DIR: path.join(params.tempDir, "fake-whatsapp-auth"),
+          }
+        : {}),
       MUX_TENANTS_JSON: JSON.stringify([
         {
           id: params.openclawId,
@@ -204,9 +271,10 @@ async function startMuxServer(params: {
       MUX_PAIRING_CODES_JSON: JSON.stringify([
         {
           code: CLAIM_CODE,
-          channel: "telegram",
+          channel: params.channel,
           routeKey: params.pairingRouteKey,
-          scope: "chat",
+          scope:
+            params.channel === "telegram" ? "chat" : params.channel === "discord" ? "dm" : "chat",
         },
       ]),
     },
@@ -247,7 +315,7 @@ async function startGatewayProcess(params: {
   return started;
 }
 
-async function claimTelegramPairing(params: {
+async function claimMuxPairing(params: {
   muxPort: number;
   claimedSessionKey: string;
 }): Promise<void> {
@@ -275,7 +343,9 @@ function resetIntegrationRuntimeState(): void {
 }
 
 export type MuxOpenClawHarness = {
-  telegram: FakeTelegramApi;
+  telegram?: FakeTelegramApi;
+  discord?: FakeDiscordApi;
+  whatsapp?: FakeWhatsAppApi;
   openai: FakeOpenAiResponsesServer;
   muxPort: number;
   gatewayPort: number;
@@ -287,6 +357,7 @@ export type MuxOpenClawHarness = {
   openclawId: string;
   readSessionStore: () => Record<string, unknown>;
   waitForSessionStoreEntry: (key: string) => Promise<Record<string, unknown>>;
+  readRecentLogs: () => { gateway: string; muxServer: string };
   restartGateway: () => Promise<void>;
   close: () => Promise<void>;
 };
@@ -310,7 +381,11 @@ export async function startMuxOpenClawHarness(
   });
 
   try {
-    const harnessEnv = buildHarnessEnv(paths, { minimalGateway: params.minimalGateway });
+    const channel = params.channel ?? "telegram";
+    const harnessEnv = buildHarnessEnv(paths, {
+      channel,
+      minimalGateway: params.minimalGateway,
+    });
     Object.assign(process.env, harnessEnv);
     await mkdir(paths.workspaceDir, { recursive: true });
     if (params.workspaceFiles) {
@@ -320,12 +395,26 @@ export async function startMuxOpenClawHarness(
         await writeFile(filePath, content);
       }
     }
+    if (channel === "whatsapp") {
+      const fakeWhatsAppAuthDir = path.join(tempDir, "fake-whatsapp-auth");
+      await mkdir(fakeWhatsAppAuthDir, { recursive: true });
+      await writeFile(
+        path.join(fakeWhatsAppAuthDir, "creds.json"),
+        JSON.stringify({ integration: true }, null, 2),
+      );
+    }
 
     const gatewayPort = await getFreePort();
     const muxPort = await getFreePort();
     const openclawId = loadOrCreateDeviceIdentity().deviceId;
 
-    const telegram = cleanup.use(await FakeTelegramApi.start({ token: TELEGRAM_BOT_TOKEN }));
+    const telegram =
+      channel === "telegram"
+        ? cleanup.use(await FakeTelegramApi.start({ token: TELEGRAM_BOT_TOKEN }))
+        : undefined;
+    const discord = channel === "discord" ? cleanup.use(await FakeDiscordApi.start()) : undefined;
+    const whatsapp =
+      channel === "whatsapp" ? cleanup.use(await FakeWhatsAppApi.start()) : undefined;
     const openai = cleanup.use(
       await FakeOpenAiResponsesServer.start({
         responder: params.openAiResponder ?? (() => params.llmReplyText),
@@ -333,6 +422,7 @@ export async function startMuxOpenClawHarness(
     );
 
     const cfg = buildHarnessConfig({
+      channel,
       workspaceDir: paths.workspaceDir,
       openAiBaseUrl: openai.baseUrl,
       muxPort,
@@ -347,19 +437,28 @@ export async function startMuxOpenClawHarness(
     });
 
     const muxServer = await startMuxServer({
+      channel,
       port: muxPort,
       tempDir,
       gatewayPort,
       openclawId,
-      pairingRouteKey: params.pairingRouteKey ?? `telegram:default:chat:${params.chatId}`,
-      telegramBaseUrl: telegram.url,
+      pairingRouteKey:
+        params.pairingRouteKey ??
+        (channel === "telegram"
+          ? `telegram:default:chat:${params.chatId}`
+          : channel === "discord"
+            ? `discord:default:dm:user:${params.chatId}`
+            : `whatsapp:default:chat:${params.chatId}`),
+      ...(telegram ? { telegramBaseUrl: telegram.url } : {}),
+      ...(discord ? { discordBaseUrl: discord.url } : {}),
+      ...(whatsapp ? { whatsappControlUrl: whatsapp.url } : {}),
       resolutionMode: params.resolutionMode,
     });
     cleanup.defer(async () => {
       await stopChildProcess(muxServer.process);
     });
 
-    await claimTelegramPairing({
+    await claimMuxPairing({
       muxPort,
       claimedSessionKey: params.claimedSessionKey,
     });
@@ -372,7 +471,9 @@ export async function startMuxOpenClawHarness(
     };
 
     return {
-      telegram,
+      ...(telegram ? { telegram } : {}),
+      ...(discord ? { discord } : {}),
+      ...(whatsapp ? { whatsapp } : {}),
       openai,
       muxPort,
       gatewayPort,
@@ -390,6 +491,10 @@ export async function startMuxOpenClawHarness(
           `timed out waiting for session store entry ${key}`,
         );
       },
+      readRecentLogs: () => ({
+        gateway: gateway.logs.join("").slice(-12_000),
+        muxServer: muxServer.logs.join("").slice(-12_000),
+      }),
       restartGateway: async () => {
         await stopChildProcess(gateway.process);
         resetIntegrationRuntimeState();

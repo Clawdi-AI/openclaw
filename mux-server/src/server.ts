@@ -4,6 +4,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { RequestClient } from "@buape/carbon";
 import WebSocket from "ws";
 import {
@@ -475,6 +476,30 @@ let discordRuntimeModulesPromise: Promise<DiscordRuntimeModules> | null = null;
 async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
   if (!webRuntimeModulesPromise) {
     webRuntimeModulesPromise = (async () => {
+      const runtimeOverridePath = readNonEmptyString(process.env.MUX_WEB_RUNTIME_MODULE_PATH);
+      if (runtimeOverridePath) {
+        const overrideHref = pathToFileURL(path.resolve(runtimeOverridePath)).href;
+        const runtimeModule = (await import(overrideHref)) as {
+          monitorWebInbox?: WebRuntimeModules["monitorWebInbox"];
+          sendMessageWhatsApp?: WebRuntimeModules["sendMessageWhatsApp"];
+          sendTypingWhatsApp?: WebRuntimeModules["sendTypingWhatsApp"];
+          setActiveWebListener?: WebRuntimeModules["setActiveWebListener"];
+        };
+        if (
+          typeof runtimeModule.monitorWebInbox !== "function" ||
+          typeof runtimeModule.sendMessageWhatsApp !== "function" ||
+          typeof runtimeModule.sendTypingWhatsApp !== "function" ||
+          typeof runtimeModule.setActiveWebListener !== "function"
+        ) {
+          throw new Error("failed to load WhatsApp runtime modules from override path");
+        }
+        return {
+          monitorWebInbox: runtimeModule.monitorWebInbox,
+          sendMessageWhatsApp: runtimeModule.sendMessageWhatsApp,
+          sendTypingWhatsApp: runtimeModule.sendTypingWhatsApp,
+          setActiveWebListener: runtimeModule.setActiveWebListener,
+        };
+      }
       const inboundModulePath = "../../src/web/inbound.js";
       const outboundModulePath = "../../src/web/outbound.js";
       const activeListenerModulePath = "../../src/web/active-listener.js";

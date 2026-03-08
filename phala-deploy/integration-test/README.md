@@ -8,11 +8,15 @@ The design goal is:
 - keep mux-server real
 - fake only external dependencies
   - Telegram Bot API
+  - Discord HTTP API
+  - WhatsApp Web runtime
   - OpenAI Responses API
 
 That gives us a repeatable test for:
 
 - `Telegram -> mux-server -> OpenClaw -> mux-server -> Telegram`
+- `Discord -> mux-server -> OpenClaw -> mux-server -> Discord`
+- `WhatsApp -> mux-server -> OpenClaw -> mux-server -> WhatsApp`
 - canonical session behavior
 - resolver-mode behavior (`session-first` and `target-first`)
 
@@ -24,6 +28,8 @@ Implemented today:
 - real OpenClaw gateway started in-process inside that runner
 - real mux-server started as a child process
 - fake Telegram Bot API server
+- fake Discord HTTP API server
+- fake WhatsApp Web runtime + control server
 - fake OpenAI Responses server
 - generic sequential OpenAI script runner for multi-turn tool-call scenarios
 - Telegram round-trip coverage in both resolver modes for:
@@ -47,26 +53,34 @@ Implemented today:
     - canonical outbound `gateway send` traffic to the same paired chat
 - assertions on:
   - final Telegram outbound request
+  - final Discord outbound request
+  - final WhatsApp outbound request
   - OpenAI prompt receipt
   - OpenClaw session-store state
 
 Current test files:
 
 - [mux-openclaw-harness.ts](./mux-openclaw-harness.ts)
+- [fake-discord.ts](./fake-discord.ts)
 - [fake-telegram.ts](./fake-telegram.ts)
+- [fake-whatsapp-runtime.ts](./fake-whatsapp-runtime.ts)
+- [fake-whatsapp.ts](./fake-whatsapp.ts)
 - [fake-openai.ts](./fake-openai.ts)
 - [fixtures.ts](./fixtures.ts)
 - [telegram-scenarios.ts](./telegram-scenarios.ts)
 - [telegram-scenario-runner.ts](./telegram-scenario-runner.ts)
+- [discord.mux-roundtrip.e2e.test.ts](./discord.mux-roundtrip.e2e.test.ts)
 - [telegram.mux-roundtrip.shared.ts](./telegram.mux-roundtrip.shared.ts)
 - [telegram.mux-roundtrip.session-first.e2e.test.ts](./telegram.mux-roundtrip.session-first.e2e.test.ts)
 - [telegram.mux-roundtrip.target-first.e2e.test.ts](./telegram.mux-roundtrip.target-first.e2e.test.ts)
+- [whatsapp.mux-roundtrip.e2e.test.ts](./whatsapp.mux-roundtrip.e2e.test.ts)
 - [vitest.config.ts](./vitest.config.ts)
 
 Not covered yet:
 
 - Telegram poll round-trip from the real current-channel prompt/tool surface
-- Discord and WhatsApp mocked round-trip
+- Discord guild/thread mocked round-trip
+- WhatsApp group mocked round-trip
 
 ## Architecture
 
@@ -74,14 +88,14 @@ The harness flow is:
 
 1. create an isolated temp `HOME` and OpenClaw state dir
 2. write a test OpenClaw config that enables mux
-3. start fake Telegram
+3. start the channel-specific fake transport
 4. start fake OpenAI
 5. start the real OpenClaw gateway
 6. start the real mux-server
-7. claim a Telegram pairing against mux-server
-8. inject Telegram updates into the fake Telegram poll queue
+7. claim a mux pairing against mux-server
+8. inject inbound channel events into the fake transport
 9. wait for:
-   - fake Telegram outbound requests
+   - fake outbound channel requests
    - fake OpenAI requests
    - OpenClaw session-store writes
 
@@ -122,6 +136,12 @@ Current golden coverage:
 - photo
 - document
 - voice
+
+Current mocked non-Telegram coverage:
+
+- Discord DM round-trip in `session-first` and `target-first`
+- WhatsApp DM round-trip in `session-first` and `target-first`
+- remaining non-Telegram gaps: Discord guild/thread and WhatsApp group round-trip
 
 ## Recommended fixture model
 
@@ -171,12 +191,14 @@ Near term:
 1. add table-driven Telegram scenarios that run in both resolver modes
 2. extend restart and delayed-send coverage beyond gateway `send`
 3. broaden mixed-fleet coverage beyond Telegram DM
+4. add Discord guild/thread round-trip
+5. add WhatsApp group round-trip
 
 Next:
 
-1. add Discord mocked round-trip
-2. add WhatsApp mocked round-trip
-3. broaden mux-server negative safety matrix
+1. broaden mux-server negative safety matrix
+2. add manual Discord/WhatsApp release checks
+3. keep replacing template fixtures with captured golden payloads where available
 
 Long term:
 

@@ -373,6 +373,8 @@ Already covered:
 - mocked Telegram command-menu and callback-edit round-trip integration in both resolver modes
 - mocked Telegram media sends for photo and voice via the real `message` tool surface in both resolver modes
 - mocked Telegram restart recovery for both gateway `send` and agent-generated final replies after queued delivery failure in both resolver modes
+- mocked Discord DM round-trip integration with real OpenClaw + real mux-server in both resolver modes
+- mocked WhatsApp DM round-trip integration with real OpenClaw + real mux-server in both resolver modes
 - full OpenClaw inbound normalization matrix across Telegram, Discord, and WhatsApp channel shapes
 - full non-default-account mux bypass matrix across Telegram, Discord, and WhatsApp adapters
 - full old/new queue persistence compatibility matrix
@@ -381,6 +383,8 @@ Already covered:
 Still incomplete:
 
 - full mux-server negative safety matrix beyond the no-safe-target canonical cases
+- mocked Discord guild/thread round-trip integration
+- mocked WhatsApp group round-trip integration
 - manual release checks for Discord and WhatsApp
 
 ### Fixture policy
@@ -399,7 +403,9 @@ Still incomplete:
 - Current status: plain text, reaction, document, photo, and voice scripted Telegram DM scenarios are covered; plain-text group/forum-topic scenarios are covered in both resolver modes; and callback-driven Telegram command/edit flows are covered for `/reasoning` and `/models`. Poll is still pending because the real current-channel Telegram message-tool schema does not expose `poll` yet, so a mocked poll round-trip should wait for a real prompt-surface path instead of testing an artificial one.
 - Current captured-fixture status:
   - golden real payloads are in place for DM text, group text, forum-topic text, callback query, photo, document, and voice
-- Current mocked Telegram priority after restart/send recovery: broader safety cases outside Telegram DM. Non-Telegram mux-server parity now has targeted Discord and WhatsApp safety coverage; the next gap is full mocked non-Telegram round-trip.
+- Current mocked priority after restart/send recovery:
+  - broaden safety cases outside Telegram DM
+  - extend non-Telegram mocked round-trip from Discord/WhatsApp DMs into Discord guild/thread and WhatsApp group flows
 
 ### A. Required automated coverage: OpenClaw unit/contract tests
 
@@ -680,5 +686,5 @@ Expected rollout signal:
 - [x] keep automated coverage for both legacy and canonical semantics
 - [ ] finish the remaining sanitized real Telegram payload fixtures for the mocked integration harness
 - [x] add scripted OpenAI Responses fixtures for outbound behavior coverage (tool calls, tool outputs, final message turns)
-- [ ] expand the mocked integration harness beyond Telegram DM round-trip
+- [x] expand the mocked integration harness beyond Telegram DM round-trip
 - [ ] remove migration-only compatibility branches after fleet migration completes

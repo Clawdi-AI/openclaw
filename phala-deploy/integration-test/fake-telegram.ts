@@ -102,6 +102,7 @@ export class FakeTelegramApi {
   private readonly updates: Array<Record<string, unknown>> = [];
   private readonly files = new Map<string, FakeTelegramFile>();
   private readonly failures = new Map<string, FakeTelegramFailure[]>();
+  private readonly stickyFailures = new Map<string, FakeTelegramFailure>();
   private nextMessageId = 1_000;
 
   private constructor(
@@ -154,6 +155,14 @@ export class FakeTelegramApi {
     this.failures.set(method, pending);
   }
 
+  setMethodFailure(method: string, failure: FakeTelegramFailure | null): void {
+    if (!failure) {
+      this.stickyFailures.delete(method);
+      return;
+    }
+    this.stickyFailures.set(method, failure);
+  }
+
   async waitForMethodCall(
     method: string,
     predicate?: (request: FakeTelegramRequest) => boolean,
@@ -201,6 +210,20 @@ export class FakeTelegramApi {
     const method = match[1] ?? "";
     const body = await readTelegramBody(req);
     this.requests.push({ method, body });
+
+    const stickyFailure = this.stickyFailures.get(method);
+    if (stickyFailure) {
+      res.writeHead(stickyFailure.status, { "content-type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify(
+          stickyFailure.body ?? {
+            ok: false,
+            description: `forced fake Telegram failure for ${method}`,
+          },
+        ),
+      );
+      return;
+    }
 
     const queuedFailure = this.failures.get(method)?.shift();
     if (queuedFailure) {
