@@ -2054,6 +2054,31 @@ function shouldRetryTelegramWithoutThread(params: {
   );
 }
 
+async function withTelegramThreadFallback(params: {
+  body: Record<string, unknown>;
+  attempt: (
+    effectiveBody: Record<string, unknown>,
+  ) => Promise<{ response: Response; result: Record<string, unknown> }>;
+}): Promise<{
+  response: Response;
+  result: Record<string, unknown>;
+}> {
+  let finalBody: Record<string, unknown> = { ...params.body };
+  let attempt = await params.attempt(finalBody);
+  if (
+    (!attempt.response.ok || attempt.result.ok !== true) &&
+    shouldRetryTelegramWithoutThread({
+      body: finalBody,
+      result: attempt.result,
+    })
+  ) {
+    finalBody = { ...finalBody };
+    delete finalBody.message_thread_id;
+    attempt = await params.attempt(finalBody);
+  }
+  return attempt;
+}
+
 async function sendTelegram(method: string, body: Record<string, unknown>) {
   const token = requireTelegramBotToken();
   const url = `${telegramApiBaseUrl}/bot${token}/${method}`;
@@ -2107,44 +2132,26 @@ async function sendTelegramWithFallbacks(params: {
   response: Response;
   result: Record<string, unknown>;
 }> {
-  let finalBody: Record<string, unknown> = { ...params.body };
-  let { response, result } = await sendTelegram(params.method, finalBody);
-  if (
-    (!response.ok || result.ok !== true) &&
-    shouldRetryTelegramWithoutHtmlParseMode({
-      method: params.method,
-      body: finalBody,
-      result,
-    })
-  ) {
-    finalBody = { ...finalBody };
-    delete finalBody.parse_mode;
-    ({ response, result } = await sendTelegram(params.method, finalBody));
-  }
-  if (
-    (!response.ok || result.ok !== true) &&
-    shouldRetryTelegramWithoutThread({
-      body: finalBody,
-      result,
-    })
-  ) {
-    finalBody = { ...finalBody };
-    delete finalBody.message_thread_id;
-    ({ response, result } = await sendTelegram(params.method, finalBody));
-    if (
-      (!response.ok || result.ok !== true) &&
-      shouldRetryTelegramWithoutHtmlParseMode({
-        method: params.method,
-        body: finalBody,
-        result,
-      })
-    ) {
-      finalBody = { ...finalBody };
-      delete finalBody.parse_mode;
-      ({ response, result } = await sendTelegram(params.method, finalBody));
-    }
-  }
-  return { response, result };
+  return await withTelegramThreadFallback({
+    body: params.body,
+    attempt: async (effectiveBody) => {
+      let finalBody: Record<string, unknown> = { ...effectiveBody };
+      let { response, result } = await sendTelegram(params.method, finalBody);
+      if (
+        (!response.ok || result.ok !== true) &&
+        shouldRetryTelegramWithoutHtmlParseMode({
+          method: params.method,
+          body: finalBody,
+          result,
+        })
+      ) {
+        finalBody = { ...finalBody };
+        delete finalBody.parse_mode;
+        ({ response, result } = await sendTelegram(params.method, finalBody));
+      }
+      return { response, result };
+    },
+  });
 }
 
 function parseDiscordJsonBody(text: string): Record<string, unknown> {
@@ -3245,29 +3252,14 @@ async function sendTelegramPairingNotice(params: {
   if (canUseThreadId && params.topicId) {
     body.message_thread_id = params.topicId;
   }
-  const firstAttempt = await sendTelegram("sendMessage", body);
-  if (firstAttempt.response.ok && firstAttempt.result.ok === true) {
+  const attempt = await withTelegramThreadFallback({
+    body,
+    attempt: async (effectiveBody) => await sendTelegram("sendMessage", effectiveBody),
+  });
+  if (attempt.response.ok && attempt.result.ok === true) {
     return;
   }
-
-  // Topic IDs can become stale (or Telegram can reject edge-case topic IDs).
-  // Fall back to chat-level notices so bot-control commands still respond.
-  const description =
-    typeof firstAttempt.result.description === "string" ? firstAttempt.result.description : "";
-  const shouldRetryWithoutThread = canUseThreadId && /message thread not found/i.test(description);
-  if (shouldRetryWithoutThread) {
-    const retryBody: Record<string, unknown> = {
-      chat_id: params.chatId,
-      text: params.text,
-      ...(params.parseMode ? { parse_mode: params.parseMode } : {}),
-    };
-    const retryAttempt = await sendTelegram("sendMessage", retryBody);
-    if (retryAttempt.response.ok && retryAttempt.result.ok === true) {
-      return;
-    }
-    throw new Error(`telegram pairing notice failed (${retryAttempt.response.status})`);
-  }
-  throw new Error(`telegram pairing notice failed (${firstAttempt.response.status})`);
+  throw new Error(`telegram pairing notice failed (${attempt.response.status})`);
 }
 
 async function answerTelegramCallbackQuery(params: {
