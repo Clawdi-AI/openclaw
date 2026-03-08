@@ -538,6 +538,8 @@ describe("mux outbound routing", () => {
       cfg,
       channel: "telegram",
       sessionKey: "sess-tg",
+      to: "telegram:123456",
+      threadId: 2,
     });
 
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -558,6 +560,8 @@ describe("mux outbound routing", () => {
       action: "typing",
       channel: "telegram",
       sessionKey: "sess-tg",
+      to: "telegram:123456",
+      threadId: "2",
     });
   });
 

@@ -668,6 +668,8 @@ export async function handleMuxInboundHttpRequest(
                 channel: typingChannel,
                 accountId: ctx.AccountId,
                 sessionKey,
+                to: originatingTo,
+                ...(ctx.MessageThreadId != null ? { threadId: ctx.MessageThreadId } : {}),
               });
             } catch {
               // Best-effort typing signal for mux transport.

@@ -5269,6 +5269,11 @@ async function runOutboundAction(params: {
   channel: string;
   sessionKey: string;
   action?: string;
+  requestedTo?: unknown;
+  requestedThreadId?: number;
+  requestedDiscordThreadId?: string;
+  accountId?: string | null;
+  mode?: OutboundResolutionMode;
 }): Promise<SendResult> {
   if (params.action !== "typing") {
     return {
@@ -5286,6 +5291,11 @@ async function runOutboundAction(params: {
       tenantId: params.tenant.id,
       channel: params.channel,
       sessionKey: params.sessionKey,
+      mode: params.mode,
+      routeKeys: listTelegramOutboundRouteKeys({
+        requestedTo: params.requestedTo,
+        requestedThreadId: params.requestedThreadId,
+      }),
     });
     if (!resolvedRoute) {
       return {
@@ -5323,6 +5333,11 @@ async function runOutboundAction(params: {
       tenantId: params.tenant.id,
       channel: params.channel,
       sessionKey: params.sessionKey,
+      mode: params.mode,
+      routeKeys: await listDiscordOutboundRouteKeys({
+        requestedTo: params.requestedTo,
+        requestedThreadId: params.requestedDiscordThreadId,
+      }),
     });
     if (!resolvedRoute) {
       return {
@@ -5337,8 +5352,8 @@ async function runOutboundAction(params: {
     const boundRoute = resolvedRoute.route;
     const resolvedTarget = await resolveDiscordOutboundChannelId({
       boundRoute,
-      requestedTo: undefined,
-      requestedThreadId: undefined,
+      requestedTo: params.requestedTo,
+      requestedThreadId: params.requestedDiscordThreadId,
     });
     if (!resolvedTarget.ok) {
       return {
@@ -5366,6 +5381,11 @@ async function runOutboundAction(params: {
       tenantId: params.tenant.id,
       channel: params.channel,
       sessionKey: params.sessionKey,
+      mode: params.mode,
+      routeKeys: listWhatsAppOutboundRouteKeys({
+        requestedTo: params.requestedTo,
+        accountId: params.accountId,
+      }),
     });
     if (!resolvedRoute) {
       return {
@@ -8487,6 +8507,11 @@ const server = http.createServer(async (req, res) => {
           channel,
           sessionKey,
           action: operation.action,
+          requestedTo: payload.to,
+          requestedThreadId,
+          requestedDiscordThreadId,
+          accountId: readNonEmptyString(payload.accountId),
+          mode: outboundResolutionMode,
         });
       }
       if (!hasText && mediaUrls.length === 0 && !rawOutbound) {

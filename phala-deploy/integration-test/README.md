@@ -28,12 +28,13 @@ Implemented today:
 - generic sequential OpenAI script runner for multi-turn tool-call scenarios
 - Telegram round-trip coverage in both resolver modes for:
   - plain text reply
-  - AI streaming preview -> final edit
+  - AI streaming preview -> final edit, with typing before the first preview
   - reaction via `message` tool
   - document send via `message` tool
   - reaction -> document -> final text in one scripted multi-tool exchange
   - group plain-text reply
   - forum-topic plain-text reply
+  - forum-topic typing -> streaming preview -> final edit
   - `/reasoning` command menu with inline buttons
   - `/models` callback query -> callback acknowledgement -> `editMessageText`
 - assertions on:

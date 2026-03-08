@@ -369,7 +369,7 @@ Already covered:
 - mux-server resolver-mode behavior for `session-first` and `target-first`
 - real local Telegram E2E for pairing, DM round-trip, multi-action reply, file proxy, and forum/topic routing
 - mocked Telegram DM/group/forum round-trip integration with real OpenClaw + real mux-server in both resolver modes
-- mocked Telegram AI streaming preview/edit round-trip integration in both resolver modes
+- mocked Telegram AI streaming preview/edit round-trip integration in both resolver modes, including typing-before-preview and forum-topic thread targeting
 - mocked Telegram command-menu and callback-edit round-trip integration in both resolver modes
 - full OpenClaw inbound normalization matrix across Telegram, Discord, and WhatsApp channel shapes
 - full non-default-account mux bypass matrix across Telegram, Discord, and WhatsApp adapters

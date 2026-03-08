@@ -572,6 +572,8 @@ export async function sendTypingViaMux(params: {
   channel: SupportedMuxChannel;
   accountId?: string;
   sessionKey?: string | null;
+  to?: string;
+  threadId?: string | number;
 }): Promise<void> {
   const accountId = resolveMuxBusinessAccountId({
     cfg: params.cfg,
@@ -592,6 +594,8 @@ export async function sendTypingViaMux(params: {
     channel: params.channel,
     sessionKey: resolved.sessionKey,
     accountId,
+    ...(params.to ? { to: params.to } : {}),
+    ...(params.threadId != null ? { threadId: String(params.threadId) } : {}),
     openclawId: resolved.openclawId,
   };
 

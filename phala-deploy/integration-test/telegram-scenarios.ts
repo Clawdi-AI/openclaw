@@ -262,6 +262,15 @@ function buildMessageToolArgs(params: {
   return args;
 }
 
+function buildStreamingReplyPlan(expectedReply: string) {
+  const previewText = expectedReply.slice(0, 34);
+  const remainder = expectedReply.slice(previewText.length);
+  return streamingTextResponsePlan({
+    text: expectedReply,
+    deltas: [previewText, { text: remainder, delayMs: 50 }],
+  });
+}
+
 async function assertPlainTextOutbound(params: ScenarioContext): Promise<void> {
   const outboundSend = await params.harness.telegram.waitForMethodCall(
     "sendMessage",
@@ -299,6 +308,45 @@ async function assertStreamingTextPreviewAndFinalize(params: ScenarioContext): P
   );
   if (String(finalEdit.body.chat_id) !== params.chatId) {
     throw new Error(`expected final edit chat_id=${params.chatId}`);
+  }
+}
+
+async function assertTypingThenStreamingTextPreviewAndFinalize(
+  params: ScenarioContext,
+  threadId?: number,
+): Promise<void> {
+  await assertStreamingTextPreviewAndFinalize(params);
+  const previewText = params.expectedReply.slice(0, 34);
+  const relevantRequests = params.harness.telegram.requests.filter(
+    (request) =>
+      ["sendChatAction", "sendMessage", "editMessageText"].includes(request.method) &&
+      String(request.body.chat_id) === params.chatId,
+  );
+  const typingIndex = relevantRequests.findIndex(
+    (request) =>
+      request.method === "sendChatAction" &&
+      String(request.body.action) === "typing" &&
+      (threadId == null
+        ? request.body.message_thread_id == null
+        : Number(request.body.message_thread_id) === threadId),
+  );
+  const previewIndex = relevantRequests.findIndex(
+    (request) =>
+      request.method === "sendMessage" &&
+      String(request.body.text) === previewText &&
+      (threadId == null
+        ? request.body.message_thread_id == null
+        : Number(request.body.message_thread_id) === threadId),
+  );
+
+  if (typingIndex < 0) {
+    throw new Error("expected sendChatAction typing before streaming preview");
+  }
+  if (previewIndex < 0) {
+    throw new Error("expected streaming preview sendMessage");
+  }
+  if (typingIndex > previewIndex) {
+    throw new Error("expected typing indicator before streaming preview sendMessage");
   }
 }
 
@@ -344,15 +392,11 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
     expectedSessionKey: () => "agent:main:main",
     openAiResponder:
       ({ expectedReply }) =>
-      () => {
-        const previewText = expectedReply.slice(0, 34);
-        const remainder = expectedReply.slice(previewText.length);
-        return streamingTextResponsePlan({
-          text: expectedReply,
-          deltas: [previewText, { text: remainder, delayMs: 50 }],
-        });
-      },
-    assertOutbound: assertStreamingTextPreviewAndFinalize,
+      () =>
+        buildStreamingReplyPlan(expectedReply),
+    assertOutbound: async (params) => {
+      await assertTypingThenStreamingTextPreviewAndFinalize(params);
+    },
     assertOpenAi: assertDefaultOpenAiRequest,
     assertSessionEntry: ({ chatId, sessionEntry }) => {
       assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
@@ -658,6 +702,26 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
       if (Number(outboundSend.body.message_thread_id) !== 2) {
         throw new Error("expected sendMessage message_thread_id=2");
       }
+    },
+    assertOpenAi: assertDefaultOpenAiRequest,
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertTelegramForumSessionEntry({ chatId, threadId: 2, sessionEntry });
+    },
+  },
+  {
+    id: "forum-topic-streaming-preview-final-edit",
+    name: "Telegram forum topic typing precedes streaming preview and final edit",
+    chatId: "-100777",
+    pairingRouteKey: (chatId) => `telegram:default:chat:${chatId}:topic:2`,
+    buildInboundUpdate: buildTelegramForumTopicTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:group:${chatId}:topic:2`,
+    expectedSessionKey: (chatId) => `agent:main:telegram:group:${chatId}:topic:2`,
+    openAiResponder:
+      ({ expectedReply }) =>
+      () =>
+        buildStreamingReplyPlan(expectedReply),
+    assertOutbound: async (params) => {
+      await assertTypingThenStreamingTextPreviewAndFinalize(params, 2);
     },
     assertOpenAi: assertDefaultOpenAiRequest,
     assertSessionEntry: ({ chatId, sessionEntry }) => {

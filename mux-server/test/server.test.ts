@@ -2335,6 +2335,66 @@ describe("mux server", () => {
     });
   });
 
+  test("telegram typing action falls back to explicit target for canonical session", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/sendChatAction") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, result: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-TYPING-CANON",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:424242",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-TYPING-CANON",
+      sessionKey: "agent:main:telegram:direct:424242",
+    });
+    expect(claim.status).toBe(200);
+
+    const typing = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        op: "action",
+        action: "typing",
+        channel: "telegram",
+        sessionKey: "agent:main:main",
+        to: "telegram:424242",
+      }),
+    });
+
+    expect(typing.status).toBe(200);
+    expect(await typing.json()).toEqual({ ok: true });
+    expect(telegramRequests).toHaveLength(1);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "424242",
+      action: "typing",
+    });
+  });
+
   test("discord typing action via /send triggers typing on bound DM route", async () => {
     const discordRequests: Array<{
       method: string;
