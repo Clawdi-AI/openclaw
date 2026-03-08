@@ -2044,6 +2044,16 @@ function shouldRetryTelegramWithoutHtmlParseMode(params: {
   return TELEGRAM_PARSE_ERR_RE.test(readTelegramResultDescription(params.result));
 }
 
+function shouldRetryTelegramWithoutThread(params: {
+  body: Record<string, unknown>;
+  result: Record<string, unknown>;
+}): boolean {
+  return (
+    readPositiveInt(params.body.message_thread_id) !== undefined &&
+    /message thread not found/i.test(readTelegramResultDescription(params.result))
+  );
+}
+
 async function sendTelegram(method: string, body: Record<string, unknown>) {
   const token = requireTelegramBotToken();
   const url = `${telegramApiBaseUrl}/bot${token}/${method}`;
@@ -2087,6 +2097,53 @@ async function sendTelegram(method: string, body: Record<string, unknown>) {
     body: JSON.stringify(body),
   });
   const result = (await response.json()) as Record<string, unknown>;
+  return { response, result };
+}
+
+async function sendTelegramWithFallbacks(params: {
+  method: string;
+  body: Record<string, unknown>;
+}): Promise<{
+  response: Response;
+  result: Record<string, unknown>;
+}> {
+  let finalBody: Record<string, unknown> = { ...params.body };
+  let { response, result } = await sendTelegram(params.method, finalBody);
+  if (
+    (!response.ok || result.ok !== true) &&
+    shouldRetryTelegramWithoutHtmlParseMode({
+      method: params.method,
+      body: finalBody,
+      result,
+    })
+  ) {
+    finalBody = { ...finalBody };
+    delete finalBody.parse_mode;
+    ({ response, result } = await sendTelegram(params.method, finalBody));
+  }
+  if (
+    (!response.ok || result.ok !== true) &&
+    shouldRetryTelegramWithoutThread({
+      body: finalBody,
+      result,
+    })
+  ) {
+    finalBody = { ...finalBody };
+    delete finalBody.message_thread_id;
+    ({ response, result } = await sendTelegram(params.method, finalBody));
+    if (
+      (!response.ok || result.ok !== true) &&
+      shouldRetryTelegramWithoutHtmlParseMode({
+        method: params.method,
+        body: finalBody,
+        result,
+      })
+    ) {
+      finalBody = { ...finalBody };
+      delete finalBody.parse_mode;
+      ({ response, result } = await sendTelegram(params.method, finalBody));
+    }
+  }
   return { response, result };
 }
 
@@ -8611,19 +8668,10 @@ const server = http.createServer(async (req, res) => {
               }
             }
           }
-          let { response, result } = await sendTelegram(telegramMethod, finalBody);
-          if (
-            (!response.ok || result.ok !== true) &&
-            shouldRetryTelegramWithoutHtmlParseMode({
-              method: telegramMethod,
-              body: finalBody,
-              result,
-            })
-          ) {
-            const retryBody: Record<string, unknown> = { ...finalBody };
-            delete retryBody.parse_mode;
-            ({ response, result } = await sendTelegram(telegramMethod, retryBody));
-          }
+          const { response, result } = await sendTelegramWithFallbacks({
+            method: telegramMethod,
+            body: finalBody,
+          });
           if (!response.ok || result.ok !== true) {
             // Telegram returns 400 "message is not modified" when an editMessageText
             // call produces the same rendered text.  The direct bot path (grammY)

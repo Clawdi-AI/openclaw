@@ -6,6 +6,7 @@ import {
 } from "./fake-openai.js";
 import { hasJsonFixture, loadJsonFixture } from "./fixtures.js";
 import type { MuxOpenClawHarness } from "./mux-openclaw-harness.js";
+import { waitForCondition } from "./test-utils.js";
 
 type TelegramMessageUpdate = {
   update_id: number;
@@ -98,6 +99,7 @@ export type TelegramMuxRoundTripScenario = {
     inboundText: string;
     expectedReply: string;
   }) => (request: FakeOpenAiRequest) => FakeOpenAiResponsePlan;
+  beforeDispatch?: (params: ScenarioContext) => Promise<void>;
   workspaceFiles?: Record<string, string | Uint8Array>;
   assertOutbound: (params: ScenarioContext) => Promise<void>;
   assertOpenAi?: (params: ScenarioContext) => Promise<void>;
@@ -379,6 +381,31 @@ async function assertTypingThenStreamingTextPreviewAndFinalize(
   }
   if (typingIndex > previewIndex) {
     throw new Error("expected typing indicator before streaming preview sendMessage");
+  }
+}
+
+async function assertForumTopicThreadFallback(params: ScenarioContext): Promise<void> {
+  const requests = await waitForCondition(
+    () => {
+      const matching = params.harness.telegram
+        .getMethodCalls("sendMessage")
+        .filter(
+          (request) =>
+            String(request.body.chat_id) === params.chatId &&
+            String(request.body.text).includes(params.expectedReply),
+        );
+      return matching.length >= 2 ? matching : undefined;
+    },
+    OUTBOUND_TIMEOUT_MS,
+    "timed out waiting for forum topic thread fallback sendMessage sequence",
+  );
+  const initial = requests.find((request) => Number(request.body.message_thread_id) === 2);
+  const fallback = requests.find((request) => request.body.message_thread_id == null);
+  if (!initial) {
+    throw new Error("expected initial forum-topic sendMessage with message_thread_id=2");
+  }
+  if (!fallback) {
+    throw new Error("expected fallback forum-topic sendMessage without message_thread_id");
   }
 }
 
@@ -860,6 +887,32 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
         throw new Error("expected sendMessage message_thread_id=2");
       }
     },
+    assertOpenAi: assertDefaultOpenAiRequest,
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertTelegramForumSessionEntry({ chatId, threadId: 2, sessionEntry });
+    },
+  },
+  {
+    id: "forum-topic-thread-deleted-fallback",
+    name: "Telegram forum topic retries without thread when the topic is gone",
+    chatId: "-100777",
+    pairingRouteKey: (chatId) => `telegram:default:chat:${chatId}:topic:2`,
+    buildInboundUpdate: buildTelegramForumTopicTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:group:${chatId}:topic:2`,
+    expectedSessionKey: (chatId) => `agent:main:telegram:group:${chatId}:topic:2`,
+    openAiResponder: ({ expectedReply }) =>
+      createSequentialResponseScript([{ type: "final_text", text: expectedReply }]),
+    beforeDispatch: async ({ harness }) => {
+      harness.telegram.failNextMethod("sendMessage", {
+        status: 400,
+        body: {
+          ok: false,
+          error_code: 400,
+          description: "Bad Request: message thread not found",
+        },
+      });
+    },
+    assertOutbound: assertForumTopicThreadFallback,
     assertOpenAi: assertDefaultOpenAiRequest,
     assertSessionEntry: ({ chatId, sessionEntry }) => {
       assertTelegramForumSessionEntry({ chatId, threadId: 2, sessionEntry });

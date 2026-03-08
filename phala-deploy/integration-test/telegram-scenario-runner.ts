@@ -34,6 +34,12 @@ async function main(): Promise<void> {
       workspaceFiles: scenario.workspaceFiles,
     },
     async (harness) => {
+      await scenario.beforeDispatch?.({
+        harness,
+        chatId: scenario.chatId,
+        inboundText,
+        expectedReply,
+      });
       harness.telegram.enqueueUpdate(
         scenario.buildInboundUpdate({
           chatId: scenario.chatId,
