@@ -67,6 +67,7 @@ type StartHarnessParams = {
   llmReplyText: string;
   resolutionMode: "session-first" | "target-first";
   minimalGateway?: boolean;
+  telegramStreamMode?: "off" | "partial" | "block";
   openAiResponder?: (request: FakeOpenAiRequest) => FakeOpenAiResponsePlan;
   workspaceFiles?: Record<string, string | Uint8Array>;
 };
@@ -110,6 +111,7 @@ function buildHarnessConfig(params: {
   openAiBaseUrl: string;
   muxPort: number;
   gatewayPort: number;
+  telegramStreamMode?: "off" | "partial" | "block";
 }): OpenClawConfig {
   return {
     gateway: {
@@ -152,6 +154,7 @@ function buildHarnessConfig(params: {
         dmPolicy: "open",
         allowFrom: ["*"],
         groupPolicy: "open",
+        streamMode: params.telegramStreamMode,
         reactionLevel: "minimal",
         actions: { reactions: true },
         mux: { enabled: true, timeoutMs: 10_000 },
@@ -334,6 +337,7 @@ export async function startMuxOpenClawHarness(
       openAiBaseUrl: openai.baseUrl,
       muxPort,
       gatewayPort,
+      telegramStreamMode: params.telegramStreamMode,
     });
     await writeFile(paths.configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 

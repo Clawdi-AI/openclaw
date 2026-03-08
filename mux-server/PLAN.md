@@ -372,7 +372,7 @@ Already covered:
 - mocked Telegram AI streaming preview/edit round-trip integration in both resolver modes, including typing-before-preview and forum-topic thread targeting
 - mocked Telegram command-menu and callback-edit round-trip integration in both resolver modes
 - mocked Telegram media sends for photo and voice via the real `message` tool surface in both resolver modes
-- mocked Telegram restart recovery for gateway `send` after queued delivery failure in both resolver modes
+- mocked Telegram restart recovery for both gateway `send` and agent-generated final replies after queued delivery failure in both resolver modes
 - full OpenClaw inbound normalization matrix across Telegram, Discord, and WhatsApp channel shapes
 - full non-default-account mux bypass matrix across Telegram, Discord, and WhatsApp adapters
 - full old/new queue persistence compatibility matrix
@@ -380,7 +380,6 @@ Already covered:
 
 Still incomplete:
 
-- delayed-send mocked/local E2E coverage beyond the gateway `send` restart path
 - full mux-server negative safety matrix beyond the no-safe-target canonical cases
 - manual release checks for Discord and WhatsApp
 
@@ -400,7 +399,7 @@ Still incomplete:
 - Current status: plain text, reaction, document, photo, and voice scripted Telegram DM scenarios are covered; plain-text group/forum-topic scenarios are covered in both resolver modes; and callback-driven Telegram command/edit flows are covered for `/reasoning` and `/models`. Poll is still pending because the real current-channel Telegram message-tool schema does not expose `poll` yet, so a mocked poll round-trip should wait for a real prompt-surface path instead of testing an artificial one.
 - Current captured-fixture status:
   - golden real payloads are in place for DM text, group text, forum-topic text, callback query, photo, document, and voice
-- Current mocked Telegram priority after restart/send recovery: delayed-send coverage, then broader safety/mixed-fleet cases.
+- Current mocked Telegram priority after restart/send recovery: broader safety cases, then mixed-fleet coverage.
 
 ### A. Required automated coverage: OpenClaw unit/contract tests
 

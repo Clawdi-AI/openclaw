@@ -39,7 +39,9 @@ Implemented today:
   - forum-topic typing -> streaming preview -> final edit
   - `/reasoning` command menu with inline buttons
   - `/models` callback query -> callback acknowledgement -> `editMessageText`
-  - gateway `send` restart recovery after queued Telegram failure
+  - restart recovery after queued Telegram failure for:
+    - gateway `send`
+    - agent-generated final replies
 - assertions on:
   - final Telegram outbound request
   - OpenAI prompt receipt
