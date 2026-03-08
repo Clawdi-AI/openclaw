@@ -72,6 +72,18 @@ type ScenarioContext = {
 
 const OUTBOUND_TIMEOUT_MS = 60_000;
 const OPENAI_TIMEOUT_MS = 30_000;
+const PNG_FIXTURE = Uint8Array.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+  0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0x99, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+  0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92, 0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+  0x44, 0xae, 0x42, 0x60, 0x82,
+]);
+const OGG_FIXTURE = Uint8Array.from([
+  0x4f, 0x67, 0x67, 0x53, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x01, 0x1e, 0x01, 0x76, 0x6f, 0x72, 0x62, 0x69,
+  0x73,
+]);
 
 export type TelegramMuxRoundTripScenario = {
   id: string;
@@ -508,6 +520,131 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
       const caption = typeof document.body.caption === "string" ? document.body.caption : "";
       if (caption !== "report") {
         throw new Error("expected document caption to equal report");
+      }
+    },
+    assertOpenAi: async ({ harness, inboundText }) => {
+      await harness.openai.waitForRequest(
+        (request) => request.lastUserText.includes(inboundText),
+        OPENAI_TIMEOUT_MS,
+      );
+      await harness.openai.waitForRequestCount(2, OUTBOUND_TIMEOUT_MS);
+    },
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
+    },
+  },
+  {
+    id: "dm-photo-via-message-tool",
+    name: "Telegram DM photo send via message tool",
+    chatId: "424242",
+    buildInboundUpdate: buildTelegramDmTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    expectedSessionKey: () => "agent:main:main",
+    workspaceFiles: {
+      "fixtures/pixel.png": PNG_FIXTURE,
+    },
+    openAiResponder: ({ chatId }) =>
+      createSequentialResponseScript([
+        {
+          type: "tool_call",
+          name: "message",
+          callId: "call_photo_1",
+          args: buildMessageToolArgs({
+            action: "send",
+            chatId,
+            path: "fixtures/pixel.png",
+            message: "photo caption",
+          }),
+        },
+        {
+          type: "final_text",
+          text: ({ toolOutputs }) => {
+            if (!getFunctionCallOutput(toolOutputs, "call_photo_1")) {
+              throw new Error("missing message tool output for photo script");
+            }
+            return "";
+          },
+        },
+      ]),
+    assertOutbound: async ({ harness, chatId }) => {
+      const photo = await harness.telegram.waitForMethodCall(
+        "sendPhoto",
+        (request) => String(request.body.chat_id) === chatId,
+        OUTBOUND_TIMEOUT_MS,
+      );
+      if (String(photo.body.chat_id) !== chatId) {
+        throw new Error(`expected photo chat_id=${chatId}`);
+      }
+      if (photo.body.photo !== "<<multipart-file>>") {
+        throw new Error("expected multipart photo upload");
+      }
+      const caption = typeof photo.body.caption === "string" ? photo.body.caption : "";
+      if (caption !== "photo caption") {
+        throw new Error("expected photo caption to equal photo caption");
+      }
+    },
+    assertOpenAi: async ({ harness, inboundText }) => {
+      await harness.openai.waitForRequest(
+        (request) => request.lastUserText.includes(inboundText),
+        OPENAI_TIMEOUT_MS,
+      );
+      await harness.openai.waitForRequestCount(2, OUTBOUND_TIMEOUT_MS);
+    },
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
+    },
+  },
+  {
+    id: "dm-voice-via-message-tool",
+    name: "Telegram DM voice send via message tool",
+    chatId: "424242",
+    buildInboundUpdate: buildTelegramDmTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    expectedSessionKey: () => "agent:main:main",
+    workspaceFiles: {
+      "fixtures/note.ogg": OGG_FIXTURE,
+    },
+    openAiResponder: ({ chatId }) =>
+      createSequentialResponseScript([
+        {
+          type: "tool_call",
+          name: "message",
+          callId: "call_voice_1",
+          args: {
+            ...buildMessageToolArgs({
+              action: "send",
+              chatId,
+              path: "fixtures/note.ogg",
+              message: "voice note",
+            }),
+            asVoice: true,
+          },
+        },
+        {
+          type: "final_text",
+          text: ({ toolOutputs }) => {
+            if (!getFunctionCallOutput(toolOutputs, "call_voice_1")) {
+              throw new Error("missing message tool output for voice script");
+            }
+            return "";
+          },
+        },
+      ]),
+    assertOutbound: async ({ harness, chatId }) => {
+      const voice = await harness.telegram.waitForMethodCall(
+        "sendVoice",
+        (request) => String(request.body.chat_id) === chatId,
+        OUTBOUND_TIMEOUT_MS,
+      );
+      if (String(voice.body.chat_id) !== chatId) {
+        throw new Error(`expected voice chat_id=${chatId}`);
+      }
+      if (voice.body.voice !== "<<multipart-file>>") {
+        throw new Error("expected multipart voice upload");
+      }
+      const caption = typeof voice.body.caption === "string" ? voice.body.caption : "";
+      if (caption !== "voice note") {
+        throw new Error("expected voice caption to equal voice note");
       }
     },
     assertOpenAi: async ({ harness, inboundText }) => {

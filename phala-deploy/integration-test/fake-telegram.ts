@@ -253,6 +253,11 @@ export class FakeTelegramApi {
       method === "sendMessage" ||
       method === "editMessageText" ||
       method === "sendDocument" ||
+      method === "sendPhoto" ||
+      method === "sendVoice" ||
+      method === "sendAudio" ||
+      method === "sendVideo" ||
+      method === "sendVideoNote" ||
       method === "sendPoll"
     ) {
       const chatId = toTelegramChatId(body.chat_id);

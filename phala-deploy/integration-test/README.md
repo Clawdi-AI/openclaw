@@ -31,6 +31,8 @@ Implemented today:
   - AI streaming preview -> final edit, with typing before the first preview
   - reaction via `message` tool
   - document send via `message` tool
+  - photo send via `message` tool
+  - voice send via `message` tool
   - reaction -> document -> final text in one scripted multi-tool exchange
   - group plain-text reply
   - forum-topic plain-text reply
@@ -57,7 +59,6 @@ Current test files:
 
 Not covered yet:
 
-- Telegram media/voice mocked round-trip
 - Telegram poll round-trip from the real current-channel prompt/tool surface
 - mixed old/new OpenClaw fleets against one mux-server instance
 - restart and retry/queue scenarios
@@ -136,8 +137,7 @@ Near term:
 1. replace the current DM hand-authored fixture with a sanitized real Telegram sample
 2. add table-driven Telegram scenarios that run in both resolver modes
 3. replace the DM template fixture with a sanitized real DM payload
-4. add mocked media/voice round-trip cases
-5. add restart and delayed-send coverage
+4. add restart and delayed-send coverage
 
 Next:
 

@@ -371,6 +371,7 @@ Already covered:
 - mocked Telegram DM/group/forum round-trip integration with real OpenClaw + real mux-server in both resolver modes
 - mocked Telegram AI streaming preview/edit round-trip integration in both resolver modes, including typing-before-preview and forum-topic thread targeting
 - mocked Telegram command-menu and callback-edit round-trip integration in both resolver modes
+- mocked Telegram media sends for photo and voice via the real `message` tool surface in both resolver modes
 - full OpenClaw inbound normalization matrix across Telegram, Discord, and WhatsApp channel shapes
 - full non-default-account mux bypass matrix across Telegram, Discord, and WhatsApp adapters
 - full old/new queue persistence compatibility matrix
@@ -395,8 +396,8 @@ Still incomplete:
   - tool call -> tool output -> final text
   - tool call sequences that trigger reactions, documents/files, polls, and other message actions
 - OpenAI fixture design should prioritize protocol compatibility and path coverage over model realism.
-- Current status: plain text, reaction, and document scripted Telegram DM scenarios are covered; plain-text group/forum-topic scenarios are covered in both resolver modes; and callback-driven Telegram command/edit flows are covered for `/reasoning` and `/models`. Poll is still pending because the real current-channel Telegram message-tool schema does not expose `poll` yet, so a mocked poll round-trip should wait for a real prompt-surface path instead of testing an artificial one.
-- Current mocked Telegram priority after streaming: media/voice breadth, then restart/retry behavior, because those are the main remaining user-visible mux-path gaps.
+- Current status: plain text, reaction, document, photo, and voice scripted Telegram DM scenarios are covered; plain-text group/forum-topic scenarios are covered in both resolver modes; and callback-driven Telegram command/edit flows are covered for `/reasoning` and `/models`. Poll is still pending because the real current-channel Telegram message-tool schema does not expose `poll` yet, so a mocked poll round-trip should wait for a real prompt-surface path instead of testing an artificial one.
+- Current mocked Telegram priority after media/voice: replace template fixtures with sanitized real Telegram packets, then restart/retry behavior.
 
 ### A. Required automated coverage: OpenClaw unit/contract tests
 
