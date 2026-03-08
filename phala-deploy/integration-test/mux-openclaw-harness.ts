@@ -10,7 +10,6 @@ import {
   resolveStorePath,
 } from "../../src/config/sessions.js";
 import { __resetMuxJwksCacheForTest } from "../../src/gateway/mux-jwt.js";
-import { startGatewayServer } from "../../src/gateway/server.js";
 import { buildOpenAiResponsesProviderConfig } from "../../src/gateway/test-openai-responses-model.js";
 import { loadOrCreateDeviceIdentity } from "../../src/infra/device-identity.js";
 import { captureEnv } from "../../src/test-utils/env.js";
@@ -36,6 +35,7 @@ const CLAIM_CODE = "PAIR-TG-INTEGRATION-1";
 const INTEGRATION_ENV_KEYS = [
   "HOME",
   "USERPROFILE",
+  "VITEST",
   "OPENCLAW_STATE_DIR",
   "OPENCLAW_CONFIG_PATH",
   "OPENCLAW_DISABLE_CONFIG_CACHE",
@@ -85,20 +85,23 @@ function buildHarnessEnv(
   paths: HarnessPaths,
   params?: { minimalGateway?: boolean },
 ): Record<string, string> {
+  const isMinimalGateway = params?.minimalGateway !== false;
   return {
     HOME: paths.tempDir,
     USERPROFILE: paths.tempDir,
+    VITEST: "1",
     OPENCLAW_STATE_DIR: paths.stateDir,
     OPENCLAW_CONFIG_PATH: paths.configPath,
     OPENCLAW_DISABLE_CONFIG_CACHE: "1",
     OPENCLAW_SKIP_BROWSER_CONTROL_SERVER: "1",
     OPENCLAW_SKIP_GMAIL_WATCHER: "1",
     OPENCLAW_SKIP_CANVAS_HOST: "1",
-    OPENCLAW_SKIP_CHANNELS: "1",
     OPENCLAW_SKIP_PROVIDERS: "1",
     OPENCLAW_SKIP_CRON: "1",
     OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
-    ...(params?.minimalGateway === false ? {} : { OPENCLAW_TEST_MINIMAL_GATEWAY: "1" }),
+    ...(isMinimalGateway
+      ? { OPENCLAW_SKIP_CHANNELS: "1", OPENCLAW_TEST_MINIMAL_GATEWAY: "1" }
+      : {}),
   };
 }
 
@@ -136,6 +139,12 @@ function buildHarnessConfig(params: {
       mode: "replace",
       providers: {
         openai: buildOpenAiResponsesProviderConfig(params.openAiBaseUrl),
+      },
+    },
+    plugins: {
+      enabled: false,
+      slots: {
+        memory: "none",
       },
     },
     channels: {
@@ -218,12 +227,21 @@ async function startMuxServer(params: {
 
 async function startGatewayProcess(params: {
   port: number;
-}): Promise<Awaited<ReturnType<typeof startGatewayServer>>> {
-  return await startGatewayServer(params.port, {
-    bind: "loopback",
-    auth: { mode: "token", token: GATEWAY_TOKEN },
-    controlUiEnabled: false,
+  env: Record<string, string>;
+}): Promise<StartedNodeProcess> {
+  const started = startNodeTsxProcess({
+    cwd: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".."),
+    entrypoint: "phala-deploy/integration-test/gateway-process.ts",
+    args: [String(params.port)],
+    env: params.env,
   });
+  await waitForCondition(
+    () =>
+      started.logs.find((line) => line.includes(`__INTEGRATION_GATEWAY_READY__:${params.port}`)),
+    10_000,
+    `gateway process did not become ready\n${started.logs.join("").slice(-8_000)}`,
+  );
+  return started;
 }
 
 async function claimTelegramPairing(params: {
@@ -236,6 +254,7 @@ async function claimTelegramPairing(params: {
       Authorization: `Bearer ${TENANT_API_KEY}`,
       "Content-Type": "application/json; charset=utf-8",
     },
+    signal: AbortSignal.timeout(5_000),
     body: JSON.stringify({
       code: CLAIM_CODE,
       sessionKey: params.claimedSessionKey,
@@ -288,7 +307,8 @@ export async function startMuxOpenClawHarness(
   });
 
   try {
-    Object.assign(process.env, buildHarnessEnv(paths, { minimalGateway: params.minimalGateway }));
+    const harnessEnv = buildHarnessEnv(paths, { minimalGateway: params.minimalGateway });
+    Object.assign(process.env, harnessEnv);
     await mkdir(paths.workspaceDir, { recursive: true });
     if (params.workspaceFiles) {
       for (const [relativePath, content] of Object.entries(params.workspaceFiles)) {
@@ -317,9 +337,9 @@ export async function startMuxOpenClawHarness(
     });
     await writeFile(paths.configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 
-    let gateway = await startGatewayProcess({ port: gatewayPort });
+    let gateway = await startGatewayProcess({ port: gatewayPort, env: harnessEnv });
     cleanup.defer(async () => {
-      await gateway.close({ reason: "integration harness shutdown" });
+      await stopChildProcess(gateway.process);
     });
 
     const muxServer = await startMuxServer({
@@ -367,9 +387,9 @@ export async function startMuxOpenClawHarness(
         );
       },
       restartGateway: async () => {
-        await gateway.close({ reason: "integration harness restart" });
+        await stopChildProcess(gateway.process);
         resetIntegrationRuntimeState();
-        gateway = await startGatewayProcess({ port: gatewayPort });
+        gateway = await startGatewayProcess({ port: gatewayPort, env: harnessEnv });
       },
       close: async () => {
         await cleanup.close();

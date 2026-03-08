@@ -178,8 +178,14 @@ export async function waitForHttpOk(params: {
   const deadline = Date.now() + params.timeoutMs;
   while (Date.now() < deadline) {
     params.onTick?.();
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
     try {
-      const response = await fetch(params.url);
+      const response = await fetch(params.url, {
+        signal: AbortSignal.timeout(Math.min(remainingMs, 1_000)),
+      });
       if (response.ok) {
         return;
       }

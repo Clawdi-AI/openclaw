@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { FakeOpenAiRequest, FakeOpenAiResponsePlan } from "./fake-openai.js";
 import {
   createSequentialResponseScript,
@@ -85,6 +88,7 @@ const OGG_FIXTURE = Uint8Array.from([
   0x00, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x01, 0x1e, 0x01, 0x76, 0x6f, 0x72, 0x62, 0x69,
   0x73,
 ]);
+const TMP_FIXTURE_DIR = path.join(os.tmpdir(), "openclaw-integration-fixtures");
 
 export type TelegramMuxRoundTripScenario = {
   id: string;
@@ -116,6 +120,17 @@ function loadTelegramFixture<T>(params: { goldenPath: string; fallbackPath: stri
   return loadFixture<T>(
     hasJsonFixture(params.goldenPath) ? params.goldenPath : params.fallbackPath,
   );
+}
+
+function resolveTempFixturePath(fileName: string): string {
+  return path.join(TMP_FIXTURE_DIR, fileName);
+}
+
+async function writeTempFixture(fileName: string, content: string | Uint8Array): Promise<string> {
+  const filePath = resolveTempFixturePath(fileName);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, content);
+  return filePath;
 }
 
 function buildTelegramDmTextUpdate(params: {
@@ -406,6 +421,41 @@ async function assertForumTopicThreadFallback(params: ScenarioContext): Promise<
   }
   if (!fallback) {
     throw new Error("expected fallback forum-topic sendMessage without message_thread_id");
+  }
+}
+
+async function assertMultiAttachmentOutbound(params: ScenarioContext): Promise<void> {
+  const photo = await params.harness.telegram.waitForMethodCall(
+    "sendPhoto",
+    (request) => String(request.body.chat_id) === params.chatId,
+    OUTBOUND_TIMEOUT_MS,
+  );
+  if (String(photo.body.chat_id) !== params.chatId) {
+    throw new Error(`expected photo chat_id=${params.chatId}`);
+  }
+  if (photo.body.photo !== "<<multipart-file>>") {
+    throw new Error("expected first attachment to upload a photo");
+  }
+  const photoCaption = typeof photo.body.caption === "string" ? photo.body.caption : "";
+  if (photoCaption !== params.expectedReply) {
+    throw new Error(`expected first attachment caption to equal ${params.expectedReply}`);
+  }
+
+  const document = await params.harness.telegram.waitForMethodCall(
+    "sendDocument",
+    (request) => String(request.body.chat_id) === params.chatId,
+    OUTBOUND_TIMEOUT_MS,
+  );
+  if (String(document.body.chat_id) !== params.chatId) {
+    throw new Error(`expected document chat_id=${params.chatId}`);
+  }
+  if (document.body.document !== "<<multipart-file>>") {
+    throw new Error("expected second attachment to upload a document");
+  }
+  const documentCaption =
+    typeof document.body.caption === "string" ? document.body.caption : undefined;
+  if (documentCaption != null && documentCaption.trim() !== "") {
+    throw new Error("expected second attachment to omit caption");
   }
 }
 
@@ -701,6 +751,33 @@ export const TELEGRAM_MUX_ROUND_TRIP_SCENARIOS: TelegramMuxRoundTripScenario[] =
       );
       await harness.openai.waitForRequestCount(2, OUTBOUND_TIMEOUT_MS);
     },
+    assertSessionEntry: ({ chatId, sessionEntry }) => {
+      assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
+    },
+  },
+  {
+    id: "dm-multi-attachment-reply-directives",
+    name: "Telegram DM multiple MEDIA directives fan out into sequential sends",
+    chatId: "424242",
+    buildInboundUpdate: buildTelegramDmTextUpdate,
+    claimSessionKey: (chatId) => `agent:main:telegram:direct:${chatId}`,
+    expectedSessionKey: () => "agent:main:main",
+    openAiResponder: ({ expectedReply }) =>
+      createSequentialResponseScript([
+        {
+          type: "final_text",
+          text:
+            `MEDIA:${resolveTempFixturePath("multi-attachment-pixel.png")}\n` +
+            `MEDIA:${resolveTempFixturePath("multi-attachment-report.txt")}\n` +
+            expectedReply,
+        },
+      ]),
+    beforeDispatch: async () => {
+      await writeTempFixture("multi-attachment-pixel.png", PNG_FIXTURE);
+      await writeTempFixture("multi-attachment-report.txt", "integration document payload\n");
+    },
+    assertOutbound: assertMultiAttachmentOutbound,
+    assertOpenAi: assertDefaultOpenAiRequest,
     assertSessionEntry: ({ chatId, sessionEntry }) => {
       assertDefaultTelegramSessionEntry({ chatId, sessionEntry });
     },

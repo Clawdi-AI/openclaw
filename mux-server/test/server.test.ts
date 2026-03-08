@@ -2026,6 +2026,86 @@ describe("mux server", () => {
     expect(telegramRequests[1]?.message_thread_id).toBeUndefined();
   });
 
+  test("telegram outbound raw sendMessage does not retry when chat is not found", async () => {
+    const telegramRequests: Array<Record<string, unknown>> = [];
+    const telegramApi = await startHttpServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/botdummy-token/sendMessage") {
+        telegramRequests.push(await readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: chat not found",
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-TG-RAW-CHAT-NOT-FOUND",
+          channel: "telegram",
+          routeKey: "telegram:default:chat:-100123:topic:2",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_TELEGRAM_API_BASE_URL: telegramApi.url,
+      },
+    });
+
+    const claim = await claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-TG-RAW-CHAT-NOT-FOUND",
+      sessionKey: "agent:main:telegram:group:-100123:topic:2",
+    });
+    expect(claim.status).toBe(200);
+
+    const outbound = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "telegram",
+        sessionKey: "agent:main:telegram:group:-100123:topic:2",
+        raw: {
+          telegram: {
+            method: "sendMessage",
+            body: {
+              text: "do not retry chat-not-found",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(outbound.status).toBe(502);
+    expect(await outbound.json()).toMatchObject({
+      ok: false,
+      error: "telegram raw send failed",
+      details: {
+        ok: false,
+        error_code: 400,
+        description: "Bad Request: chat not found",
+      },
+    });
+    expect(telegramRequests).toHaveLength(1);
+    expect(telegramRequests[0]).toMatchObject({
+      chat_id: "-100123",
+      message_thread_id: 2,
+      text: "do not retry chat-not-found",
+    });
+  });
+
   test("telegram outbound raw editMessageText retries without HTML parse_mode on parse errors", async () => {
     const telegramRequests: Array<Record<string, unknown>> = [];
     const telegramApi = await startHttpServer(async (req, res) => {

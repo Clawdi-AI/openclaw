@@ -161,6 +161,29 @@ describe("buildEmbeddedRunPayloads", () => {
     expect(payloads[0]?.text).toBe("All good");
   });
 
+  it("restores MEDIA directives from the final assistant message when streamed assistant text lost them", () => {
+    const payloads = buildPayloads({
+      assistantTexts: ["Caption only"],
+      lastAssistant: makeAssistant({
+        stopReason: "stop",
+        errorMessage: undefined,
+        content: [
+          {
+            type: "text",
+            text: "MEDIA:fixtures/pixel.png\nMEDIA:fixtures/report.txt\nCaption only",
+          },
+        ],
+      }),
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({
+      text: "Caption only",
+      mediaUrls: ["fixtures/pixel.png", "fixtures/report.txt"],
+      mediaUrl: "fixtures/pixel.png",
+    });
+  });
+
   it("adds tool error fallback when the assistant only invoked tools", () => {
     const payloads = buildPayloads({
       lastAssistant: makeAssistant({

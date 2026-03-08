@@ -18,7 +18,6 @@ import { resolveReplyToMode } from "../auto-reply/reply/reply-threading.js";
 import { routeReply } from "../auto-reply/reply/route-reply.js";
 import type { MsgContext } from "../auto-reply/templating.js";
 import { shouldAckReaction, type AckReactionScope } from "../channels/ack-reactions.js";
-import { normalizeChannelId } from "../channels/plugins/index.js";
 import {
   asMuxRecord,
   buildTelegramRawEditMessageText,
@@ -39,6 +38,7 @@ import {
   sendTypingViaMux,
   sendViaMux,
 } from "../channels/plugins/outbound/mux.js";
+import { normalizeChannelId } from "../channels/registry.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { loadConfig } from "../config/config.js";
 import { logVerbose, warn } from "../globals.js";

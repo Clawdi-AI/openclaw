@@ -43,4 +43,48 @@ describe("buildReplyPayloads media filter integration", () => {
     // Text filter removes the payload entirely (text matched), so nothing remains.
     expect(replyPayloads).toHaveLength(0);
   });
+
+  it("keeps final media payloads when block streaming only sent text previews", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: {
+        enqueue: () => {},
+        flush: async () => {},
+        stop: () => {},
+        hasBuffered: () => false,
+        didStream: () => true,
+        isAborted: () => false,
+        hasSentPayload: () => false,
+      },
+      payloads: [{ text: "caption", mediaUrls: ["file:///tmp/a.png", "file:///tmp/b.txt"] }],
+    });
+
+    expect(replyPayloads).toEqual([
+      expect.objectContaining({
+        text: "caption",
+        mediaUrl: "file:///tmp/a.png",
+        mediaUrls: ["file:///tmp/a.png", "file:///tmp/b.txt"],
+      }),
+    ]);
+  });
+
+  it("still drops final payloads already sent by the block pipeline", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: {
+        enqueue: () => {},
+        flush: async () => {},
+        stop: () => {},
+        hasBuffered: () => false,
+        didStream: () => true,
+        isAborted: () => false,
+        hasSentPayload: () => true,
+      },
+      payloads: [{ text: "caption", mediaUrls: ["file:///tmp/a.png"] }],
+    });
+
+    expect(replyPayloads).toEqual([]);
+  });
 });
