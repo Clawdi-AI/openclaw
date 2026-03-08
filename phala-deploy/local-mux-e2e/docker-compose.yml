@@ -30,6 +30,8 @@ services:
     depends_on:
       openclaw:
         condition: service_started
+      telegram-capture:
+        condition: service_started
     ports:
       - "127.0.0.1:18891:18891"
     command: ["node", "--import", "tsx", "mux-server/src/server.ts"]
@@ -47,6 +49,7 @@ services:
       MUX_WHATSAPP_ACCOUNT_ID: default
       MUX_WHATSAPP_AUTH_DIR: /wa-auth/default
       MUX_OPENCLAW_ACCOUNT_ID: mux
+      MUX_TELEGRAM_API_BASE_URL: ${MUX_TELEGRAM_API_BASE_URL:-}
       MUX_TELEGRAM_BOOTSTRAP_LATEST: "true"
       MUX_DISCORD_BOOTSTRAP_LATEST: "true"
       MUX_TELEGRAM_INBOUND_MEDIA_MAX_BYTES: "5000000"
@@ -60,6 +63,36 @@ services:
       - ./state/wa-auth:/wa-auth
     restart: unless-stopped
 
+  telegram-capture:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    container_name: telegram-capture-local-e2e
+    ports:
+      - "127.0.0.1:18990:18990"
+    command: ["node", "phala-deploy/local-mux-e2e/scripts/telegram-capture-proxy.mjs"]
+    environment:
+      TELEGRAM_CAPTURE_PORT: 18990
+      TELEGRAM_CAPTURE_DIR: /captures
+      TELEGRAM_CAPTURE_UPSTREAM_BASE_URL: ${TELEGRAM_CAPTURE_UPSTREAM_BASE_URL:-https://api.telegram.org}
+    volumes:
+      - ../../:/workspace:ro
+      - ./state/telegram-capture:/captures
+    restart: unless-stopped
+
+  mcp-dashboard:
+    build:
+      context: ../../mcp-dashboard
+      dockerfile: Dockerfile
+    container_name: mcp-dashboard-local-e2e
+    ports:
+      - "8900:8900"
+    volumes:
+      - openclaw_data:/data
+    environment:
+      PORT: "8900"
+      PUBLIC_BASE: ${MCP_DASHBOARD_PUBLIC_BASE:-http://localhost:8900}
+      MCP_SERVERS_JSON: ${MCP_SERVERS_JSON:-}
+    restart: unless-stopped
 volumes:
   openclaw_data:
   openclaw_docker_data:

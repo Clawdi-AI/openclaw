@@ -4,7 +4,7 @@ import {
   getFunctionCallOutput,
   streamingTextResponsePlan,
 } from "./fake-openai.js";
-import { loadJsonFixture } from "./fixtures.js";
+import { hasJsonFixture, loadJsonFixture } from "./fixtures.js";
 import type { MuxOpenClawHarness } from "./mux-openclaw-harness.js";
 
 type TelegramMessageUpdate = {
@@ -110,11 +110,20 @@ function loadFixture<T>(relativePath: string): T {
   return loadJsonFixture<T>(relativePath);
 }
 
+function loadTelegramFixture<T>(params: { goldenPath: string; fallbackPath: string }): T {
+  return loadFixture<T>(
+    hasJsonFixture(params.goldenPath) ? params.goldenPath : params.fallbackPath,
+  );
+}
+
 function buildTelegramDmTextUpdate(params: {
   chatId: string;
   inboundText: string;
 }): Record<string, unknown> {
-  const update = loadFixture<TelegramMessageUpdate>("telegram/inbound/dm-text.template.json");
+  const update = loadTelegramFixture<TelegramMessageUpdate>({
+    goldenPath: "telegram/golden/dm-text.sample.json",
+    fallbackPath: "telegram/inbound/dm-text.template.json",
+  });
   const chatId = Number(params.chatId);
   update.message.text = params.inboundText;
   update.message.from.id = chatId;
@@ -126,7 +135,10 @@ function buildTelegramGroupTextUpdate(params: {
   chatId: string;
   inboundText: string;
 }): Record<string, unknown> {
-  const update = loadFixture<TelegramMessageUpdate>("telegram/inbound/group-text.template.json");
+  const update = loadTelegramFixture<TelegramMessageUpdate>({
+    goldenPath: "telegram/golden/group-text.sample.json",
+    fallbackPath: "telegram/inbound/group-text.template.json",
+  });
   const chatId = Number(params.chatId);
   update.message.text = `@integration_bot ${params.inboundText}`;
   (
@@ -142,9 +154,10 @@ function buildTelegramForumTopicTextUpdate(params: {
   chatId: string;
   inboundText: string;
 }): Record<string, unknown> {
-  const update = loadFixture<Record<string, unknown>>(
-    "telegram/inbound/forum-topic-text.template.json",
-  );
+  const update = loadTelegramFixture<Record<string, unknown>>({
+    goldenPath: "telegram/golden/forum-topic-text.sample.json",
+    fallbackPath: "telegram/inbound/forum-topic-text.template.json",
+  });
   const message = update.message as Record<string, unknown>;
   const chat = message.chat as Record<string, unknown>;
   message.text = `@integration_bot ${params.inboundText}`;
@@ -156,7 +169,10 @@ function buildTelegramForumTopicTextUpdate(params: {
 function buildTelegramDmReasoningCommandUpdate(params: {
   chatId: string;
 }): Record<string, unknown> {
-  const update = loadFixture<TelegramMessageUpdate>("telegram/inbound/dm-text.template.json");
+  const update = loadTelegramFixture<TelegramMessageUpdate>({
+    goldenPath: "telegram/golden/dm-text.sample.json",
+    fallbackPath: "telegram/inbound/dm-text.template.json",
+  });
   const chatId = Number(params.chatId);
   update.message.text = "/reasoning";
   update.message.from.id = chatId;
@@ -165,7 +181,10 @@ function buildTelegramDmReasoningCommandUpdate(params: {
 }
 
 function buildTelegramDmModelsCommandUpdate(params: { chatId: string }): Record<string, unknown> {
-  const update = loadFixture<TelegramMessageUpdate>("telegram/inbound/dm-text.template.json");
+  const update = loadTelegramFixture<TelegramMessageUpdate>({
+    goldenPath: "telegram/golden/dm-text.sample.json",
+    fallbackPath: "telegram/inbound/dm-text.template.json",
+  });
   const chatId = Number(params.chatId);
   update.message.text = "/models";
   update.message.from.id = chatId;
@@ -180,9 +199,10 @@ function buildTelegramDmCallbackQueryUpdate(params: {
   callbackMessageId?: number;
   callbackMessageText?: string;
 }): Record<string, unknown> {
-  const update = loadFixture<TelegramCallbackQueryUpdate>(
-    "telegram/inbound/callback-query.template.json",
-  );
+  const update = loadTelegramFixture<TelegramCallbackQueryUpdate>({
+    goldenPath: "telegram/golden/callback-query.sample.json",
+    fallbackPath: "telegram/inbound/callback-query.template.json",
+  });
   const chatId = Number(params.chatId);
   update.update_id = params.updateId ?? 700002;
   update.callback_query.data = params.callbackData;

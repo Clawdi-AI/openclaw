@@ -39,6 +39,7 @@ Implemented today:
   - forum-topic typing -> streaming preview -> final edit
   - `/reasoning` command menu with inline buttons
   - `/models` callback query -> callback acknowledgement -> `editMessageText`
+  - gateway `send` restart recovery after queued Telegram failure
 - assertions on:
   - final Telegram outbound request
   - OpenAI prompt receipt
@@ -61,7 +62,6 @@ Not covered yet:
 
 - Telegram poll round-trip from the real current-channel prompt/tool surface
 - mixed old/new OpenClaw fleets against one mux-server instance
-- restart and retry/queue scenarios
 - Discord and WhatsApp mocked round-trip
 
 ## Architecture
@@ -82,6 +82,8 @@ The harness flow is:
    - OpenClaw session-store writes
 
 Vitest does not run the harness directly anymore. Each test spawns [telegram-scenario-runner.ts](./telegram-scenario-runner.ts), which runs one full scenario in a fresh subprocess. That keeps OpenClaw global state, timers, and cached modules from leaking across scenarios.
+
+The Vitest suite itself is batched by resolver mode. Each resolver-mode test iterates through the Telegram scenario table and spawns a fresh [telegram-scenario-runner.ts](./telegram-scenario-runner.ts) subprocess per scenario. That keeps per-scenario isolation while avoiding the "24 long child-process tests that look frozen" problem in Vitest progress output.
 
 The suite uses a dedicated Vitest config because the repo-wide unit/e2e setup installs stubs that interfere with the real mux outbound path.
 Tests should prefer the scoped `withMuxOpenClawHarness(...)` helper over manual `start/close` calls so env and process cleanup always stay tied to the test body.
@@ -105,7 +107,17 @@ Telegram fixtures:
 - the long-term source of truth should be sanitized real Bot API payloads
 - hand-authored payloads should be treated as temporary or minimal-contract fixtures
 
-The current Telegram integration tests load reusable JSON template fixtures and then apply scenario-specific overrides. That is a better framework shape than inline payload literals, but it is still only an interim step until we replace those templates with sanitized real Bot API captures.
+The current Telegram integration tests now prefer golden captured fixtures under `fixtures/telegram/golden/**`, with fallback to the older hand-authored templates when a live capture is not available yet.
+
+Current golden coverage:
+
+- DM text
+- group text
+- forum-topic text
+- callback query
+- photo
+- document
+- voice
 
 ## Recommended fixture model
 
@@ -119,6 +131,24 @@ Keep two layers of Telegram fixtures:
 2. Minimal derived fixtures
    - reduced payloads derived from those golden samples
    - used when the test only needs a smaller contract
+
+## Capture Workflow
+
+Use the local Telegram E2E stack to collect real Bot API traffic:
+
+```bash
+MUX_TELEGRAM_API_BASE_URL=http://telegram-capture:18990 \
+  ./phala-deploy/local-mux-e2e/scripts/up.sh
+
+./phala-deploy/local-mux-e2e/scripts/e2e-telegram.sh
+
+node --import tsx phala-deploy/local-mux-e2e/scripts/export-telegram-fixtures.ts
+```
+
+That flow writes:
+
+- raw captures: `phala-deploy/local-mux-e2e/state/telegram-capture/captures.ndjson`
+- sanitized golden fixtures: `phala-deploy/integration-test/fixtures/telegram/golden/*.sample.json`
 
 The first golden set should include:
 
@@ -134,16 +164,15 @@ The first golden set should include:
 
 Near term:
 
-1. replace the current DM hand-authored fixture with a sanitized real Telegram sample
-2. add table-driven Telegram scenarios that run in both resolver modes
-3. replace the DM template fixture with a sanitized real DM payload
-4. add restart and delayed-send coverage
+1. add table-driven Telegram scenarios that run in both resolver modes
+2. extend restart and delayed-send coverage beyond gateway `send`
+3. add mixed-semantics coverage against one mux-server instance
 
 Next:
 
-1. add mixed-semantics coverage against one mux-server instance
-2. add Discord mocked round-trip
-3. add WhatsApp mocked round-trip
+1. add Discord mocked round-trip
+2. add WhatsApp mocked round-trip
+3. broaden mux-server negative safety matrix
 
 Long term:
 

@@ -47,12 +47,23 @@ async function waitForScenarioRunnerExit(params: {
 export function defineTelegramMuxRoundTripTest(
   resolutionMode: "session-first" | "target-first",
 ): void {
-  for (const scenario of TELEGRAM_MUX_ROUND_TRIP_SCENARIOS) {
-    test(`${scenario.name} in ${resolutionMode} mode`, { timeout: 180_000 }, async () => {
-      await waitForScenarioRunnerExit({
-        scenarioId: scenario.id,
-        resolutionMode,
-      });
-    });
-  }
+  test(
+    `all Telegram mux scenarios in ${resolutionMode} mode`,
+    {
+      timeout: TELEGRAM_MUX_ROUND_TRIP_SCENARIOS.length * 180_000 + 60_000,
+    },
+    async () => {
+      for (const scenario of TELEGRAM_MUX_ROUND_TRIP_SCENARIOS) {
+        console.log(`[integration] start ${scenario.id} (${resolutionMode})`);
+        const startedAt = Date.now();
+        await waitForScenarioRunnerExit({
+          scenarioId: scenario.id,
+          resolutionMode,
+        });
+        console.log(
+          `[integration] done ${scenario.id} (${resolutionMode}) in ${Date.now() - startedAt}ms`,
+        );
+      }
+    },
+  );
 }

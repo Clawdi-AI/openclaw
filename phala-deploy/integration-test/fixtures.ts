@@ -15,3 +15,7 @@ export function loadJsonFixture<T>(relativePath: string): T {
   fixtureCache.set(relativePath, parsed);
   return structuredClone(parsed);
 }
+
+export function hasJsonFixture(relativePath: string): boolean {
+  return fs.existsSync(path.join(fixturesDir, relativePath));
+}

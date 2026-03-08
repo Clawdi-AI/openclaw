@@ -12,6 +12,11 @@ export type FakeTelegramRequest = {
   body: Record<string, unknown>;
 };
 
+type FakeTelegramFailure = {
+  status: number;
+  body?: Record<string, unknown>;
+};
+
 type FakeTelegramFile = {
   path: string;
   contentType: string;
@@ -96,6 +101,7 @@ export class FakeTelegramApi {
 
   private readonly updates: Array<Record<string, unknown>> = [];
   private readonly files = new Map<string, FakeTelegramFile>();
+  private readonly failures = new Map<string, FakeTelegramFailure[]>();
   private nextMessageId = 1_000;
 
   private constructor(
@@ -140,6 +146,12 @@ export class FakeTelegramApi {
 
   getMethodCalls(method: string): FakeTelegramRequest[] {
     return this.requests.filter((request) => request.method === method);
+  }
+
+  failNextMethod(method: string, failure: FakeTelegramFailure): void {
+    const pending = this.failures.get(method) ?? [];
+    pending.push(failure);
+    this.failures.set(method, pending);
   }
 
   async waitForMethodCall(
@@ -189,6 +201,24 @@ export class FakeTelegramApi {
     const method = match[1] ?? "";
     const body = await readTelegramBody(req);
     this.requests.push({ method, body });
+
+    const queuedFailure = this.failures.get(method)?.shift();
+    if (queuedFailure) {
+      const remaining = this.failures.get(method) ?? [];
+      if (remaining.length === 0) {
+        this.failures.delete(method);
+      }
+      res.writeHead(queuedFailure.status, { "content-type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify(
+          queuedFailure.body ?? {
+            ok: false,
+            description: `forced fake Telegram failure for ${method}`,
+          },
+        ),
+      );
+      return;
+    }
 
     if (method === "getUpdates") {
       const offset = Number(body.offset ?? 0);

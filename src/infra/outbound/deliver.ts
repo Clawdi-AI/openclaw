@@ -297,7 +297,12 @@ export async function deliverOutboundPayloads(
         gifPlayback: params.gifPlayback,
         silent: params.silent,
         mirror: params.mirror,
-      }).catch(() => null); // Best-effort — don't block delivery if queue write fails.
+      }).catch((err) => {
+        logWarn(
+          `outbound-delivery: failed to enqueue delivery channel=${channel} target=${to} error=${err instanceof Error ? err.message : String(err)}`,
+        );
+        return null;
+      }); // Best-effort — don't block delivery if queue write fails.
 
   // Wrap onError to detect partial failures under bestEffort mode.
   // When bestEffort is true, per-payload errors are caught and passed to onError

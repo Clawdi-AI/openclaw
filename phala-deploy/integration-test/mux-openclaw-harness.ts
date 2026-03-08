@@ -66,6 +66,7 @@ type StartHarnessParams = {
   pairingRouteKey?: string;
   llmReplyText: string;
   resolutionMode: "session-first" | "target-first";
+  minimalGateway?: boolean;
   openAiResponder?: (request: FakeOpenAiRequest) => FakeOpenAiResponsePlan;
   workspaceFiles?: Record<string, string | Uint8Array>;
 };
@@ -80,7 +81,10 @@ function buildHarnessPaths(tempDir: string): HarnessPaths {
   };
 }
 
-function buildHarnessEnv(paths: HarnessPaths): Record<string, string> {
+function buildHarnessEnv(
+  paths: HarnessPaths,
+  params?: { minimalGateway?: boolean },
+): Record<string, string> {
   return {
     HOME: paths.tempDir,
     USERPROFILE: paths.tempDir,
@@ -93,8 +97,8 @@ function buildHarnessEnv(paths: HarnessPaths): Record<string, string> {
     OPENCLAW_SKIP_CHANNELS: "1",
     OPENCLAW_SKIP_PROVIDERS: "1",
     OPENCLAW_SKIP_CRON: "1",
-    OPENCLAW_TEST_MINIMAL_GATEWAY: "1",
     OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
+    ...(params?.minimalGateway === false ? {} : { OPENCLAW_TEST_MINIMAL_GATEWAY: "1" }),
   };
 }
 
@@ -253,11 +257,15 @@ export type MuxOpenClawHarness = {
   openai: FakeOpenAiResponsesServer;
   muxPort: number;
   gatewayPort: number;
+  gatewayUrl: string;
+  gatewayToken: string;
   configPath: string;
+  stateDir: string;
   workspaceDir: string;
   openclawId: string;
   readSessionStore: () => Record<string, unknown>;
   waitForSessionStoreEntry: (key: string) => Promise<Record<string, unknown>>;
+  restartGateway: () => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -280,7 +288,7 @@ export async function startMuxOpenClawHarness(
   });
 
   try {
-    Object.assign(process.env, buildHarnessEnv(paths));
+    Object.assign(process.env, buildHarnessEnv(paths, { minimalGateway: params.minimalGateway }));
     await mkdir(paths.workspaceDir, { recursive: true });
     if (params.workspaceFiles) {
       for (const [relativePath, content] of Object.entries(params.workspaceFiles)) {
@@ -309,7 +317,7 @@ export async function startMuxOpenClawHarness(
     });
     await writeFile(paths.configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 
-    const gateway = await startGatewayProcess({ port: gatewayPort });
+    let gateway = await startGatewayProcess({ port: gatewayPort });
     cleanup.defer(async () => {
       await gateway.close({ reason: "integration harness shutdown" });
     });
@@ -344,7 +352,10 @@ export async function startMuxOpenClawHarness(
       openai,
       muxPort,
       gatewayPort,
+      gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
+      gatewayToken: GATEWAY_TOKEN,
       configPath: paths.configPath,
+      stateDir: paths.stateDir,
       workspaceDir: paths.workspaceDir,
       openclawId,
       readSessionStore,
@@ -354,6 +365,11 @@ export async function startMuxOpenClawHarness(
           10_000,
           `timed out waiting for session store entry ${key}`,
         );
+      },
+      restartGateway: async () => {
+        await gateway.close({ reason: "integration harness restart" });
+        resetIntegrationRuntimeState();
+        gateway = await startGatewayProcess({ port: gatewayPort });
       },
       close: async () => {
         await cleanup.close();
