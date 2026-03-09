@@ -14,12 +14,6 @@ async function main(): Promise<void> {
 
   const repoPath = path.resolve(repoPathRaw);
   const gatewayModuleUrl = pathToFileURL(path.join(repoPath, "src", "gateway", "server.ts")).href;
-  const telegramChannelUrl = pathToFileURL(
-    path.join(repoPath, "extensions", "telegram", "src", "channel.ts"),
-  ).href;
-  const telegramRuntimeUrl = pathToFileURL(
-    path.join(repoPath, "extensions", "telegram", "src", "runtime.ts"),
-  ).href;
   const pluginRuntimeUrl = pathToFileURL(path.join(repoPath, "src", "plugins", "runtime.ts")).href;
   const pluginRuntimeIndexUrl = pathToFileURL(
     path.join(repoPath, "src", "plugins", "runtime", "index.ts"),
@@ -37,12 +31,6 @@ async function main(): Promise<void> {
       },
     ) => Promise<{ close: (params?: { reason?: string }) => Promise<void> }>;
   };
-  const { telegramPlugin } = (await import(telegramChannelUrl)) as {
-    telegramPlugin: unknown;
-  };
-  const { setTelegramRuntime } = (await import(telegramRuntimeUrl)) as {
-    setTelegramRuntime: (runtime: unknown) => void;
-  };
   const { setActivePluginRegistry } = (await import(pluginRuntimeUrl)) as {
     setActivePluginRegistry: (registry: unknown) => void;
   };
@@ -54,22 +42,76 @@ async function main(): Promise<void> {
       entries: Array<{ pluginId: string; plugin: unknown; source: string }>,
     ) => unknown;
   };
+  const enabledChannels = new Set(
+    (process.env.OPENCLAW_INTEGRATION_CHANNELS ?? "telegram")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
 
   const runtime = createPluginRuntime();
+  const registryEntries: Array<{ pluginId: string; plugin: unknown; source: string }> = [];
+
+  if (enabledChannels.has("telegram")) {
+    const telegramChannelUrl = pathToFileURL(
+      path.join(repoPath, "extensions", "telegram", "src", "channel.ts"),
+    ).href;
+    const telegramRuntimeUrl = pathToFileURL(
+      path.join(repoPath, "extensions", "telegram", "src", "runtime.ts"),
+    ).href;
+    const { telegramPlugin } = (await import(telegramChannelUrl)) as {
+      telegramPlugin: unknown;
+    };
+    const { setTelegramRuntime } = (await import(telegramRuntimeUrl)) as {
+      setTelegramRuntime: (runtime: unknown) => void;
+    };
+    setTelegramRuntime(runtime);
+    registryEntries.push({ pluginId: "telegram", plugin: telegramPlugin, source: "integration" });
+  }
+
+  if (enabledChannels.has("discord")) {
+    const discordChannelUrl = pathToFileURL(
+      path.join(repoPath, "extensions", "discord", "src", "channel.ts"),
+    ).href;
+    const discordRuntimeUrl = pathToFileURL(
+      path.join(repoPath, "extensions", "discord", "src", "runtime.ts"),
+    ).href;
+    const { discordPlugin } = (await import(discordChannelUrl)) as {
+      discordPlugin: unknown;
+    };
+    const { setDiscordRuntime } = (await import(discordRuntimeUrl)) as {
+      setDiscordRuntime: (runtime: unknown) => void;
+    };
+    setDiscordRuntime(runtime);
+    registryEntries.push({ pluginId: "discord", plugin: discordPlugin, source: "integration" });
+  }
+
+  if (enabledChannels.has("whatsapp")) {
+    const whatsAppChannelUrl = pathToFileURL(
+      path.join(repoPath, "extensions", "whatsapp", "src", "channel.ts"),
+    ).href;
+    const whatsAppRuntimeUrl = pathToFileURL(
+      path.join(repoPath, "extensions", "whatsapp", "src", "runtime.ts"),
+    ).href;
+    const { whatsappPlugin } = (await import(whatsAppChannelUrl)) as {
+      whatsappPlugin: unknown;
+    };
+    const { setWhatsAppRuntime } = (await import(whatsAppRuntimeUrl)) as {
+      setWhatsAppRuntime: (runtime: unknown) => void;
+    };
+    setWhatsAppRuntime(runtime);
+    registryEntries.push({ pluginId: "whatsapp", plugin: whatsappPlugin, source: "integration" });
+  }
+
   // Legacy mux HTTP normalizes channels through the plugin registry.
-  setActivePluginRegistry(
-    createTestRegistry([{ pluginId: "telegram", plugin: telegramPlugin, source: "integration" }]),
-  );
-  setTelegramRuntime(runtime);
+  setActivePluginRegistry(createTestRegistry(registryEntries));
 
   const gatewayServer = await gatewayModule.startGatewayServer(port, {
     bind: "loopback",
     auth: { mode: "token", token: process.env.OPENCLAW_GATEWAY_TOKEN ?? "" },
     controlUiEnabled: false,
   });
-  setActivePluginRegistry(
-    createTestRegistry([{ pluginId: "telegram", plugin: telegramPlugin, source: "integration" }]),
-  );
+  setActivePluginRegistry(createTestRegistry(registryEntries));
 
   const shutdown = async () => {
     await gatewayServer.close({ reason: "legacy integration gateway shutdown" });

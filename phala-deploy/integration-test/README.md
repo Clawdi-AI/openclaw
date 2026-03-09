@@ -165,6 +165,11 @@ Current opt-in legacy scenarios:
 - Telegram forum-topic round-trip with a real `phala-2026.2.17` gateway process
 - Telegram gateway-send queue replay after restart with a real
   `phala-2026.2.17` gateway process
+- Discord DM round-trip with a real `phala-2026.2.17` gateway process
+- Discord guild-channel round-trip with a real `phala-2026.2.17` gateway
+  process
+- WhatsApp DM round-trip with a real `phala-2026.2.17` gateway process
+- WhatsApp group round-trip with a real `phala-2026.2.17` gateway process
 
 How to run it:
 
