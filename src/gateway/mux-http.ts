@@ -105,6 +105,10 @@ import { addMuxPairedSender, readMuxPairedSenders } from "./mux-paired-senders.j
 
 const DEFAULT_MUX_MAX_BODY_BYTES = 10 * 1024 * 1024;
 
+type MuxAccessResult =
+  | { allowed: false }
+  | { allowed: true; commandAuthorized: boolean; effectiveWasMentioned?: boolean };
+
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -124,6 +128,28 @@ function resolveOpenClawIdHeader(req: IncomingMessage): string | null {
   const raw = req.headers["x-openclaw-id"];
   const value = Array.isArray(raw) ? raw[0] : raw;
   return readMuxNonEmptyString(value) ?? null;
+}
+
+function isDirectChat(chatType: string | undefined): boolean {
+  return (chatType ?? "direct") === "direct";
+}
+
+function readMuxStringishId(value: unknown): string | undefined {
+  return (
+    readMuxNonEmptyString(value) ??
+    (typeof value === "number" && Number.isFinite(value) ? String(Math.trunc(value)) : undefined)
+  );
+}
+
+function resolveTelegramMuxMessageData(channelData: Record<string, unknown> | undefined): {
+  telegramData: Record<string, unknown> | undefined;
+  rawMessage: Record<string, unknown> | undefined;
+  rawChat: Record<string, unknown> | undefined;
+} {
+  const telegramData = asMuxRecord(channelData?.telegram);
+  const rawMessage = asMuxRecord(telegramData?.rawMessage);
+  const rawChat = asMuxRecord(rawMessage?.chat);
+  return { telegramData, rawMessage, rawChat };
 }
 
 async function authorizeMuxInboundRequest(params: {
@@ -185,7 +211,7 @@ function resolveTelegramCallbackPayload(params: {
   if (eventKind !== "callback") {
     return null;
   }
-  const telegramData = asMuxRecord(params.channelData?.telegram);
+  const { telegramData, rawMessage, rawChat } = resolveTelegramMuxMessageData(params.channelData);
   const callbackData = readMuxNonEmptyString(telegramData?.callbackData);
   if (!callbackData) {
     return null;
@@ -201,9 +227,6 @@ function resolveTelegramCallbackPayload(params: {
   if (!chatId) {
     return null;
   }
-
-  const rawMessage = asMuxRecord(telegramData?.rawMessage);
-  const rawChat = asMuxRecord(rawMessage?.chat);
   const fallbackThreadId = resolveMuxThreadId(params.payload.threadId, params.channelData);
   const messageThreadId =
     readMuxPositiveInt(rawMessage?.message_thread_id) ??
@@ -243,9 +266,7 @@ function resolveTelegramInboundPeer(params: {
     return null;
   }
 
-  const telegramData = asMuxRecord(params.channelData?.telegram);
-  const rawMessage = asMuxRecord(telegramData?.rawMessage);
-  const rawChat = asMuxRecord(rawMessage?.chat);
+  const { rawMessage, rawChat } = resolveTelegramMuxMessageData(params.channelData);
   const fallbackThreadId = resolveMuxThreadId(params.payload.threadId, params.channelData);
   const messageThreadId =
     readMuxPositiveInt(rawMessage?.message_thread_id) ??
@@ -323,10 +344,7 @@ function resolveDiscordMuxSender(params: {
   const author = asMuxRecord(rawMessage?.author);
   const member = asMuxRecord(rawMessage?.member);
   const senderId =
-    readMuxNonEmptyString(author?.id) ??
-    (typeof author?.id === "number" && Number.isFinite(author.id)
-      ? String(Math.trunc(author.id))
-      : undefined) ??
+    readMuxStringishId(author?.id) ??
     readMuxNonEmptyString(params.payload.from)?.replace(/^discord:(user:|dm:)?/i, "");
   const senderName =
     readMuxNonEmptyString(author?.username) ?? readMuxNonEmptyString(author?.global_name);
@@ -512,14 +530,10 @@ function resolveTelegramMuxSender(params: {
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
 }): { senderId?: string; senderUsername?: string } {
-  const telegramData = asMuxRecord(params.channelData?.telegram);
-  const rawMessage = asMuxRecord(telegramData?.rawMessage);
+  const { rawMessage } = resolveTelegramMuxMessageData(params.channelData);
   const from = asMuxRecord(rawMessage?.from);
   const senderId =
-    readMuxNonEmptyString(from?.id) ??
-    (typeof from?.id === "number" && Number.isFinite(from.id)
-      ? String(Math.trunc(from.id))
-      : undefined) ??
+    readMuxStringishId(from?.id) ??
     readMuxNonEmptyString(params.payload.from)?.replace(/^(telegram|tg):/i, "");
   const senderUsername = readMuxNonEmptyString(from?.username);
   return {
@@ -621,10 +635,7 @@ async function resolveTelegramMuxAccess(params: {
   chatType: string;
   messageId: string;
   wasMentioned: boolean;
-}): Promise<
-  | { allowed: false }
-  | { allowed: true; commandAuthorized: boolean; effectiveWasMentioned?: boolean }
-> {
+}): Promise<MuxAccessResult> {
   const telegramAccount = resolveTelegramAccount({
     cfg: params.cfg,
     accountId: params.accountId,
@@ -634,7 +645,7 @@ async function resolveTelegramMuxAccess(params: {
     payload: params.payload,
     channelData: params.channelData,
   });
-  const isGroup = (params.chatType || "direct") !== "direct";
+  const isGroup = !isDirectChat(params.chatType);
   const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
 
   if (!isGroup) {
@@ -816,17 +827,14 @@ async function resolveDiscordMuxAccess(params: {
   body: string;
   chatType: string;
   wasMentioned: boolean;
-}): Promise<
-  | { allowed: false }
-  | { allowed: true; commandAuthorized: boolean; effectiveWasMentioned?: boolean }
-> {
+}): Promise<MuxAccessResult> {
   const discordCfg = params.cfg.channels?.discord ?? {};
   const hasControlCommandInMessage = hasControlCommand(params.body, params.cfg, {});
   const sender = resolveDiscordMuxSender({
     payload: params.payload,
     channelData: params.channelData,
   });
-  const isDirect = (params.chatType || "direct") === "direct";
+  const isDirect = isDirectChat(params.chatType);
   const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
 
   if (isDirect) {
@@ -973,7 +981,7 @@ async function resolveWhatsAppMuxAccess(params: {
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
   chatType: string;
-}): Promise<{ allowed: false } | { allowed: true; commandAuthorized: boolean }> {
+}): Promise<MuxAccessResult> {
   const account = resolveWhatsAppAccount({
     cfg: params.cfg,
     accountId: params.accountId,
@@ -981,7 +989,7 @@ async function resolveWhatsAppMuxAccess(params: {
   const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
   const peer = resolveWhatsAppInboundPeerId({ payload: params.payload });
   const senderId = normalizeWhatsAppTarget(readMuxNonEmptyString(params.payload.from) ?? "");
-  const isGroup = (params.chatType || "direct") !== "direct";
+  const isGroup = !isDirectChat(params.chatType);
 
   if (!isGroup) {
     const dmPolicy = account.dmPolicy ?? "pairing";
@@ -1054,6 +1062,17 @@ async function resolveWhatsAppMuxAccess(params: {
     allowed: true,
     commandAuthorized: senderAllowed,
   };
+}
+
+function applyMuxAccessToContext(ctx: MsgContext, access: MuxAccessResult): boolean {
+  if (!access.allowed) {
+    return false;
+  }
+  ctx.CommandAuthorized = access.commandAuthorized;
+  if (typeof access.effectiveWasMentioned === "boolean") {
+    ctx.WasMentioned = access.effectiveWasMentioned;
+  }
+  return true;
 }
 
 async function sendTelegramEditViaMux(params: {
@@ -1356,12 +1375,8 @@ export async function handleMuxInboundHttpRequest(
           messageId,
           wasMentioned: callbackPayload != null || payload.wasMentioned === true,
         });
-        if (!telegramAccess.allowed) {
+        if (!applyMuxAccessToContext(ctx, telegramAccess)) {
           return;
-        }
-        ctx.CommandAuthorized = telegramAccess.commandAuthorized;
-        if (typeof telegramAccess.effectiveWasMentioned === "boolean") {
-          ctx.WasMentioned = telegramAccess.effectiveWasMentioned;
         }
       } else if (channel === "discord") {
         const discordAccess = await resolveDiscordMuxAccess({
@@ -1373,14 +1388,10 @@ export async function handleMuxInboundHttpRequest(
           chatType: String(ctx.ChatType ?? "direct"),
           wasMentioned: payload.wasMentioned === true,
         });
-        if (!discordAccess.allowed) {
+        if (!applyMuxAccessToContext(ctx, discordAccess)) {
           return;
         }
-        ctx.CommandAuthorized = discordAccess.commandAuthorized;
-        if (typeof discordAccess.effectiveWasMentioned === "boolean") {
-          ctx.WasMentioned = discordAccess.effectiveWasMentioned;
-        }
-      } else if (channel === "whatsapp") {
+      } else {
         const whatsappAccess = await resolveWhatsAppMuxAccess({
           cfg,
           accountId,
@@ -1388,10 +1399,9 @@ export async function handleMuxInboundHttpRequest(
           channelData,
           chatType: String(ctx.ChatType ?? "direct"),
         });
-        if (!whatsappAccess.allowed) {
+        if (!applyMuxAccessToContext(ctx, whatsappAccess)) {
           return;
         }
-        ctx.CommandAuthorized = whatsappAccess.commandAuthorized;
       }
 
       // Resolve attachments to temp files (same pattern as vanilla TG channel).
