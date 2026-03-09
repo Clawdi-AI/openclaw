@@ -145,6 +145,35 @@ Current mocked non-Telegram coverage:
 - WhatsApp group round-trip in `session-first` and `target-first`
 - remaining non-Telegram gap: manual release checks
 
+## Optional real legacy gateway coverage
+
+The suite can also launch a real legacy OpenClaw gateway from another checkout
+instead of the current workspace gateway process. This is meant for rollout
+compatibility checks against the current mux-server.
+
+Current opt-in legacy scenario:
+
+- Telegram DM round-trip with a real `phala-2026.2.17` gateway process
+
+How to run it:
+
+```bash
+OPENCLAW_RUN_LEGACY_COMPAT=1 \
+OPENCLAW_LEGACY_REPO=~/tmp/openclaw \
+pnpm exec vitest run --config phala-deploy/integration-test/vitest.config.ts \
+  phala-deploy/integration-test/telegram.legacy-openclaw-compat.e2e.test.ts
+```
+
+Notes:
+
+- `OPENCLAW_LEGACY_REPO` must point at a prepared checkout of the legacy branch
+  (for example `origin/phala-2026.2.17`)
+- the legacy test is opt-in and skipped by default
+- it uses the current fake Telegram and fake OpenAI servers, but a real legacy
+  OpenClaw gateway process and the current mux-server
+- set `OPENCLAW_INTEGRATION_KEEP_TEMP=1` if you want the temp harness state and
+  mux-server logfile preserved after a failing run
+
 ## Recommended fixture model
 
 Keep two layers of Telegram fixtures:
