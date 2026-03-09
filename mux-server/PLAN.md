@@ -683,7 +683,7 @@ Expected rollout signal:
 - [x] keep mux outbound enabled only on the default-account path
 - [x] keep mux-server request-target fallback per request only
 - [x] do not persist shared canonical aliases
-- [ ] update stale mux-server README sections after behavior lands
+- [x] update stale mux-server README sections after behavior lands
 - [x] keep automated coverage for both legacy and canonical semantics
 - [ ] finish the remaining sanitized real Telegram payload fixtures for the mocked integration harness
 - [x] add scripted OpenAI Responses fixtures for outbound behavior coverage (tool calls, tool outputs, final message turns)
