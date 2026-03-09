@@ -601,7 +601,7 @@ async function bootstrapMuxPairedSender(params: {
     return;
   }
 
-  if ((params.chatType || "direct") === "direct") {
+  if (isDirectChat(params.chatType)) {
     try {
       await addChannelAllowFromStoreEntry({
         channel: params.channel,
