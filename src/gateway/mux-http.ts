@@ -48,6 +48,7 @@ import {
   resolveChannelGroupPolicy,
   resolveChannelGroupRequireMention,
 } from "../config/group-policy.js";
+import type { TelegramGroupConfig, TelegramTopicConfig } from "../config/types.telegram.js";
 import {
   isDiscordGroupAllowedByPolicy,
   normalizeDiscordAllowList,
@@ -548,8 +549,8 @@ function resolveTelegramMuxGroupConfig(params: {
   chatId: string | number;
   messageThreadId?: number;
 }): {
-  groupConfig?: import("../config/types.js").TelegramGroupConfig;
-  topicConfig?: import("../config/types.js").TelegramTopicConfig;
+  groupConfig?: TelegramGroupConfig;
+  topicConfig?: TelegramTopicConfig;
 } {
   const telegramCfg = resolveTelegramAccount({
     cfg: params.cfg,
@@ -601,16 +602,16 @@ async function bootstrapMuxPairedSender(params: {
   }
 
   if ((params.chatType || "direct") === "direct") {
-    if (
-      params.channel === "telegram" ||
-      params.channel === "discord" ||
-      params.channel === "whatsapp"
-    ) {
+    try {
       await addChannelAllowFromStoreEntry({
         channel: params.channel,
         entry: senderId,
         accountId: params.accountId,
-      }).catch(() => {});
+      });
+    } catch (error) {
+      warn(
+        `[mux] failed to persist paired DM sender for ${params.channel}:${params.accountId}: ${(error as Error).message}`,
+      );
     }
     return;
   }
@@ -618,12 +619,18 @@ async function bootstrapMuxPairedSender(params: {
   if (!routeKey) {
     return;
   }
-  await addMuxPairedSender({
-    channel: params.channel,
-    accountId: params.accountId,
-    routeKey,
-    senderId,
-  }).catch(() => {});
+  try {
+    await addMuxPairedSender({
+      channel: params.channel,
+      accountId: params.accountId,
+      routeKey,
+      senderId,
+    });
+  } catch (error) {
+    warn(
+      `[mux] failed to persist paired sender for ${params.channel}:${params.accountId}:${routeKey}: ${(error as Error).message}`,
+    );
+  }
 }
 
 async function resolveTelegramMuxAccess(params: {

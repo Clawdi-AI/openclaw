@@ -74,10 +74,7 @@ async function readStore(filePath: string): Promise<MuxPairedSendersStore> {
     version: 1,
     routes: {},
   });
-  return {
-    version: 1,
-    routes: value?.routes && typeof value.routes === "object" ? value.routes : {},
-  };
+  return value;
 }
 
 function normalizeRouteKey(routeKey: string): string {
@@ -120,7 +117,7 @@ export async function addMuxPairedSender(params: {
   const filePath = resolveStorePath(params.channel, accountId, params.env);
   return await withStoreLock(filePath, async () => {
     const store = await readStore(filePath);
-    const current = Array.isArray(store.routes[routeKey]) ? store.routes[routeKey] : [];
+    const current = store.routes[routeKey] ?? [];
     if (current.includes(senderId)) {
       return { changed: false, senders: current };
     }
@@ -145,6 +142,6 @@ export async function readMuxPairedSenders(params: {
   const filePath = resolveStorePath(params.channel, accountId, params.env);
   return await withStoreLock(filePath, async () => {
     const store = await readStore(filePath);
-    return Array.isArray(store.routes[routeKey]) ? store.routes[routeKey] : [];
+    return store.routes[routeKey] ?? [];
   });
 }
