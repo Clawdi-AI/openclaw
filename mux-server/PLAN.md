@@ -252,6 +252,16 @@ The supported rollout target is:
 
 Both should work at the same time.
 
+Important nuance for that phase:
+
+- mux-server sends one inbound `accountId` value to every OpenClaw node it talks to
+- new OpenClaw accepts both `accountId=mux` and `accountId=default`, and normalizes legacy `mux`
+  to the default business-account path
+- old OpenClaw can still depend on the legacy dedicated `mux` account model
+- therefore, while any old OpenClaw nodes are still in the fleet, `MUX_OPENCLAW_ACCOUNT_ID`
+  should stay at `mux`
+- once the fleet is fully upgraded, switch `MUX_OPENCLAW_ACCOUNT_ID` back to `default`
+
 ### Resolution policy phases
 
 This should be implemented as a phased resolver policy, not a one-shot switch.
@@ -340,7 +350,11 @@ That path can still fail with `ROUTE_NOT_BOUND` because old mux-server does not 
 ### Compatibility knobs
 
 - `MUX_OPENCLAW_ACCOUNT_ID` should default to `default`
-- `MUX_OPENCLAW_ACCOUNT_ID=mux` remains compatibility-only and should not be recommended
+- during mixed-fleet rollout, keep `MUX_OPENCLAW_ACCOUNT_ID=mux` if any old OpenClaw nodes still
+  depend on the legacy dedicated `mux` account behavior
+- after the fleet is fully upgraded, switch `MUX_OPENCLAW_ACCOUNT_ID` back to `default`
+- `MUX_OPENCLAW_ACCOUNT_ID=mux` remains compatibility-only and should not be the steady-state
+  recommendation
 - legacy OpenClaw account config like `accounts.mux.mux.enabled` may remain temporarily supported, but the target model should not depend on it
 
 ## Acceptance Criteria
