@@ -155,6 +155,12 @@ Current opt-in legacy scenarios:
 
 - Telegram DM round-trip with a real `phala-2026.2.17` gateway process
 - Telegram callback/edit flow with a real `phala-2026.2.17` gateway process
+- Telegram document send via message tool with a real
+  `phala-2026.2.17` gateway process
+- Telegram photo send via message tool with a real `phala-2026.2.17`
+  gateway process
+- Telegram voice send via message tool with a real `phala-2026.2.17`
+  gateway process
 - Telegram group round-trip with a real `phala-2026.2.17` gateway process
 - Telegram forum-topic round-trip with a real `phala-2026.2.17` gateway process
 - Telegram gateway-send queue replay after restart with a real

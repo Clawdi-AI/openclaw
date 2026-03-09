@@ -70,6 +70,7 @@ async function runLegacyScenario(params: {
   resolutionMode?: "session-first" | "target-first";
   llmReplyText?: string;
   assertSessionEntry?: boolean;
+  minimalGateway?: boolean;
 }) {
   const scenario = requireScenario(params.scenarioId);
   const inboundText = `legacy ${scenario.id}`;
@@ -82,6 +83,12 @@ async function runLegacyScenario(params: {
       pairingRouteKey: scenario.pairingRouteKey?.(scenario.chatId),
       llmReplyText: expectedReply,
       resolutionMode: params.resolutionMode ?? "session-first",
+      minimalGateway: params.minimalGateway,
+      openAiResponder: scenario.openAiResponder({
+        chatId: scenario.chatId,
+        inboundText,
+        expectedReply,
+      }),
       gatewayRuntime: "legacy",
       legacyRepoPath: legacyRepoPath ?? undefined,
       workspaceFiles: scenario.workspaceFiles,
@@ -157,6 +164,37 @@ describe("mux Telegram real legacy OpenClaw compatibility", () => {
       llmReplyText: "",
     });
   });
+
+  legacyTest("sends a document through the real legacy gateway", { timeout: 180_000 }, async () => {
+    await runLegacyScenario({
+      scenarioId: "dm-document-via-message-tool",
+      llmReplyText: "",
+      minimalGateway: false,
+      assertSessionEntry: false,
+    });
+  });
+
+  legacyTest("sends a photo through the real legacy gateway", { timeout: 180_000 }, async () => {
+    await runLegacyScenario({
+      scenarioId: "dm-photo-via-message-tool",
+      llmReplyText: "",
+      minimalGateway: false,
+      assertSessionEntry: false,
+    });
+  });
+
+  legacyTest(
+    "sends a voice note through the real legacy gateway",
+    { timeout: 180_000 },
+    async () => {
+      await runLegacyScenario({
+        scenarioId: "dm-voice-via-message-tool",
+        llmReplyText: "",
+        minimalGateway: false,
+        assertSessionEntry: false,
+      });
+    },
+  );
 
   legacyTest("round-trips a real legacy group message", { timeout: 180_000 }, async () => {
     await runLegacyScenario({
