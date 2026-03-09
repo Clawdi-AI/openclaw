@@ -151,9 +151,14 @@ The suite can also launch a real legacy OpenClaw gateway from another checkout
 instead of the current workspace gateway process. This is meant for rollout
 compatibility checks against the current mux-server.
 
-Current opt-in legacy scenario:
+Current opt-in legacy scenarios:
 
 - Telegram DM round-trip with a real `phala-2026.2.17` gateway process
+- Telegram callback/edit flow with a real `phala-2026.2.17` gateway process
+- Telegram group round-trip with a real `phala-2026.2.17` gateway process
+- Telegram forum-topic round-trip with a real `phala-2026.2.17` gateway process
+- Telegram gateway-send queue replay after restart with a real
+  `phala-2026.2.17` gateway process
 
 How to run it:
 

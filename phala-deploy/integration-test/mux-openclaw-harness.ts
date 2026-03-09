@@ -408,7 +408,7 @@ export async function startMuxOpenClawHarness(
     const runtime = params.gatewayRuntime ?? "current";
     const harnessEnv = buildHarnessEnv(paths, {
       channel,
-      minimalGateway: runtime === "legacy" ? true : params.minimalGateway,
+      minimalGateway: params.minimalGateway,
     });
     Object.assign(process.env, harnessEnv);
     await mkdir(paths.workspaceDir, { recursive: true });
