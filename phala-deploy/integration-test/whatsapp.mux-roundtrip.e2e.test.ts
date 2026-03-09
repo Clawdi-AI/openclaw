@@ -80,4 +80,79 @@ describe("WhatsApp mux round trip", () => {
     },
     60_000,
   );
+
+  test.each(["session-first", "target-first"] as const)(
+    "round-trips a WhatsApp group in %s mode",
+    async (resolutionMode) => {
+      const groupJid = "120363401234567890@g.us";
+      const senderE164 = "+15550002222";
+      const inboundText = `hello from whatsapp group ${resolutionMode}`;
+      const expectedReply = `WHATSAPP_GROUP_OK_${resolutionMode}`;
+
+      await withMuxOpenClawHarness(
+        {
+          channel: "whatsapp",
+          chatId: groupJid,
+          claimedSessionKey: `wa:group:${groupJid}`,
+          pairingRouteKey: `whatsapp:default:chat:${groupJid}`,
+          llmReplyText: expectedReply,
+          resolutionMode,
+          minimalGateway: false,
+        },
+        async (harness) => {
+          const whatsapp = harness.whatsapp;
+          expect(whatsapp).toBeDefined();
+          if (!whatsapp) {
+            throw new Error("whatsapp harness not available");
+          }
+
+          whatsapp.enqueueMessage({
+            id: "wa-group-9001",
+            from: groupJid,
+            conversationId: groupJid,
+            to: "+15551230000",
+            accountId: "default",
+            body: inboundText,
+            chatType: "group",
+            chatId: groupJid,
+            senderE164,
+            senderName: "Group Sender",
+            pushName: "Group Sender",
+            wasMentioned: true,
+            timestamp: Date.now(),
+          });
+
+          await harness.openai.waitForRequest(
+            (request) => request.lastUserText.includes(inboundText),
+            10_000,
+          );
+
+          const typing = await whatsapp.waitForRequest(
+            (request) => request.kind === "typing" && request.to === groupJid,
+            10_000,
+          );
+          const outbound = await whatsapp.waitForRequest(
+            (request) =>
+              request.kind === "sendMessage" &&
+              request.to === groupJid &&
+              request.text === expectedReply,
+            10_000,
+          );
+
+          expect(whatsapp.requests.indexOf(outbound)).toBeGreaterThan(
+            whatsapp.requests.indexOf(typing),
+          );
+
+          const sessionEntry = await harness.waitForSessionStoreEntry(
+            `agent:main:whatsapp:group:${groupJid}`,
+          );
+          expect(sessionEntry).toMatchObject({
+            lastChannel: "whatsapp",
+            lastTo: `whatsapp:${groupJid}`,
+          });
+        },
+      );
+    },
+    60_000,
+  );
 });

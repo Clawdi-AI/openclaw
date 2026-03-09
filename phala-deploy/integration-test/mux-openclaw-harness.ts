@@ -71,6 +71,8 @@ type StartHarnessParams = {
   resolutionMode: "session-first" | "target-first";
   minimalGateway?: boolean;
   telegramStreamMode?: "off" | "partial" | "block";
+  discordGatewayDmEnabled?: boolean;
+  discordGatewayGuildEnabled?: boolean;
   openAiResponder?: (request: FakeOpenAiRequest) => FakeOpenAiResponsePlan;
   workspaceFiles?: Record<string, string | Uint8Array>;
 };
@@ -214,6 +216,8 @@ async function startMuxServer(params: {
   pairingRouteKey: string;
   telegramBaseUrl?: string;
   discordBaseUrl?: string;
+  discordGatewayDmEnabled?: boolean;
+  discordGatewayGuildEnabled?: boolean;
   whatsappControlUrl?: string;
   resolutionMode: "session-first" | "target-first";
 }): Promise<StartedMuxServer> {
@@ -244,8 +248,8 @@ async function startMuxServer(params: {
             MUX_DISCORD_API_BASE_URL: params.discordBaseUrl,
             MUX_DISCORD_POLL_INTERVAL_MS: "50",
             MUX_DISCORD_BOOTSTRAP_LATEST: "false",
-            MUX_DISCORD_GATEWAY_DM_ENABLED: "false",
-            MUX_DISCORD_GATEWAY_GUILD_ENABLED: "false",
+            MUX_DISCORD_GATEWAY_DM_ENABLED: params.discordGatewayDmEnabled ? "true" : "false",
+            MUX_DISCORD_GATEWAY_GUILD_ENABLED: params.discordGatewayGuildEnabled ? "true" : "false",
           }
         : {}),
       ...(params.whatsappControlUrl
@@ -451,6 +455,12 @@ export async function startMuxOpenClawHarness(
             : `whatsapp:default:chat:${params.chatId}`),
       ...(telegram ? { telegramBaseUrl: telegram.url } : {}),
       ...(discord ? { discordBaseUrl: discord.url } : {}),
+      ...(discord
+        ? {
+            discordGatewayDmEnabled: params.discordGatewayDmEnabled,
+            discordGatewayGuildEnabled: params.discordGatewayGuildEnabled,
+          }
+        : {}),
       ...(whatsapp ? { whatsappControlUrl: whatsapp.url } : {}),
       resolutionMode: params.resolutionMode,
     });

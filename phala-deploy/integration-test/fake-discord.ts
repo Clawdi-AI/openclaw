@@ -1,4 +1,5 @@
 import http from "node:http";
+import { WebSocketServer, type WebSocket } from "ws";
 import { closeHttpServer, getFreePort, readJsonBody, waitForCondition } from "./test-utils.js";
 
 export type FakeDiscordRequest =
@@ -30,6 +31,19 @@ type FakeDiscordInboundMessage = {
   attachments: unknown[];
   mentions: unknown[];
   mention_roles: unknown[];
+  guild_id?: string;
+  type?: number;
+  thread?: {
+    id: string;
+    parent_id: string;
+  };
+};
+
+type FakeDiscordChannel = {
+  id: string;
+  guildId?: string;
+  parentId?: string;
+  type: number;
 };
 
 function toStringId(value: unknown): string {
@@ -47,22 +61,38 @@ export class FakeDiscordApi {
 
   private readonly pendingMessagesByChannel = new Map<string, FakeDiscordInboundMessage[]>();
   private readonly dmChannelsByUser = new Map<string, string>();
+  private readonly channels = new Map<string, FakeDiscordChannel>();
+  private readonly gatewayFrames: Array<Record<string, unknown>> = [];
+  private gatewaySocket: WebSocket | null = null;
+  private gatewayIdentified = false;
+  private gatewaySequence = 1;
   private nextMessageId = 8_000;
 
   private constructor(
     readonly server: http.Server,
+    readonly gatewayServer: WebSocketServer,
     readonly url: string,
   ) {}
 
   static async start(): Promise<FakeDiscordApi> {
     const port = await getFreePort();
+    const gatewayServer = new WebSocketServer({ noServer: true });
     let instance: FakeDiscordApi;
-    instance = new FakeDiscordApi(
-      http.createServer(async (req, res) => {
-        await instance.handleRequest(req, res);
-      }),
-      `http://127.0.0.1:${port}`,
-    );
+    const server = http.createServer(async (req, res) => {
+      await instance.handleRequest(req, res);
+    });
+    server.on("upgrade", (req, socket, head) => {
+      const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+      if (pathname !== "/gateway") {
+        socket.destroy();
+        return;
+      }
+      gatewayServer.handleUpgrade(req, socket, head, (ws) => {
+        gatewayServer.emit("connection", ws, req);
+      });
+    });
+    instance = new FakeDiscordApi(server, gatewayServer, `http://127.0.0.1:${port}`);
+    instance.configureGatewayServer();
     await new Promise<void>((resolveServer, reject) => {
       instance.server.once("error", reject);
       instance.server.listen(port, "127.0.0.1", () => {
@@ -75,6 +105,23 @@ export class FakeDiscordApi {
 
   registerDmChannel(userId: string, channelId: string): void {
     this.dmChannelsByUser.set(userId, channelId);
+  }
+
+  registerGuildChannel(params: { guildId: string; channelId: string }): void {
+    this.channels.set(params.channelId, {
+      id: params.channelId,
+      guildId: params.guildId,
+      type: 0,
+    });
+  }
+
+  registerThread(params: { guildId: string; threadId: string; parentId: string }): void {
+    this.channels.set(params.threadId, {
+      id: params.threadId,
+      guildId: params.guildId,
+      parentId: params.parentId,
+      type: 11,
+    });
   }
 
   enqueueDmMessage(params: {
@@ -107,6 +154,45 @@ export class FakeDiscordApi {
     this.pendingMessagesByChannel.set(channelId, current);
   }
 
+  enqueueGuildMessage(params: {
+    guildId: string;
+    channelId: string;
+    messageId: string;
+    content: string;
+    authorId: string;
+    timestamp?: string;
+    username?: string;
+  }): void {
+    const channel = this.channels.get(params.channelId);
+    const thread =
+      channel?.type === 11 && channel.parentId
+        ? { id: params.channelId, parent_id: channel.parentId }
+        : undefined;
+    this.gatewayFrames.push({
+      op: 0,
+      t: "MESSAGE_CREATE",
+      s: this.gatewaySequence++,
+      d: {
+        id: params.messageId,
+        channel_id: params.channelId,
+        guild_id: params.guildId,
+        type: 0,
+        content: params.content,
+        author: {
+          id: params.authorId,
+          bot: false,
+          ...(params.username ? { username: params.username } : {}),
+        },
+        ...(thread ? { thread } : {}),
+        attachments: [],
+        mentions: [],
+        mention_roles: [],
+        timestamp: params.timestamp ?? "2026-01-01T00:00:00.000Z",
+      },
+    });
+    this.flushGatewayFrames();
+  }
+
   async waitForRequest(
     predicate: (request: FakeDiscordRequest) => boolean,
     timeoutMs = 10_000,
@@ -119,12 +205,79 @@ export class FakeDiscordApi {
   }
 
   async close(): Promise<void> {
+    this.gatewayServer.clients.forEach((client) => {
+      try {
+        client.close();
+      } catch {
+        // Ignore shutdown errors in tests.
+      }
+    });
+    await new Promise<void>((resolveClose) => {
+      this.gatewayServer.close(() => resolveClose());
+    });
     await closeHttpServer(this.server);
+  }
+
+  private configureGatewayServer(): void {
+    this.gatewayServer.on("connection", (socket) => {
+      this.gatewaySocket = socket;
+      this.gatewayIdentified = false;
+      socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 60_000 } }));
+      socket.on("message", (raw) => {
+        const text =
+          typeof raw === "string"
+            ? raw
+            : Buffer.isBuffer(raw)
+              ? raw.toString("utf8")
+              : Array.isArray(raw)
+                ? Buffer.concat(raw).toString("utf8")
+                : Buffer.from(raw).toString("utf8");
+        const payload = JSON.parse(text) as { op?: unknown };
+        if (Number(payload.op) !== 2) {
+          return;
+        }
+        this.gatewayIdentified = true;
+        socket.send(
+          JSON.stringify({
+            op: 0,
+            t: "READY",
+            s: 1,
+            d: { session_id: "fake-discord-session" },
+          }),
+        );
+        this.flushGatewayFrames();
+      });
+      socket.on("close", () => {
+        if (this.gatewaySocket === socket) {
+          this.gatewaySocket = null;
+        }
+        this.gatewayIdentified = false;
+      });
+    });
+  }
+
+  private flushGatewayFrames(): void {
+    if (!this.gatewayIdentified || !this.gatewaySocket || this.gatewaySocket.readyState !== 1) {
+      return;
+    }
+    while (this.gatewayFrames.length > 0) {
+      const frame = this.gatewayFrames.shift();
+      if (!frame) {
+        break;
+      }
+      this.gatewaySocket.send(JSON.stringify(frame));
+    }
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const method = req.method ?? "GET";
     const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+
+    if (method === "GET" && requestUrl.pathname === "/gateway/bot") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ url: this.url.replace(/^http/i, "ws") + "/gateway" }));
+      return;
+    }
 
     if (method === "POST" && requestUrl.pathname === "/users/@me/channels") {
       const body = await readJsonBody(req);
@@ -138,6 +291,27 @@ export class FakeDiscordApi {
       });
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ id: channelId }));
+      return;
+    }
+
+    const channelMatch = requestUrl.pathname.match(/^\/channels\/([^/]+)$/);
+    if (channelMatch && method === "GET") {
+      const channelId = channelMatch[1] ?? "";
+      const channel = this.channels.get(channelId);
+      if (!channel) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          id: channel.id,
+          ...(channel.guildId ? { guild_id: channel.guildId } : {}),
+          ...(channel.parentId ? { parent_id: channel.parentId } : {}),
+          type: channel.type,
+        }),
+      );
       return;
     }
 

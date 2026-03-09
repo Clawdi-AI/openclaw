@@ -374,7 +374,10 @@ Already covered:
 - mocked Telegram media sends for photo and voice via the real `message` tool surface in both resolver modes
 - mocked Telegram restart recovery for both gateway `send` and agent-generated final replies after queued delivery failure in both resolver modes
 - mocked Discord DM round-trip integration with real OpenClaw + real mux-server in both resolver modes
+- mocked Discord guild channel round-trip integration with real OpenClaw + real mux-server in both resolver modes
+- mocked Discord thread round-trip integration with real OpenClaw + real mux-server in both resolver modes
 - mocked WhatsApp DM round-trip integration with real OpenClaw + real mux-server in both resolver modes
+- mocked WhatsApp group round-trip integration with real OpenClaw + real mux-server in both resolver modes
 - full OpenClaw inbound normalization matrix across Telegram, Discord, and WhatsApp channel shapes
 - full non-default-account mux bypass matrix across Telegram, Discord, and WhatsApp adapters
 - full old/new queue persistence compatibility matrix
@@ -383,8 +386,6 @@ Already covered:
 Still incomplete:
 
 - full mux-server negative safety matrix beyond the no-safe-target canonical cases
-- mocked Discord guild/thread round-trip integration
-- mocked WhatsApp group round-trip integration
 - manual release checks for Discord and WhatsApp
 
 ### Fixture policy
@@ -405,7 +406,7 @@ Still incomplete:
   - golden real payloads are in place for DM text, group text, forum-topic text, callback query, photo, document, and voice
 - Current mocked priority after restart/send recovery:
   - broaden safety cases outside Telegram DM
-  - extend non-Telegram mocked round-trip from Discord/WhatsApp DMs into Discord guild/thread and WhatsApp group flows
+  - keep the non-Telegram round-trip matrix aligned with future permission/runtime changes
 
 ### A. Required automated coverage: OpenClaw unit/contract tests
 

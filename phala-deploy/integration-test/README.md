@@ -79,8 +79,7 @@ Current test files:
 Not covered yet:
 
 - Telegram poll round-trip from the real current-channel prompt/tool surface
-- Discord guild/thread mocked round-trip
-- WhatsApp group mocked round-trip
+- manual Discord/WhatsApp release checks
 
 ## Architecture
 
@@ -140,8 +139,11 @@ Current golden coverage:
 Current mocked non-Telegram coverage:
 
 - Discord DM round-trip in `session-first` and `target-first`
+- Discord guild channel round-trip in `session-first` and `target-first`
+- Discord thread round-trip in `session-first` and `target-first`
 - WhatsApp DM round-trip in `session-first` and `target-first`
-- remaining non-Telegram gaps: Discord guild/thread and WhatsApp group round-trip
+- WhatsApp group round-trip in `session-first` and `target-first`
+- remaining non-Telegram gap: manual release checks
 
 ## Recommended fixture model
 
@@ -191,8 +193,7 @@ Near term:
 1. add table-driven Telegram scenarios that run in both resolver modes
 2. extend restart and delayed-send coverage beyond gateway `send`
 3. broaden mixed-fleet coverage beyond Telegram DM
-4. add Discord guild/thread round-trip
-5. add WhatsApp group round-trip
+4. add manual Discord/WhatsApp release checks
 
 Next:
 
