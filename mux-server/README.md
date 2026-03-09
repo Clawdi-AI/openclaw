@@ -98,7 +98,7 @@ node --import tsx mux-server/src/server.ts
 - `MUX_MAX_BODY_BYTES` (default `52428800`): max accepted JSON request body size for mux HTTP APIs.
 - `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
-- `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events. Keep this at `default` for the current singleton mux model; `mux` remains compatibility-only for older deployments.
+- `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events. Keep this at `default` for the current singleton mux model. During phase-1 mixed-fleet rollout, keep `mux` only if some older OpenClaw nodes still depend on the legacy dedicated mux account; once those nodes are upgraded, switch back to `default`.
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
 - `MUX_DISCORD_API_BASE_URL` (default `https://discord.com/api/v10`): Discord API base URL.
 - `MUX_TELEGRAM_POLL_TIMEOUT_SEC` (default `25`): Telegram long-poll timeout.
