@@ -135,6 +135,10 @@ function isDirectChat(chatType: string | undefined): boolean {
   return (chatType ?? "direct") === "direct";
 }
 
+function resolveMuxChatType(chatType: string | undefined): string {
+  return isDirectChat(chatType) ? "direct" : (chatType ?? "direct");
+}
+
 function readMuxStringishId(value: unknown): string | undefined {
   return (
     readMuxNonEmptyString(value) ??
@@ -239,7 +243,7 @@ function resolveTelegramCallbackPayload(params: {
     chatId,
     callbackMessageId,
     messageThreadId,
-    isGroup: (readMuxNonEmptyString(params.payload.chatType) ?? "direct") !== "direct",
+    isGroup: !isDirectChat(readMuxNonEmptyString(params.payload.chatType)),
     isForum: rawChat?.is_forum === true,
     accountId: params.accountId,
   };
@@ -276,7 +280,7 @@ function resolveTelegramInboundPeer(params: {
       : readMuxPositiveInt(fallbackThreadId));
   return {
     chatId,
-    isGroup: (readMuxNonEmptyString(params.payload.chatType) ?? "direct") !== "direct",
+    isGroup: !isDirectChat(readMuxNonEmptyString(params.payload.chatType)),
     isForum: rawChat?.is_forum === true,
     messageThreadId,
   };
@@ -287,7 +291,7 @@ function resolveDiscordInboundPeerId(params: {
   channelData: Record<string, unknown> | undefined;
 }): { kind: "direct" | "group" | "channel"; id: string; guildId?: string } | null {
   const guildId = readMuxNonEmptyString(params.channelData?.guildId);
-  const isDirect = (readMuxNonEmptyString(params.payload.chatType) ?? "direct") === "direct";
+  const isDirect = isDirectChat(readMuxNonEmptyString(params.payload.chatType));
   if (isDirect) {
     const from = readMuxNonEmptyString(params.payload.from);
     if (!from) {
@@ -411,7 +415,7 @@ function resolveWhatsAppInboundPeerId(params: { payload: MuxInboundPayload }): {
   kind: "direct" | "group";
   id: string;
 } | null {
-  const isGroup = (readMuxNonEmptyString(params.payload.chatType) ?? "direct") !== "direct";
+  const isGroup = !isDirectChat(readMuxNonEmptyString(params.payload.chatType));
   const groupTarget = normalizeWhatsAppTarget(readMuxNonEmptyString(params.payload.to) ?? "");
   if (isGroup && groupTarget && isWhatsAppGroupJid(groupTarget)) {
     return { kind: "group", id: groupTarget };
@@ -1345,7 +1349,7 @@ export async function handleMuxInboundHttpRequest(
     AccountId: accountId,
     MessageSid: messageId,
     Timestamp: readMuxOptionalNumber(payload.timestampMs),
-    ChatType: readMuxNonEmptyString(payload.chatType) ?? "direct",
+    ChatType: resolveMuxChatType(readMuxNonEmptyString(payload.chatType)),
     Provider: channel,
     Surface: isTelegramStreaming ? channel : "mux",
     OriginatingChannel: channel,
