@@ -337,7 +337,7 @@ function resolveMuxInboundOriginatingTarget(params: {
     }
     return peer.kind === "direct" ? `user:${peer.id}` : `channel:${peer.id}`;
   }
-  return readMuxNonEmptyString(params.payload.to);
+  return readMuxNonEmptyString(params.payload.to) ?? null;
 }
 
 function resolveDiscordMuxSender(params: {
@@ -785,16 +785,17 @@ async function resolveTelegramMuxAccess(params: {
     return { allowed: false };
   }
 
-  const requireMention = firstDefined(
-    groupAllowContext.topicConfig?.requireMention,
-    groupAllowContext.groupConfig?.requireMention,
-    resolveChannelGroupRequireMention({
-      cfg: params.cfg,
-      channel: "telegram",
-      accountId: params.accountId,
-      groupId: String(peer.chatId),
-    }),
-  );
+  const requireMention =
+    firstDefined(
+      groupAllowContext.topicConfig?.requireMention,
+      groupAllowContext.groupConfig?.requireMention,
+      resolveChannelGroupRequireMention({
+        cfg: params.cfg,
+        channel: "telegram",
+        accountId: params.accountId,
+        groupId: String(peer.chatId),
+      }),
+    ) ?? false;
   const commandAuthorized = resolveControlCommandGate({
     useAccessGroups,
     authorizers: [

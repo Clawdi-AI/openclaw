@@ -299,6 +299,7 @@ async function dispatchAuthorizedMuxInbound(params: {
           OriginatingTo?: string;
           MessageThreadId?: string | number;
           CommandAuthorized?: boolean;
+          WasMentioned?: boolean;
         };
       }
     | undefined;
@@ -471,6 +472,7 @@ describe("handleMuxInboundHttpRequest", () => {
             SessionKey?: string;
             MessageSid?: string;
             CommandAuthorized?: boolean;
+            WasMentioned?: boolean;
             Body?: string;
             RawBody?: string;
             CommandBody?: string;

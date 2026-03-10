@@ -251,8 +251,12 @@ export function buildEmbeddedRunPayloads(params: {
     hasUserFacingAssistantReply = true;
   }
 
-  if ((fallbackAnswerTextParsed?.mediaUrls?.length ?? 0) > 0) {
-    const fallbackText = fallbackAnswerTextParsed?.text ?? "";
+  const fallbackAnswerTextWithMedia =
+    fallbackAnswerTextParsed && (fallbackAnswerTextParsed.mediaUrls?.length ?? 0) > 0
+      ? fallbackAnswerTextParsed
+      : null;
+  if (fallbackAnswerTextWithMedia) {
+    const fallbackText = fallbackAnswerTextWithMedia.text ?? "";
     const fallbackNormalized = normalizeTextForComparison(fallbackText);
     const matchingReply = replyItems.find((item) => {
       if ((item.media?.length ?? 0) > 0) {
@@ -267,11 +271,11 @@ export function buildEmbeddedRunPayloads(params: {
       return normalizeTextForComparison(item.text) === fallbackNormalized;
     });
     if (matchingReply) {
-      matchingReply.media = fallbackAnswerTextParsed.mediaUrls;
-      matchingReply.audioAsVoice ||= fallbackAnswerTextParsed.audioAsVoice;
-      matchingReply.replyToId ??= fallbackAnswerTextParsed.replyToId;
-      matchingReply.replyToTag ||= fallbackAnswerTextParsed.replyToTag;
-      matchingReply.replyToCurrent ||= fallbackAnswerTextParsed.replyToCurrent;
+      matchingReply.media = fallbackAnswerTextWithMedia.mediaUrls;
+      matchingReply.audioAsVoice ||= fallbackAnswerTextWithMedia.audioAsVoice;
+      matchingReply.replyToId ??= fallbackAnswerTextWithMedia.replyToId;
+      matchingReply.replyToTag ||= fallbackAnswerTextWithMedia.replyToTag;
+      matchingReply.replyToCurrent ||= fallbackAnswerTextWithMedia.replyToCurrent;
     }
   }
 
