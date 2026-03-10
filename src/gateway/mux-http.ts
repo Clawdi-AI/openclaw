@@ -146,6 +146,16 @@ function readMuxStringishId(value: unknown): string | undefined {
   );
 }
 
+function sanitizeDiscordRoleId(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  return "";
+}
+
 function resolveTelegramMuxMessageData(channelData: Record<string, unknown> | undefined): {
   telegramData: Record<string, unknown> | undefined;
   rawMessage: Record<string, unknown> | undefined;
@@ -360,15 +370,7 @@ function resolveDiscordMuxSender(params: {
       : senderName
     : undefined;
   const rawRoles = Array.isArray(member?.roles) ? member.roles : [];
-  const memberRoleIds = rawRoles
-    .map((roleId) =>
-      typeof roleId === "string"
-        ? roleId.trim()
-        : typeof roleId === "number" && Number.isFinite(roleId)
-          ? String(Math.trunc(roleId))
-          : "",
-    )
-    .filter(Boolean);
+  const memberRoleIds = rawRoles.map(sanitizeDiscordRoleId).filter(Boolean);
   return {
     senderId,
     senderName,
