@@ -84,6 +84,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential && \
     npm install -g /tmp/openclaw.tgz && \
     rm -f /tmp/openclaw.tgz && \
+    openclaw plugins install @tencent-connect/openclaw-qqbot@latest && \
+    openclaw plugins install @dingtalk-real-ai/dingtalk-connector@latest && \
+    rm -f /root/.openclaw/openclaw.json /root/.openclaw/openclaw.json.bak && \
     apt-get purge -y --auto-remove build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /root/.npm /tmp/* /usr/include
