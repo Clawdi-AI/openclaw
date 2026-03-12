@@ -87,10 +87,12 @@ function normalizeSenderId(senderId: string): string {
 
 export function resolveMuxPairingAnchorRouteKey(routeKey: string): string {
   const raw = normalizeRouteKey(routeKey);
+  // Telegram pairing is chat-scoped, so any topic-specific route collapses to the parent chat.
   const telegram = raw.match(/^(telegram:[^:]+:chat:[^:]+)(?::topic:\d+)?$/i);
   if (telegram?.[1]) {
     return telegram[1];
   }
+  // Discord guild pairing is guild-scoped, so channel/thread routes collapse to the guild anchor.
   const discordGuild = raw.match(
     /^discord:[^:]+:guild:[^:]+(?::channel:[^:]+)?(?::thread:[^:]+)?$/i,
   );
