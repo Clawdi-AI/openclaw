@@ -4316,6 +4316,7 @@ async function sendPostPairingSyntheticInbound(params: {
   const prompt = resolvePostPairingPrompt(params.channel);
   const now = Date.now();
   const syntheticId = `synth:pair:${randomUUID()}`;
+  const discordRoute = params.channel === "discord" ? parseDiscordRouteKey(params.routeKey) : null;
 
   let payload: Record<string, unknown>;
   if (params.channel === "telegram") {
@@ -4344,10 +4345,11 @@ async function sendPostPairingSyntheticInbound(params: {
       rawBody: prompt,
       fromId: params.fromId,
       channelId: params.chatId,
-      guildId: null,
+      guildId: discordRoute?.kind === "guild" ? discordRoute.guildId : null,
       routeKey: params.routeKey,
       chatType: params.chatType,
       timestampMs: now,
+      threadId: discordRoute?.kind === "guild" ? discordRoute.threadId : undefined,
       rawMessage: {},
       media: null,
       attachments: [],

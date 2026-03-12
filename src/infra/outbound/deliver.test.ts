@@ -258,6 +258,12 @@ describe("deliverOutboundPayloads", () => {
     expect(loggerMocks.logWarn).toHaveBeenCalledWith(
       expect.stringContaining("using caller-provided sessionKey fallback"),
     );
+    expect(queueMocks.enqueueDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "main",
+        sessionKey: "agent:main:main",
+      }),
+    );
     expect(sendTelegram).toHaveBeenCalledWith(
       "telegram:",
       "hi",

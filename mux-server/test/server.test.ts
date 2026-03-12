@@ -6019,12 +6019,19 @@ describe("mux server", () => {
     dispatchGatewayMessages();
 
     await waitForCondition(
-      () => filterRealInbound(inboundRequests).length >= 2,
+      () =>
+        filterRealInbound(inboundRequests).length >= 2 &&
+        inboundRequests.some((request) =>
+          toSafeString(request.messageId).startsWith("synth:pair:"),
+        ),
       25_000,
       "timed out waiting for discord guild thread inbound forwards",
     );
 
     const realInbound = filterRealInbound(inboundRequests);
+    const syntheticInbound = inboundRequests.find((request) =>
+      toSafeString(request.messageId).startsWith("synth:pair:"),
+    );
     expect(realInbound).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -6053,6 +6060,16 @@ describe("mux server", () => {
         }),
       ]),
     );
+    expect(syntheticInbound).toMatchObject({
+      channel: "discord",
+      sessionKey: `agent:main:discord:channel:${threadAId}`,
+      chatType: "group",
+      channelData: expect.objectContaining({
+        channelId: threadAId,
+        guildId,
+        routeKey: `discord:default:guild:${guildId}`,
+      }),
+    });
 
     expect(pairingNotices.some((notice) => toSafeString(notice.content).includes("Paired"))).toBe(
       true,

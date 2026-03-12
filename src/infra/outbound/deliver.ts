@@ -279,7 +279,7 @@ export async function deliverOutboundPayloads(
     agentId,
     sessionKey,
   };
-  const queueSessionKey = agentId ? undefined : sessionKey;
+  const queueSessionKey = derivedRoute ? undefined : sessionKey;
 
   // Write-ahead delivery queue: persist before sending, remove after success.
   const queueId = params.skipQueue
