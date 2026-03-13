@@ -3,12 +3,19 @@
     "~~crm": { "backend": "composio", "ref": "clawdi-mcp.HUBSPOT_*" },
     "~~chat": { "backend": "skill", "ref": "slack" },
     "~~email": { "backend": "composio", "ref": "clawdi-mcp.GOOGLESUPER_*" },
-    "~~enrichment": { "backend": "mcporter", "ref": "zoominfo" },
+    "~~email-marketing": { "backend": "mcporter", "ref": "klaviyo" },
+    "~~enrichment": { "backend": "mcporter", "ref": "zoominfo", "alt": ["apollo"] },
     "~~docs": { "backend": "composio", "ref": "clawdi-mcp.NOTION_*" },
     "~~tracker": { "backend": "composio", "ref": "clawdi-mcp.LINEAR_*" },
-    "~~calendar": { "backend": "composio", "ref": "clawdi-mcp.GOOGLESUPER_*" },
-    "~~analytics": { "backend": "mcporter", "ref": "amplitude" },
-    "~~design": { "backend": "mcporter", "ref": "figma" },
-    "~~calls": { "backend": "mcporter", "ref": "fireflies" }
+    "~~calendar": {
+      "backend": "composio",
+      "ref": "clawdi-mcp.GOOGLESUPER_*",
+      "alt": ["google-calendar"]
+    },
+    "~~analytics": { "backend": "mcporter", "ref": "amplitude", "alt": ["similarweb"] },
+    "~~design": { "backend": "mcporter", "ref": "figma", "alt": ["canva"] },
+    "~~calls": { "backend": "mcporter", "ref": "fireflies" },
+    "~~outreach": { "backend": "mcporter", "ref": "outreach" },
+    "~~seo": { "backend": "mcporter", "ref": "ahrefs" }
   }
 }
