@@ -1,0 +1,10 @@
+{
+  "id": "work-connectors",
+  "name": "Work Connectors",
+  "description": "Injects ~~category connector resolution into every prompt.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

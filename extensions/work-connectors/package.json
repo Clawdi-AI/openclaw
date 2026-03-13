@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/work-connectors",
+  "version": "2026.2.17",
+  "description": "Hook-based ~~category connector resolution for knowledge-work skills",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
