@@ -1,6 +1,6 @@
 ---
 name: sales-forecast
-description: Generate a weighted sales forecast with best/likely/worst scenarios, commit vs. upside breakdown, and gap analysis. Use when preparing a quarterly forecast call, assessing gap-to-quota from a pipeline CSV, deciding which deals to commit vs. call upside, or checking pipeline coverage against your number.
+description: Generate a weighted sales forecast with best/likely/worst scenarios, commit vs. upside breakdown, and gap-to-quota analysis. Trigger with "forecast my quarter", "gap to quota", "what can I commit". NOT for pipeline reviews or deal prioritization.
 metadata: '{"openclaw":{"emoji":"💰"}}'
 ---
 

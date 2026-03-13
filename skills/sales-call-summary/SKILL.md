@@ -1,6 +1,6 @@
 ---
 name: sales-call-summary
-description: Process call notes or a transcript — extract action items, draft follow-up email, generate internal summary. Use when pasting rough notes or a transcript after a discovery, demo, or negotiation call, drafting a customer follow-up, logging the activity for your CRM, or capturing objections and next steps for your team.
+description: Process call notes or a transcript after a meeting — extract action items, draft follow-up email, generate internal summary. Trigger with "summarize my call", "process these notes", "call follow-up". NOT for call preparation or scheduling.
 metadata: '{"openclaw":{"emoji":"💰"}}'
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: marketing-email-sequence
-description: Design and draft multi-email sequences with full copy, timing, branching logic, exit conditions, and performance benchmarks. Use when building onboarding, lead nurture, re-engagement, win-back, or product launch flows, when you need a complete drip campaign with A/B test suggestions, or when mapping a sequence end-to-end with a flow diagram.
+description: Design and draft multi-email sequences with full copy, timing, branching logic, and performance benchmarks. Trigger with "build a nurture sequence", "onboarding email flow", "drip campaign for [goal]". NOT for single emails or general content drafting.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 

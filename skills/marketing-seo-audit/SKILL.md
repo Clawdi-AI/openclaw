@@ -1,6 +1,6 @@
 ---
 name: marketing-seo-audit
-description: Run a comprehensive SEO audit — keyword research, on-page analysis, content gaps, technical checks, and competitor comparison. Use when assessing a site's SEO health, when finding keyword opportunities and content gaps competitors own, or when you need a prioritized action plan split into quick wins and strategic investments.
+description: Run a comprehensive SEO audit — keyword research, on-page analysis, technical checks, and competitor SEO comparison. Trigger with "SEO audit for [site]", "keyword research for [topic]", "check my site's SEO". NOT for content creation or campaign planning.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 
