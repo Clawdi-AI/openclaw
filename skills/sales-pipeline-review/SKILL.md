@@ -1,7 +1,7 @@
 ---
 name: sales-pipeline-review
 description: Analyze pipeline health — prioritize deals, flag stale or at-risk opportunities, and get a weekly action plan. Trigger with "review my pipeline", "which deals need attention", "pipeline health check". NOT for forecasting or individual deal research.
-metadata: '{"openclaw":{"emoji":"💰"}}'
+metadata: '{"openclaw":{"emoji":"📊","requires":{"bins":["lobster"]}}}'
 ---
 
 # /pipeline-review
@@ -260,3 +260,18 @@ You can tell me to weight differently: "Focus on big deals over soon deals" or "
 2. **Kill dead deals** — Stale opportunities inflate your pipeline and distort forecasts. Be ruthless.
 3. **Multi-thread everything** — If one person goes dark, you need a backup contact.
 4. **Close dates should mean something** — A close date is when you expect signature, not when you hope for one.
+
+---
+
+## Deterministic Pipeline (Lobster)
+
+For structured pipeline data, use the lobster tool:
+
+```json
+{
+  "action": "run",
+  "pipeline": "~~crm.list_deals --stage open --limit 50 | sales.score-deals | approve --prompt 'Review these scored deals?'"
+}
+```
+
+If lobster is not available, follow the manual steps above using ~~crm directly.
