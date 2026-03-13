@@ -1,6 +1,6 @@
 ---
 name: marketing-performance-report
-description: Build a marketing performance report with key metrics, trend analysis, wins and misses, and prioritized optimization recommendations. Use when wrapping a campaign, when preparing weekly, monthly, or quarterly channel summaries for stakeholders, or when you need data translated into an executive summary with next-period priorities.
+description: Build a marketing performance report with metrics, trend analysis, and optimization recommendations. Trigger with "marketing report", "campaign results", "how did [campaign] perform". NOT for planning campaigns or writing content.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 

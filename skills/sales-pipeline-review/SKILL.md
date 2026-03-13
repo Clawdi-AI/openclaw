@@ -1,6 +1,6 @@
 ---
 name: sales-pipeline-review
-description: Analyze pipeline health — prioritize deals, flag risks, get a weekly action plan. Use when running a weekly pipeline review, deciding which deals to focus on this week, spotting stale or stuck opportunities, auditing for hygiene issues like bad close dates, or identifying single-threaded deals.
+description: Analyze pipeline health — prioritize deals, flag stale or at-risk opportunities, and get a weekly action plan. Trigger with "review my pipeline", "which deals need attention", "pipeline health check". NOT for forecasting or individual deal research.
 metadata: '{"openclaw":{"emoji":"💰"}}'
 ---
 

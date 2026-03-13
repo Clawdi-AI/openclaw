@@ -1,6 +1,6 @@
 ---
 name: sales-daily-briefing
-description: Start your day with a prioritized sales briefing. Works standalone when you tell me your meetings and priorities, supercharged when you connect your calendar, CRM, and email. Trigger with "morning briefing", "daily brief", "what's on my plate today", "prep my day", or "start my day".
+description: Start your day with a prioritized sales briefing covering meetings, pipeline alerts, and action items. Trigger with "morning briefing", "daily brief", "what's on my plate today". NOT for deep account research or call preparation.
 metadata: '{"openclaw":{"emoji":"💰"}}'
 ---
 

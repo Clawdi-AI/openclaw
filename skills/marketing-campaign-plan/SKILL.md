@@ -1,6 +1,6 @@
 ---
 name: marketing-campaign-plan
-description: Generate a full campaign brief with objectives, audience, messaging, channel strategy, content calendar, and success metrics. Use when planning a product launch, lead-gen push, or awareness campaign, when you need a week-by-week content calendar with dependencies, or when translating a marketing goal into a structured, executable plan.
+description: Generate a full campaign brief with objectives, audience, messaging, channel strategy, content calendar, and success metrics. Trigger with "plan a campaign", "launch plan for [product]", "campaign brief". NOT for writing actual content or analyzing past performance.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 

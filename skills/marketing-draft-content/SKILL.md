@@ -1,6 +1,6 @@
 ---
 name: marketing-draft-content
-description: Draft blog posts, social media, email newsletters, landing pages, press releases, and case studies with channel-specific formatting and SEO recommendations. Use when writing any marketing content, when you need headline or subject line options, or when adapting a message for a specific platform, audience, and brand voice.
+description: Draft a marketing content piece — blog post, social post, landing page, press release, or case study. Trigger with "write a blog post about", "draft a LinkedIn post", "write landing page copy". NOT for email sequences or content strategy guidelines.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 

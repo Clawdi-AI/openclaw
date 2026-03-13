@@ -1,6 +1,6 @@
 ---
 name: sales-competitive-intelligence
-description: Research your competitors and build an interactive battlecard. Outputs an HTML artifact with clickable competitor cards and a comparison matrix. Trigger with "competitive intel", "research competitors", "how do we compare to [competitor]", "battlecard for [competitor]", or "what's new with [competitor]".
+description: Build sales battlecards with talk tracks, objection handling, and landmine questions for competitive deals. Trigger with "battlecard for [competitor]", "competitive intel", "how do we win against [competitor]". NOT for marketing positioning or content strategy.
 metadata: '{"openclaw":{"emoji":"💰"}}'
 ---
 
