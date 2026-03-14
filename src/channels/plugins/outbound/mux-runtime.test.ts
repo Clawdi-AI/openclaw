@@ -85,6 +85,29 @@ describe("mux runtime auth", () => {
     expect(isMuxEnabled({ cfg, channel: "telegram", accountId: "work" })).toBe(false);
   });
 
+  it("prefers channel-level mux config over default-account mux config", () => {
+    const cfg = {
+      ...runtimeMuxConfig(),
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+          accounts: {
+            default: {
+              mux: {
+                enabled: false,
+              },
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    expect(isMuxEnabled({ cfg, channel: "telegram" })).toBe(true);
+    expect(isMuxEnabled({ cfg, channel: "telegram", accountId: "default" })).toBe(true);
+  });
+
   it("registers once and sends outbound request with runtime jwt auth", async () => {
     const now = Date.now();
     const fetchSpy = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

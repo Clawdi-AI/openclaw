@@ -3,8 +3,9 @@ import type { OpenClawConfig } from "../../../config/config.js";
 import { loadOrCreateDeviceIdentity } from "../../../infra/device-identity.js";
 import type { PollInput } from "../../../polls.js";
 import {
-  isMuxDefaultBusinessAccount,
+  isLegacyMuxAccountId,
   LEGACY_MUX_ACCOUNT_ID,
+  resolveDefaultMuxBusinessAccountId,
   resolveMuxBusinessAccountId,
 } from "../../../utils/mux-account.js";
 
@@ -120,21 +121,12 @@ function resolveChannelMuxConfig(params: {
   accountId?: string;
 }): ResolvedChannelMuxConfig {
   const { cfg, channel, accountId } = params;
-  if (channel === "telegram") {
-    const channelCfg = cfg.channels?.telegram;
-    const resolvedAccountId = resolveMuxBusinessAccountId({ cfg, channel, accountId });
-    const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
-    const legacyMuxCfg = channelCfg?.accounts?.[LEGACY_MUX_ACCOUNT_ID]?.mux;
-    return normalizeChannelMuxConfig(channelCfg?.mux ?? accountCfg?.mux ?? legacyMuxCfg);
-  }
-  if (channel === "discord") {
-    const channelCfg = cfg.channels?.discord;
-    const resolvedAccountId = resolveMuxBusinessAccountId({ cfg, channel, accountId });
-    const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
-    const legacyMuxCfg = channelCfg?.accounts?.[LEGACY_MUX_ACCOUNT_ID]?.mux;
-    return normalizeChannelMuxConfig(channelCfg?.mux ?? accountCfg?.mux ?? legacyMuxCfg);
-  }
-  const channelCfg = cfg.channels?.whatsapp;
+  const channelCfg =
+    channel === "telegram"
+      ? cfg.channels?.telegram
+      : channel === "discord"
+        ? cfg.channels?.discord
+        : cfg.channels?.whatsapp;
   const resolvedAccountId = resolveMuxBusinessAccountId({ cfg, channel, accountId });
   const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
   const legacyMuxCfg = channelCfg?.accounts?.[LEGACY_MUX_ACCOUNT_ID]?.mux;
@@ -168,7 +160,12 @@ export function isMuxEnabled(params: {
   channel: SupportedMuxChannel;
   accountId?: string;
 }): boolean {
-  if (!isMuxDefaultBusinessAccount(params)) {
+  const defaultAccountId = resolveDefaultMuxBusinessAccountId(params);
+  if (
+    params.accountId &&
+    !isLegacyMuxAccountId(params.accountId) &&
+    params.accountId !== defaultAccountId
+  ) {
     return false;
   }
   return resolveChannelMuxConfig(params).enabled;

@@ -14,32 +14,20 @@ export function isMuxBusinessChannel(value: string): value is MuxBusinessChannel
 }
 
 export function isLegacyMuxAccountId(value?: string | null): boolean {
-  return normalizeAccountId(value ?? undefined)?.toLowerCase() === LEGACY_MUX_ACCOUNT_ID;
+  return normalizeAccountId(value ?? undefined) === LEGACY_MUX_ACCOUNT_ID;
 }
 
-export function normalizeLegacyMuxAccountId(value?: string | null): string | undefined {
-  const normalized = normalizeAccountId(value ?? undefined);
-  if (!normalized || normalized.toLowerCase() === LEGACY_MUX_ACCOUNT_ID) {
-    return undefined;
-  }
-  return normalized;
-}
-
-function normalizeResolvedDefaultAccountId(value: string): string {
-  return isLegacyMuxAccountId(value) ? DEFAULT_ACCOUNT_ID : value;
-}
-
-function resolveMuxDefaultAccountId(params: {
+export function resolveDefaultMuxBusinessAccountId(params: {
   cfg: OpenClawConfig;
   channel: MuxBusinessChannel;
 }): string {
-  if (params.channel === "telegram") {
-    return normalizeResolvedDefaultAccountId(resolveDefaultTelegramAccountId(params.cfg));
-  }
-  if (params.channel === "discord") {
-    return normalizeResolvedDefaultAccountId(resolveDefaultDiscordAccountId(params.cfg));
-  }
-  return normalizeResolvedDefaultAccountId(resolveDefaultWhatsAppAccountId(params.cfg));
+  const defaultAccountId =
+    params.channel === "telegram"
+      ? resolveDefaultTelegramAccountId(params.cfg)
+      : params.channel === "discord"
+        ? resolveDefaultDiscordAccountId(params.cfg)
+        : resolveDefaultWhatsAppAccountId(params.cfg);
+  return defaultAccountId === LEGACY_MUX_ACCOUNT_ID ? DEFAULT_ACCOUNT_ID : defaultAccountId;
 }
 
 export function resolveMuxBusinessAccountId(params: {
@@ -51,17 +39,5 @@ export function resolveMuxBusinessAccountId(params: {
   // Mux is a singleton transport mounted on the channel's default business
   // account. We intentionally ignore non-default account ids here so mux
   // follows the vanilla single-account path.
-  return resolveMuxDefaultAccountId(params);
-}
-
-export function isMuxDefaultBusinessAccount(params: {
-  cfg: OpenClawConfig;
-  channel: MuxBusinessChannel;
-  accountId?: string | null;
-}): boolean {
-  const normalized = normalizeLegacyMuxAccountId(params.accountId);
-  if (!normalized) {
-    return true;
-  }
-  return normalized === resolveMuxDefaultAccountId(params);
+  return resolveDefaultMuxBusinessAccountId(params);
 }
