@@ -25,7 +25,10 @@ export async function loadConnectors(filePath: string): Promise<ConnectorMap> {
  * Formats a connector map into a prompt block for injection.
  * Returns empty string if connectors is empty, null, or undefined.
  */
-export function formatConnectorsPrompt(connectors: ConnectorMap | null | undefined): string {
+export function formatConnectorsPrompt(
+  connectors: ConnectorMap | null | undefined,
+  connectorsFilePath?: string,
+): string {
   if (!connectors || Object.keys(connectors).length === 0) {
     return "";
   }
@@ -37,11 +40,15 @@ export function formatConnectorsPrompt(connectors: ConnectorMap | null | undefin
     return `- ${category}: use ${connector.backend} (${connector.ref})`;
   });
 
+  const fileLine = connectorsFilePath
+    ? `\nConnector config file: ${connectorsFilePath}\nTo change a connector, edit the JSON entry in that file (backend: "composio"|"mcporter"|"skill", ref: the server/skill name). Restart the gateway after editing.`
+    : "";
+
   return `## Connector Resolution
 When a skill references a ~~category, use this mapping:
 ${lines.join("\n")}
 If a connector is listed as "skill:<name>", use that OpenClaw skill's actions directly.
 If a connector is listed as "mcporter", use: mcporter call <ref>.<tool_name> key=value
 If a connector is listed as "composio", use the composio skill workflow (search -> connect -> execute).
-If a ~~category has no mapping configured, tell the user what to add to connectors.json.`;
+If a ~~category has no mapping configured, tell the user what to add to connectors.json.${fileLine}`;
 }
