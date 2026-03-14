@@ -12,6 +12,7 @@ import { isGifMedia } from "../../media/mime.js";
 import { saveMediaBuffer } from "../../media/store.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { loadWebMedia } from "../../web/media.js";
+import { resolveTelegramBotApiBaseUrl } from "../api-base-url.js";
 import { withTelegramApiErrorLogging } from "../api-logging.js";
 import type { TelegramInlineButtons } from "../button-types.js";
 import { splitTelegramCaption } from "../caption.js";
@@ -314,11 +315,13 @@ export async function resolveMedia(
 } | null> {
   const msg = ctx.message;
   const downloadAndSaveTelegramFile = async (filePath: string, fetchImpl: typeof fetch) => {
-    const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
+    const url = `${resolveTelegramBotApiBaseUrl()}/file/bot${token}/${filePath.replace(/^\/+/, "")}`;
+    const hostname = new URL(url).hostname;
     const fetched = await fetchRemoteMedia({
       url,
       fetchImpl,
       filePathHint: filePath,
+      ssrfPolicy: { allowedHostnames: [hostname], hostnameAllowlist: [hostname] },
     });
     const originalName = fetched.fileName ?? filePath;
     return saveMediaBuffer(fetched.buffer, fetched.contentType, "inbound", maxBytes, originalName);

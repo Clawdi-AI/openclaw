@@ -56,6 +56,7 @@ describe("createTelegramBot", () => {
   });
   afterEach(() => {
     process.env.TZ = ORIGINAL_TZ;
+    vi.unstubAllEnvs();
   });
 
   // groupPolicy tests
@@ -114,6 +115,18 @@ describe("createTelegramBot", () => {
       "tok",
       expect.objectContaining({
         client: expect.objectContaining({ timeoutSeconds: 61 }),
+      }),
+    );
+  });
+  it("uses TELEGRAM_BOT_API_BASE_URL for grammY apiRoot", () => {
+    vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "http://127.0.0.1:8081/");
+
+    createTelegramBot({ token: "tok" });
+
+    expect(botCtorSpy).toHaveBeenCalledWith(
+      "tok",
+      expect.objectContaining({
+        client: expect.objectContaining({ apiRoot: "http://127.0.0.1:8081" }),
       }),
     );
   });

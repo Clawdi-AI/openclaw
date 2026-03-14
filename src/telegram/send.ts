@@ -30,6 +30,7 @@ import { isGifMedia } from "../media/mime.js";
 import { normalizePollInput, type PollInput } from "../polls.js";
 import { loadWebMedia } from "../web/media.js";
 import { type ResolvedTelegramAccount, resolveTelegramAccount } from "./accounts.js";
+import { resolveTelegramBotApiBaseUrl } from "./api-base-url.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import { buildTelegramThreadParams } from "./bot/helpers.js";
 import type { TelegramInlineButtons } from "./button-types.js";
@@ -135,12 +136,12 @@ function resolveTelegramClientOptions(
     Number.isFinite(account.config.timeoutSeconds)
       ? Math.max(1, Math.floor(account.config.timeoutSeconds))
       : undefined;
-  return fetchImpl || timeoutSeconds
-    ? {
-        ...(fetchImpl ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] } : {}),
-        ...(timeoutSeconds ? { timeoutSeconds } : {}),
-      }
-    : undefined;
+  const apiRoot = resolveTelegramBotApiBaseUrl();
+  return {
+    ...(fetchImpl ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] } : {}),
+    ...(timeoutSeconds ? { timeoutSeconds } : {}),
+    apiRoot,
+  };
 }
 
 function resolveToken(explicit: string | undefined, params: { accountId: string; token: string }) {

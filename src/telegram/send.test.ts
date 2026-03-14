@@ -20,6 +20,10 @@ const {
   sendStickerTelegram,
 } = await importTelegramSendModule();
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe("sent-message-cache", () => {
   afterEach(() => {
     clearSentMessageCache();
@@ -142,6 +146,18 @@ describe("sendMessageTelegram", () => {
       "tok",
       expect.objectContaining({
         client: expect.objectContaining({ timeoutSeconds: 61 }),
+      }),
+    );
+  });
+  it("passes TELEGRAM_BOT_API_BASE_URL to grammY apiRoot", async () => {
+    vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "http://127.0.0.1:8081/");
+
+    await sendMessageTelegram("123", "hi", { token: "tok" });
+
+    expect(botCtorSpy).toHaveBeenCalledWith(
+      "tok",
+      expect.objectContaining({
+        client: expect.objectContaining({ apiRoot: "http://127.0.0.1:8081" }),
       }),
     );
   });

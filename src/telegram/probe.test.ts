@@ -45,6 +45,7 @@ describe("probeTelegram retry logic", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("should succeed if the first attempt succeeds", async () => {
@@ -107,5 +108,24 @@ describe("probeTelegram retry logic", () => {
     expect(result.status).toBe(401);
     expect(result.error).toBe("Unauthorized");
     expect(fetchMock).toHaveBeenCalledTimes(1); // Should not retry
+  });
+
+  it("uses TELEGRAM_BOT_API_BASE_URL for probe requests", async () => {
+    vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "http://127.0.0.1:8081/");
+    mockGetMeSuccess();
+    mockGetWebhookInfoSuccess();
+
+    await expectSuccessfulProbe(2);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8081/bottest-token/getMe",
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8081/bottest-token/getWebhookInfo",
+      expect.any(Object),
+    );
   });
 });
