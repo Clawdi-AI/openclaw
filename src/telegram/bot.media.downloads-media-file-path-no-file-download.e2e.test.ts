@@ -98,6 +98,7 @@ afterEach(() => {
   lookupMock.mockReset();
   resolvePinnedHostnameSpy?.mockRestore();
   resolvePinnedHostnameSpy = null;
+  vi.unstubAllEnvs();
 });
 
 vi.mock("./sticker-cache.js", () => ({
@@ -138,6 +139,39 @@ describe("telegram inbound media", () => {
       expect(replySpy).toHaveBeenCalledTimes(1);
       const payload = replySpy.mock.calls[0][0];
       expect(payload.Body).toContain("<media:image>");
+
+      fetchSpy.mockRestore();
+    },
+    INBOUND_MEDIA_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "uses TELEGRAM_BOT_API_BASE_URL for media downloads",
+    async () => {
+      vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "http://127.0.0.1:8081/");
+      const { handler, replySpy, runtimeError } = await createBotHandler();
+      const fetchSpy = mockTelegramFileDownload({
+        contentType: "image/jpeg",
+        bytes: new Uint8Array([0xff, 0xd8, 0xff, 0x00]),
+      });
+
+      await handler({
+        message: {
+          message_id: 4,
+          chat: { id: 1234, type: "private" },
+          photo: [{ file_id: "fid" }],
+          date: 1736380800,
+        },
+        me: { username: "openclaw_bot" },
+        getFile: async () => ({ file_path: "photos/custom.jpg" }),
+      });
+
+      expect(runtimeError).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "http://127.0.0.1:8081/file/bottok/photos/custom.jpg",
+        expect.objectContaining({ redirect: "manual" }),
+      );
+      expect(replySpy).toHaveBeenCalledTimes(1);
 
       fetchSpy.mockRestore();
     },

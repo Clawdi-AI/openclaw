@@ -45,7 +45,7 @@ vi.mock("grammy", () => ({
     constructor(
       public token: string,
       public options?: {
-        client?: { fetch?: typeof fetch; timeoutSeconds?: number };
+        client?: { fetch?: typeof fetch; timeoutSeconds?: number; apiRoot?: string };
       },
     ) {
       botCtorSpy(token, options);
