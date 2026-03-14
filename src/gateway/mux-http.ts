@@ -77,7 +77,7 @@ import {
   buildTelegramGroupPeerId,
   buildTelegramParentPeer,
   resolveTelegramGroupAllowFromContext,
-  resolveTelegramForumThreadId,
+  resolveTelegramThreadSpec,
 } from "../telegram/bot/helpers.js";
 import {
   resolveTelegramCallbackAction,
@@ -133,10 +133,6 @@ function resolveOpenClawIdHeader(req: IncomingMessage): string | null {
 
 function isDirectChat(chatType: string | undefined): boolean {
   return (chatType ?? "direct") === "direct";
-}
-
-function resolveMuxChatType(chatType: string | undefined): string {
-  return isDirectChat(chatType) ? "direct" : (chatType ?? "direct");
 }
 
 function readMuxStringishId(value: unknown): string | undefined {
@@ -260,9 +256,8 @@ function resolveTelegramCallbackPayload(params: {
 }
 
 function stripMuxProviderPrefix(raw: string, provider: string): string {
-  const trimmed = raw.trim();
   const prefix = `${provider.toLowerCase()}:`;
-  return trimmed.toLowerCase().startsWith(prefix) ? trimmed.slice(prefix.length).trim() : trimmed;
+  return raw.toLowerCase().startsWith(prefix) ? raw.slice(prefix.length) : raw;
 }
 
 function resolveTelegramInboundPeer(params: {
@@ -296,7 +291,7 @@ function resolveTelegramInboundPeer(params: {
   };
 }
 
-function resolveDiscordInboundPeerId(params: {
+function resolveDiscordInboundPeer(params: {
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
 }): { kind: "direct" | "group" | "channel"; id: string; guildId?: string } | null {
@@ -307,9 +302,7 @@ function resolveDiscordInboundPeerId(params: {
     if (!from) {
       return null;
     }
-    const peerId = stripMuxProviderPrefix(from, "discord")
-      .replace(/^(user|dm):/i, "")
-      .trim();
+    const peerId = stripMuxProviderPrefix(from, "discord").replace(/^(user|dm):/i, "");
     return peerId ? { kind: "direct", id: peerId } : null;
   }
 
@@ -318,9 +311,7 @@ function resolveDiscordInboundPeerId(params: {
   const channelId = channelIdFromData
     ? channelIdFromData
     : channelIdFromTo
-      ? stripMuxProviderPrefix(channelIdFromTo, "discord")
-          .replace(/^channel:/i, "")
-          .trim()
+      ? stripMuxProviderPrefix(channelIdFromTo, "discord").replace(/^channel:/i, "")
       : undefined;
   if (!channelId) {
     return null;
@@ -332,13 +323,13 @@ function resolveDiscordInboundPeerId(params: {
   };
 }
 
-function resolveMuxInboundOriginatingTarget(params: {
+function resolveMuxInboundOriginatingTo(params: {
   channel: "telegram" | "discord" | "whatsapp";
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
 }): string | null {
   if (params.channel === "discord") {
-    const peer = resolveDiscordInboundPeerId({
+    const peer = resolveDiscordInboundPeer({
       payload: params.payload,
       channelData: params.channelData,
     });
@@ -410,10 +401,10 @@ function parseDiscordParentChannelIdFromRouteKey(routeKey: string | undefined): 
     return undefined;
   }
   const match = trimmed.match(/^discord:[^:]+:guild:[^:]+:channel:([^:]+):thread:[^:]+$/i);
-  return match?.[1]?.trim() || undefined;
+  return match?.[1] || undefined;
 }
 
-function resolveWhatsAppInboundPeerId(params: { payload: MuxInboundPayload }): {
+function resolveWhatsAppInboundPeer(params: { payload: MuxInboundPayload }): {
   kind: "direct" | "group";
   id: string;
 } | null {
@@ -449,6 +440,95 @@ function normalizeWhatsAppAllowList(values: string[] | undefined): {
   };
 }
 
+function resolveTelegramInboundBusinessSessionKey(params: {
+  cfg: OpenClawConfig;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  accountId: string;
+  fallbackSessionKey: string;
+}): string {
+  const peer = resolveTelegramInboundPeer({
+    payload: params.payload,
+    channelData: params.channelData,
+  });
+  if (!peer) {
+    warn("[mux] falling back to transport session key for telegram inbound: missing chat peer");
+    return params.fallbackSessionKey;
+  }
+  const threadSpec = resolveTelegramThreadSpec({
+    isGroup: peer.isGroup,
+    isForum: peer.isForum,
+    messageThreadId: peer.messageThreadId,
+  });
+  const resolvedThreadId = threadSpec.scope === "forum" ? threadSpec.id : undefined;
+  const route = resolveAgentRoute({
+    cfg: params.cfg,
+    channel: "telegram",
+    accountId: params.accountId,
+    peer: {
+      kind: peer.isGroup ? "group" : "direct",
+      id: peer.isGroup ? buildTelegramGroupPeerId(peer.chatId, resolvedThreadId) : peer.chatId,
+    },
+    parentPeer: buildTelegramParentPeer({
+      isGroup: peer.isGroup,
+      resolvedThreadId,
+      chatId: peer.chatId,
+    }),
+  });
+  // Match native Telegram inbound: forum topics change the routed peer,
+  // while DM topics fork the session key after routing.
+  if (threadSpec.scope === "dm" && threadSpec.id != null) {
+    return resolveThreadSessionKeys({
+      baseSessionKey: route.sessionKey,
+      threadId: String(threadSpec.id),
+    }).sessionKey;
+  }
+  return route.sessionKey;
+}
+
+function resolveDiscordInboundBusinessSessionKey(params: {
+  cfg: OpenClawConfig;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  accountId: string;
+  fallbackSessionKey: string;
+}): string {
+  const peer = resolveDiscordInboundPeer({
+    payload: params.payload,
+    channelData: params.channelData,
+  });
+  if (!peer) {
+    warn("[mux] falling back to transport session key for discord inbound: missing peer");
+    return params.fallbackSessionKey;
+  }
+  return resolveAgentRoute({
+    cfg: params.cfg,
+    channel: "discord",
+    accountId: params.accountId,
+    guildId: peer.guildId,
+    peer: { kind: peer.kind, id: peer.id },
+  }).sessionKey;
+}
+
+function resolveWhatsAppInboundBusinessSessionKey(params: {
+  cfg: OpenClawConfig;
+  payload: MuxInboundPayload;
+  accountId: string;
+  fallbackSessionKey: string;
+}): string {
+  const peer = resolveWhatsAppInboundPeer({ payload: params.payload });
+  if (!peer) {
+    warn("[mux] falling back to transport session key for whatsapp inbound: missing peer");
+    return params.fallbackSessionKey;
+  }
+  return resolveAgentRoute({
+    cfg: params.cfg,
+    channel: "whatsapp",
+    accountId: params.accountId,
+    peer: { kind: peer.kind, id: peer.id },
+  }).sessionKey;
+}
+
 function resolveMuxInboundBusinessSessionKey(params: {
   cfg: OpenClawConfig;
   channel: "telegram" | "discord" | "whatsapp";
@@ -458,67 +538,31 @@ function resolveMuxInboundBusinessSessionKey(params: {
   fallbackSessionKey: string;
 }): string {
   if (params.channel === "telegram") {
-    const peer = resolveTelegramInboundPeer({
+    return resolveTelegramInboundBusinessSessionKey({
+      cfg: params.cfg,
       payload: params.payload,
       channelData: params.channelData,
-    });
-    if (!peer) {
-      return params.fallbackSessionKey;
-    }
-    const resolvedThreadId = resolveTelegramForumThreadId({
-      isForum: peer.isForum,
-      messageThreadId: peer.messageThreadId,
-    });
-    const route = resolveAgentRoute({
-      cfg: params.cfg,
-      channel: "telegram",
       accountId: params.accountId,
-      peer: {
-        kind: peer.isGroup ? "group" : "direct",
-        id: peer.isGroup ? buildTelegramGroupPeerId(peer.chatId, resolvedThreadId) : peer.chatId,
-      },
-      parentPeer: buildTelegramParentPeer({
-        isGroup: peer.isGroup,
-        resolvedThreadId,
-        chatId: peer.chatId,
-      }),
+      fallbackSessionKey: params.fallbackSessionKey,
     });
-    if (!peer.isGroup && peer.messageThreadId != null) {
-      return resolveThreadSessionKeys({
-        baseSessionKey: route.sessionKey,
-        threadId: String(peer.messageThreadId),
-      }).sessionKey;
-    }
-    return route.sessionKey;
   }
 
   if (params.channel === "discord") {
-    const peer = resolveDiscordInboundPeerId({
+    return resolveDiscordInboundBusinessSessionKey({
+      cfg: params.cfg,
       payload: params.payload,
       channelData: params.channelData,
-    });
-    if (!peer) {
-      return params.fallbackSessionKey;
-    }
-    return resolveAgentRoute({
-      cfg: params.cfg,
-      channel: "discord",
       accountId: params.accountId,
-      guildId: peer.guildId,
-      peer: { kind: peer.kind, id: peer.id },
-    }).sessionKey;
+      fallbackSessionKey: params.fallbackSessionKey,
+    });
   }
 
-  const peer = resolveWhatsAppInboundPeerId({ payload: params.payload });
-  if (!peer) {
-    return params.fallbackSessionKey;
-  }
-  return resolveAgentRoute({
+  return resolveWhatsAppInboundBusinessSessionKey({
     cfg: params.cfg,
-    channel: "whatsapp",
+    payload: params.payload,
     accountId: params.accountId,
-    peer: { kind: peer.kind, id: peer.id },
-  }).sessionKey;
+    fallbackSessionKey: params.fallbackSessionKey,
+  });
 }
 
 function isMuxPostPairingSynthetic(params: {
@@ -600,9 +644,10 @@ async function bootstrapMuxPairedSender(params: {
           payload: params.payload,
           channelData: params.channelData,
         }).senderId
-      : readMuxNonEmptyString(params.payload.from)
-          ?.replace(/^(discord:(user|dm):|discord:|whatsapp:)/i, "")
-          .trim();
+      : readMuxNonEmptyString(params.payload.from)?.replace(
+          /^(discord:(user|dm):|discord:|whatsapp:)/i,
+          "",
+        );
   if (!senderId) {
     return;
   }
@@ -1001,7 +1046,7 @@ async function resolveWhatsAppMuxAccess(params: {
     accountId: params.accountId,
   });
   const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
-  const peer = resolveWhatsAppInboundPeerId({ payload: params.payload });
+  const peer = resolveWhatsAppInboundPeer({ payload: params.payload });
   const senderId = normalizeWhatsAppTarget(readMuxNonEmptyString(params.payload.from) ?? "");
   const isGroup = !isDirectChat(params.chatType);
 
@@ -1256,7 +1301,7 @@ export async function handleMuxInboundHttpRequest(
     sendJson(res, 400, { ok: false, error: "unsupported mux channel" });
     return true;
   }
-  const originatingTo = resolveMuxInboundOriginatingTarget({
+  const originatingTo = resolveMuxInboundOriginatingTo({
     channel,
     payload,
     channelData,
@@ -1352,7 +1397,9 @@ export async function handleMuxInboundHttpRequest(
     AccountId: accountId,
     MessageSid: messageId,
     Timestamp: readMuxOptionalNumber(payload.timestampMs),
-    ChatType: resolveMuxChatType(readMuxNonEmptyString(payload.chatType)),
+    ChatType: isDirectChat(readMuxNonEmptyString(payload.chatType))
+      ? "direct"
+      : (readMuxNonEmptyString(payload.chatType) ?? "direct"),
     Provider: channel,
     Surface: isTelegramStreaming ? channel : "mux",
     OriginatingChannel: channel,
