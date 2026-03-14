@@ -48,6 +48,15 @@ describe("work-connectors hook", () => {
     it("returns empty string for undefined", () => {
       expect(formatConnectorsPrompt(undefined)).toBe("");
     });
+
+    it("includes file path when provided", () => {
+      const connectors = {
+        "~~crm": { backend: "composio", ref: "clawdi-mcp.HUBSPOT_*" },
+      };
+      const result = formatConnectorsPrompt(connectors, "/path/to/connectors.json");
+      expect(result).toContain("Connector config file: /path/to/connectors.json");
+      expect(result).toContain("edit the JSON entry");
+    });
   });
 
   describe("loadConnectors", () => {

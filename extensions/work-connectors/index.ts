@@ -14,7 +14,7 @@ export default async function register(api: OpenClawPluginApi) {
     return;
   }
 
-  const prompt = formatConnectorsPrompt(connectors);
+  const prompt = formatConnectorsPrompt(connectors, connectorsPath);
 
   if (!prompt) {
     api.logger.info("work-connectors: empty prompt generated, skipping hook registration");
