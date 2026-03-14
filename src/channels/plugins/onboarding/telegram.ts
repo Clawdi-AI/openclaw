@@ -7,7 +7,7 @@ import {
   resolveDefaultTelegramAccountId,
   resolveTelegramAccount,
 } from "../../../telegram/accounts.js";
-import { resolveTelegramBotApiMethodBase } from "../../../telegram/api-base-url.js";
+import { resolveTelegramBotApiBaseUrl } from "../../../telegram/api-base-url.js";
 import { formatDocsLink } from "../../../terminal/links.js";
 import type { WizardPrompter } from "../../../wizard/prompts.js";
 import type { ChannelOnboardingAdapter, ChannelOnboardingDmPolicy } from "../onboarding-types.js";
@@ -86,7 +86,7 @@ async function promptTelegramAllowFrom(params: {
       return null;
     }
     const username = stripped.startsWith("@") ? stripped : `@${stripped}`;
-    const url = `${resolveTelegramBotApiMethodBase(token)}/getChat?chat_id=${encodeURIComponent(
+    const url = `${resolveTelegramBotApiBaseUrl()}/bot${token}/getChat?chat_id=${encodeURIComponent(
       username,
     )}`;
     try {

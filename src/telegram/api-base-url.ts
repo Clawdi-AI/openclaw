@@ -16,18 +16,3 @@ export function resolveTelegramBotApiBaseUrl(env: NodeJS.ProcessEnv = process.en
     DEFAULT_TELEGRAM_BOT_API_BASE_URL
   );
 }
-
-export function resolveTelegramBotApiMethodBase(
-  token: string,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  return `${resolveTelegramBotApiBaseUrl(env)}/bot${token}`;
-}
-
-export function resolveTelegramBotFileUrl(
-  token: string,
-  filePath: string,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  return `${resolveTelegramBotApiBaseUrl(env)}/file/bot${token}/${filePath.replace(/^\/+/, "")}`;
-}

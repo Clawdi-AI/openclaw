@@ -132,16 +132,13 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       ? Math.max(1, Math.floor(telegramCfg.timeoutSeconds))
       : undefined;
   const apiRoot = resolveTelegramBotApiBaseUrl();
-  const client: ApiClientOptions | undefined =
-    shouldProvideFetch || timeoutSeconds
-      ? {
-          ...(shouldProvideFetch && fetchImpl ? { fetch: fetchForClient } : {}),
-          ...(timeoutSeconds ? { timeoutSeconds } : {}),
-          apiRoot,
-        }
-      : { apiRoot };
+  const client: ApiClientOptions = {
+    ...(shouldProvideFetch && fetchImpl ? { fetch: fetchForClient } : {}),
+    ...(timeoutSeconds ? { timeoutSeconds } : {}),
+    apiRoot,
+  };
 
-  const bot = new Bot(opts.token, client ? { client } : undefined);
+  const bot = new Bot(opts.token, { client });
   bot.api.config.use(apiThrottler());
   bot.use(sequentialize(getTelegramSequentialKey));
   // Catch all errors from bot middleware to prevent unhandled rejections

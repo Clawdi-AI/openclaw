@@ -137,13 +137,11 @@ function resolveTelegramClientOptions(
       ? Math.max(1, Math.floor(account.config.timeoutSeconds))
       : undefined;
   const apiRoot = resolveTelegramBotApiBaseUrl();
-  return fetchImpl || timeoutSeconds
-    ? {
-        ...(fetchImpl ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] } : {}),
-        ...(timeoutSeconds ? { timeoutSeconds } : {}),
-        apiRoot,
-      }
-    : { apiRoot };
+  return {
+    ...(fetchImpl ? { fetch: fetchImpl as unknown as ApiClientOptions["fetch"] } : {}),
+    ...(timeoutSeconds ? { timeoutSeconds } : {}),
+    apiRoot,
+  };
 }
 
 function resolveToken(explicit: string | undefined, params: { accountId: string; token: string }) {
