@@ -1,0 +1,12 @@
+{
+  "id": "wealth-management",
+  "name": "Wealth Management",
+  "description": "OpenClaw wealth-management extension migrated from the source wealth management plugin. Preserves client-review, planning, proposal, rebalance, and reporting skills and exposes the source slash commands as OpenClaw tools.",
+  "version": "2026.2.17",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

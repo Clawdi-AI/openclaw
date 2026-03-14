@@ -1,0 +1,22 @@
+{
+  "name": "@openclaw/wealth-management",
+  "version": "2026.2.17",
+  "private": true,
+  "description": "OpenClaw wealth-management extension migrated from the source wealth management plugin.",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "install": {
+      "localPath": "extensions/wealth-management",
+      "defaultChoice": "local"
+    }
+  }
+}

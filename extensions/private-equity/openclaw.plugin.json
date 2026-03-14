@@ -1,0 +1,12 @@
+{
+  "id": "private-equity",
+  "name": "Private Equity",
+  "description": "OpenClaw private-equity extension migrated from the source private equity plugin. Preserves sourcing, diligence, IC memo, and portfolio workflow skills and exposes the source command set as OpenClaw tools.",
+  "version": "2026.2.17",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

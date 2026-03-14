@@ -200,6 +200,26 @@
   - changed-files:
       - any-glob-to-any-file:
           - "extensions/copilot-proxy/**"
+"extensions: equity-research":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/equity-research/**"
+"extensions: financial-analysis":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/financial-analysis/**"
+"extensions: investment-banking":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/investment-banking/**"
+"extensions: private-equity":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/private-equity/**"
+"extensions: wealth-management":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/wealth-management/**"
 "extensions: diagnostics-otel":
   - changed-files:
       - any-glob-to-any-file:

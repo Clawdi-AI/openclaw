@@ -1,0 +1,12 @@
+{
+  "id": "investment-banking",
+  "name": "Investment Banking",
+  "description": "OpenClaw investment-banking extension migrated from the source investment banking plugin. Preserves the original skills and exposes the source workflows as OpenClaw tools.",
+  "version": "2026.2.17",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

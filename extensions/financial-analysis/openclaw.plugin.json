@@ -1,0 +1,259 @@
+{
+  "id": "financial-analysis",
+  "name": "Financial Analysis",
+  "description": "OpenClaw financial-analysis extension migrated from the source financial analysis plugin. Preserves the skill pack, maps the source slash commands to workflow tools, and exposes configured data connectors through mcporter.",
+  "version": "2026.2.17",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mcporterPath": {
+        "type": "string"
+      },
+      "connectors": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "daloopa": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "morningstar": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "sp-global": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "factset": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "moodys": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "mtnewswire": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "aiera": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "lseg": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "pitchbook": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "chronograph": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          "egnyte": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "baseUrl": { "type": "string" },
+              "apiKey": { "type": "string" },
+              "apiKeyHeader": { "type": "string" },
+              "apiKeyPrefix": { "type": "string" },
+              "mcporterRef": { "type": "string" },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "mcporterPath": {
+      "label": "mcporter Path",
+      "help": "Optional absolute path to the mcporter executable if it is not already on PATH."
+    },
+    "connectors.daloopa.apiKey": {
+      "label": "Daloopa API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the Daloopa MCP endpoint."
+    },
+    "connectors.morningstar.apiKey": {
+      "label": "Morningstar API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the Morningstar MCP endpoint."
+    },
+    "connectors.sp-global.apiKey": {
+      "label": "S&P Global API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the S&P Global MCP endpoint."
+    },
+    "connectors.factset.apiKey": {
+      "label": "FactSet API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the FactSet MCP endpoint."
+    },
+    "connectors.moodys.apiKey": {
+      "label": "Moody's API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the Moody's MCP endpoint."
+    },
+    "connectors.mtnewswire.apiKey": {
+      "label": "MT Newswires API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the MT Newswires MCP endpoint."
+    },
+    "connectors.aiera.apiKey": {
+      "label": "Aiera API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the Aiera MCP endpoint."
+    },
+    "connectors.lseg.apiKey": {
+      "label": "LSEG API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the LSEG MCP endpoint."
+    },
+    "connectors.pitchbook.apiKey": {
+      "label": "PitchBook API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the PitchBook MCP endpoint."
+    },
+    "connectors.chronograph.apiKey": {
+      "label": "Chronograph API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the Chronograph MCP endpoint."
+    },
+    "connectors.egnyte.apiKey": {
+      "label": "Egnyte API Key",
+      "sensitive": true,
+      "help": "Optional API key or bearer token for the Egnyte MCP endpoint."
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@openclaw/investment-banking",
+  "version": "2026.2.17",
+  "private": true,
+  "description": "OpenClaw investment-banking extension migrated from the source investment banking plugin.",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "install": {
+      "localPath": "extensions/investment-banking",
+      "defaultChoice": "local"
+    }
+  }
+}

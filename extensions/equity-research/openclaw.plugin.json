@@ -1,0 +1,12 @@
+{
+  "id": "equity-research",
+  "name": "Equity Research",
+  "description": "OpenClaw equity-research extension migrated from the source equity research plugin. Preserves research skills and maps the source slash commands to OpenClaw workflow tools.",
+  "version": "2026.2.17",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

@@ -304,6 +304,16 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/equity-research:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: 0.34.48
+        version: 0.34.48
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/feishu:
     dependencies:
       '@larksuiteoapi/node-sdk':
@@ -315,6 +325,16 @@ importers:
       zod:
         specifier: ^4.3.6
         version: 4.3.6
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
+  extensions/financial-analysis:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: 0.34.48
+        version: 0.34.48
     devDependencies:
       openclaw:
         specifier: workspace:*
@@ -343,6 +363,16 @@ importers:
         version: link:../..
 
   extensions/imessage:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
+  extensions/investment-banking:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: 0.34.48
+        version: 0.34.48
     devDependencies:
       openclaw:
         specifier: workspace:*
@@ -472,6 +502,16 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/private-equity:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: 0.34.48
+        version: 0.34.48
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/signal:
     devDependencies:
       openclaw:
@@ -535,7 +575,23 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/wealth-management:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: 0.34.48
+        version: 0.34.48
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/whatsapp:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
+  extensions/work-connectors:
     devDependencies:
       openclaw:
         specifier: workspace:*
