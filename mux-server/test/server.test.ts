@@ -1815,6 +1815,13 @@ describe("mux server", () => {
       chat_id: "1001",
       text: "prefer exact session binding",
     });
+
+    const metrics = await fetch(`http://127.0.0.1:${server.port}/metrics`);
+    expect(metrics.status).toBe(200);
+    const metricsBody = await metrics.text();
+    expect(metricsBody).toContain(
+      'mux_outbound_route_resolution_total{channel="telegram",mode="session-first",via="session"} 1',
+    );
   });
 
   test("telegram outbound prefers explicit request target in target-first mode when legacy binding conflicts", async () => {
@@ -1911,6 +1918,13 @@ describe("mux server", () => {
       chat_id: "2002",
       text: "prefer explicit target",
     });
+
+    const metrics = await fetch(`http://127.0.0.1:${server.port}/metrics`);
+    expect(metrics.status).toBe(200);
+    const metricsBody = await metrics.text();
+    expect(metricsBody).toContain(
+      'mux_outbound_route_resolution_total{channel="telegram",mode="target-first",via="route"} 1',
+    );
   });
 
   test("telegram outbound raw sendMessage retries without HTML parse_mode on parse errors", async () => {

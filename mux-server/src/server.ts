@@ -5447,6 +5447,11 @@ async function runOutboundAction(params: {
         }),
       };
     }
+    metrics.recordOutboundRouteResolution({
+      channel: "telegram",
+      mode: params.mode ?? "session-first",
+      via: resolvedRoute.via,
+    });
     const boundRoute = resolvedRoute.route;
     const body: Record<string, unknown> = {
       chat_id: boundRoute.chatId,
@@ -5489,6 +5494,11 @@ async function runOutboundAction(params: {
         }),
       };
     }
+    metrics.recordOutboundRouteResolution({
+      channel: "discord",
+      mode: params.mode ?? "session-first",
+      via: resolvedRoute.via,
+    });
     const boundRoute = resolvedRoute.route;
     const resolvedTarget = await resolveDiscordOutboundChannelId({
       boundRoute,
@@ -5537,6 +5547,11 @@ async function runOutboundAction(params: {
         }),
       };
     }
+    metrics.recordOutboundRouteResolution({
+      channel: "whatsapp",
+      mode: params.mode ?? "session-first",
+      via: resolvedRoute.via,
+    });
     const boundRoute = resolvedRoute.route;
     const { sendTypingWhatsApp } = await loadWebRuntimeModules();
     try {
@@ -8685,6 +8700,11 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
+        metrics.recordOutboundRouteResolution({
+          channel: "telegram",
+          mode: outboundResolutionMode,
+          via: resolvedRoute.via,
+        });
         if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
           log({
             type: "outbound_route_fallback",
@@ -8824,6 +8844,11 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
+        metrics.recordOutboundRouteResolution({
+          channel: "discord",
+          mode: outboundResolutionMode,
+          via: resolvedRoute.via,
+        });
         if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
           log({
             type: "outbound_route_fallback",
@@ -8960,6 +8985,11 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
+        metrics.recordOutboundRouteResolution({
+          channel: "whatsapp",
+          mode: outboundResolutionMode,
+          via: resolvedRoute.via,
+        });
         if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
           log({
             type: "outbound_route_fallback",
