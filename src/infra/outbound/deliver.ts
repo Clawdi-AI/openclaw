@@ -238,35 +238,34 @@ export async function deliverOutboundPayloads(
   params: DeliverOutboundPayloadsParams,
 ): Promise<OutboundDeliveryResult[]> {
   const { channel, to, payloads } = params;
-  const resolvedAccountId =
-    isMuxBusinessChannel(channel) && isLegacyMuxAccountId(params.accountId)
-      ? resolveMuxBusinessAccountId({
-          cfg: params.cfg,
-          channel,
-          accountId: params.accountId,
-        })
-      : params.accountId;
+  let resolvedAccountId = params.accountId;
+  if (isMuxBusinessChannel(channel) && isLegacyMuxAccountId(params.accountId)) {
+    resolvedAccountId = resolveMuxBusinessAccountId({
+      cfg: params.cfg,
+      channel,
+      accountId: params.accountId,
+    });
+  }
   const providedSessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
-  const agentId =
-    params.agentId ??
-    params.mirror?.agentId ??
-    (providedSessionKey
-      ? resolveSessionAgentId({
-          sessionKey: providedSessionKey,
-          config: params.cfg,
-        })
-      : undefined);
-  const derivedRoute = agentId
-    ? await resolveOutboundSessionRoute({
-        cfg: params.cfg,
-        channel,
-        agentId,
-        accountId: resolvedAccountId,
-        target: to,
-        replyToId: params.replyToId,
-        threadId: params.threadId,
-      })
-    : null;
+  let agentId = params.agentId ?? params.mirror?.agentId;
+  if (!agentId && providedSessionKey) {
+    agentId = resolveSessionAgentId({
+      sessionKey: providedSessionKey,
+      config: params.cfg,
+    });
+  }
+  let derivedRoute = null;
+  if (agentId) {
+    derivedRoute = await resolveOutboundSessionRoute({
+      cfg: params.cfg,
+      channel,
+      agentId,
+      accountId: resolvedAccountId,
+      target: to,
+      replyToId: params.replyToId,
+      threadId: params.threadId,
+    });
+  }
   const sessionKey = derivedRoute?.sessionKey ?? providedSessionKey;
   if (providedSessionKey && !derivedRoute) {
     logWarn(
@@ -282,9 +281,10 @@ export async function deliverOutboundPayloads(
   const queueSessionKey = derivedRoute ? undefined : sessionKey;
 
   // Write-ahead delivery queue: persist before sending, remove after success.
-  const queueId = params.skipQueue
-    ? null
-    : await enqueueDelivery({
+  let queueId: string | null = null;
+  if (!params.skipQueue) {
+    try {
+      queueId = await enqueueDelivery({
         channel,
         to,
         agentId,
@@ -297,12 +297,13 @@ export async function deliverOutboundPayloads(
         gifPlayback: params.gifPlayback,
         silent: params.silent,
         mirror: params.mirror,
-      }).catch((err) => {
-        logWarn(
-          `outbound-delivery: failed to enqueue delivery channel=${channel} target=${to} error=${err instanceof Error ? err.message : String(err)}`,
-        );
-        return null;
-      }); // Best-effort — don't block delivery if queue write fails.
+      });
+    } catch (err) {
+      logWarn(
+        `outbound-delivery: failed to enqueue delivery channel=${channel} target=${to} error=${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   // Wrap onError to detect partial failures under bestEffort mode.
   // When bestEffort is true, per-payload errors are caught and passed to onError

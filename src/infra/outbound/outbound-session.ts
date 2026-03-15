@@ -112,6 +112,16 @@ function inferPeerKind(params: {
   return "direct";
 }
 
+function resolveChatTypeFromPeerKind(kind: ChatType): "direct" | "group" | "channel" {
+  if (kind === "channel") {
+    return "channel";
+  }
+  if (kind === "group") {
+    return "group";
+  }
+  return "direct";
+}
+
 function buildBaseSessionKey(params: {
   cfg: OpenClawConfig;
   agentId: string;
@@ -529,10 +539,13 @@ function resolveMSTeamsSession(
   }
   const conversationId = rawId.split(";")[0] ?? rawId;
   const isChannel = !isUser && /@thread\.tacv2/i.test(conversationId);
-  const peer: RoutePeer = {
-    kind: isUser ? "direct" : isChannel ? "channel" : "group",
-    id: conversationId,
-  };
+  let peerKind: ChatType = "group";
+  if (isUser) {
+    peerKind = "direct";
+  } else if (isChannel) {
+    peerKind = "channel";
+  }
+  const peer: RoutePeer = { kind: peerKind, id: conversationId };
   const baseSessionKey = buildBaseSessionKey({
     cfg: params.cfg,
     agentId: params.agentId,
@@ -540,16 +553,18 @@ function resolveMSTeamsSession(
     accountId: params.accountId,
     peer,
   });
+  let from = `msteams:group:${conversationId}`;
+  if (peerKind === "direct") {
+    from = `msteams:${conversationId}`;
+  } else if (peerKind === "channel") {
+    from = `msteams:channel:${conversationId}`;
+  }
   return {
     sessionKey: baseSessionKey,
     baseSessionKey,
     peer,
-    chatType: isUser ? "direct" : isChannel ? "channel" : "group",
-    from: isUser
-      ? `msteams:${conversationId}`
-      : isChannel
-        ? `msteams:channel:${conversationId}`
-        : `msteams:group:${conversationId}`,
+    chatType: resolveChatTypeFromPeerKind(peerKind),
+    from,
     to: isUser ? `user:${conversationId}` : `conversation:${conversationId}`,
   };
 }
@@ -890,12 +905,13 @@ function resolveFallbackSession(
     channel: params.channel,
     peer,
   });
-  const chatType = peerKind === "direct" ? "direct" : peerKind === "channel" ? "channel" : "group";
-  const from =
-    peerKind === "direct"
-      ? `${params.channel}:${peerId}`
-      : `${params.channel}:${peerKind}:${peerId}`;
-  const toPrefix = peerKind === "direct" ? "user" : "channel";
+  const chatType = resolveChatTypeFromPeerKind(peerKind);
+  let from = `${params.channel}:${peerKind}:${peerId}`;
+  let toPrefix = "channel";
+  if (peerKind === "direct") {
+    from = `${params.channel}:${peerId}`;
+    toPrefix = "user";
+  }
   return {
     sessionKey: baseSessionKey,
     baseSessionKey,
