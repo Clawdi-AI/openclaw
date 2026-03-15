@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/mentat-bridge",
+  "version": "2026.3.13",
+  "private": true,
+  "description": "Mentat semantic RAG bridge — replaces memory-core and memory-lancedb",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
