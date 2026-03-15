@@ -142,10 +142,16 @@ cooldown_send() {
 MUX_LOG="/data/mux-server.log"
 FENCE_LINES="$(docker exec mux-server-local-e2e wc -l "${MUX_LOG}" 2>/dev/null | tr -dc '0-9')"
 : "${FENCE_LINES:=0}"
+OPENCLAW_FENCE_SINCE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 # Return structured log lines added since the last fence.
 mux_log_tail() {
   docker exec mux-server-local-e2e tail -n "+$(( FENCE_LINES + 1 ))" "${MUX_LOG}" 2>/dev/null || true
+}
+
+# Return OpenClaw container logs added since the last fence.
+openclaw_log_tail() {
+  docker logs --since "${OPENCLAW_FENCE_SINCE}" openclaw-local-e2e 2>&1 || true
 }
 
 # Poll until the mux-server log shows "telegram_inbound_forwarded" since fence.
@@ -200,6 +206,18 @@ fence() {
   sleep 2
   FENCE_LINES="$(docker exec mux-server-local-e2e wc -l "${MUX_LOG}" 2>/dev/null | tr -dc '0-9')"
   : "${FENCE_LINES:=0}"
+  OPENCLAW_FENCE_SINCE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+
+assert_no_route_not_bound_since_fence() {
+  local failures
+  failures="$(openclaw_log_tail | grep 'mux outbound failed (403): route not bound' || true)"
+  if [[ -n "${failures}" ]]; then
+    echo "[e2e] OpenClaw reported route-not-bound since fence:" >&2
+    echo "${failures}" >&2
+    return 1
+  fi
+  return 0
 }
 
 # Poll until a log line since the fence matches ALL given patterns.
@@ -674,6 +692,12 @@ if elapsed="$(wait_for_outbound_method "setMessageReaction" "${LLM_TIMEOUT}")"; 
   pass "multi-action outbound setMessageReaction — AI reacted in ${elapsed}s"
 else
   fail "multi-action outbound setMessageReaction — no reaction within ${LLM_TIMEOUT}s"
+fi
+
+if assert_no_route_not_bound_since_fence; then
+  pass "multi-action outbound methods completed without route-not-bound failures"
+else
+  fail "multi-action outbound methods hit route-not-bound in OpenClaw logs"
 fi
 
 fence

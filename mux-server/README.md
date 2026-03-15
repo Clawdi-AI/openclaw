@@ -98,7 +98,7 @@ node --import tsx mux-server/src/server.ts
 - `MUX_MAX_BODY_BYTES` (default `52428800`): max accepted JSON request body size for mux HTTP APIs.
 - `MUX_PAIRING_CODES_JSON` (optional): JSON array to seed pairing codes for testing/bootstrap.
 - `MUX_OPENCLAW_INBOUND_TIMEOUT_MS` (default `15000`): request timeout for OpenClaw mux inbound.
-- `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events (recommended: `mux`).
+- `MUX_OPENCLAW_ACCOUNT_ID` (default `default`): OpenClaw channel account id used for mux-routed inbound events. Keep this at `default` for the current singleton mux model. During phase-1 mixed-fleet rollout, keep `mux` only if some older OpenClaw nodes still depend on the legacy dedicated mux account; once those nodes are upgraded, switch back to `default`.
 - `MUX_TELEGRAM_API_BASE_URL` (default `https://api.telegram.org`): Telegram API base URL.
 - `MUX_DISCORD_API_BASE_URL` (default `https://discord.com/api/v10`): Discord API base URL.
 - `MUX_TELEGRAM_POLL_TIMEOUT_SEC` (default `25`): Telegram long-poll timeout.
@@ -132,16 +132,16 @@ Notes:
 - Discord when `DISCORD_BOT_TOKEN` is set.
 - WhatsApp when `<MUX_WHATSAPP_AUTH_DIR>/creds.json` exists.
 
-### Dedicated OpenClaw Mux Account
+### OpenClaw Account Model
 
-To keep existing direct bots unchanged, run mux traffic through a separate OpenClaw account id:
+Mux now follows the OpenClaw default-account business path instead of a dedicated `mux` account:
 
-- Set `MUX_OPENCLAW_ACCOUNT_ID=mux` in mux-server.
-- In each tenant OpenClaw config, keep direct traffic on `default` and mux transport on `mux`.
-- When `channels.<app>.accounts` exists, define `accounts.default.enabled=true` explicitly, or direct polling can stop.
-- Keep `accounts.mux.enabled=false` so OpenClaw does not directly poll the mux account.
+- mux is a singleton transport override for the default account path
+- legacy `accountId: "mux"` is treated as a backward-compat alias of `default`
+- explicit non-default channel accounts stay on the native transport path
+- `MUX_OPENCLAW_ACCOUNT_ID` should stay at `default` for new deployments
 
-Example:
+Recommended shape:
 
 ```json
 {
@@ -161,38 +161,29 @@ Example:
     "telegram": {
       "enabled": true,
       "botToken": "telegram-direct-bot-token",
+      "mux": { "enabled": true },
       "accounts": {
         "default": {
           "enabled": true
-        },
-        "mux": {
-          "enabled": false,
-          "mux": { "enabled": true }
         }
       }
     },
     "discord": {
       "enabled": true,
       "token": "discord-direct-bot-token",
+      "mux": { "enabled": true },
       "accounts": {
         "default": {
           "enabled": true
-        },
-        "mux": {
-          "enabled": false,
-          "mux": { "enabled": true }
         }
       }
     },
     "whatsapp": {
       "enabled": true,
+      "mux": { "enabled": true },
       "accounts": {
         "default": {
           "enabled": true
-        },
-        "mux": {
-          "enabled": false,
-          "mux": { "enabled": true }
         }
       }
     }
@@ -202,10 +193,10 @@ Example:
 
 How this works:
 
-- direct inbound/outbound uses `default` account (non-mux behavior)
-- mux inbound is forwarded by mux-server with `accountId=mux`
-- mux outbound is selected only when OpenClaw context has `AccountId=mux`
-- result: direct and mux traffic run side-by-side without touching each other
+- direct/default account behavior stays the business-routing truth
+- mux transport is used only for the default account path
+- explicit non-default accounts, if configured, keep using native channel transport
+- result: mux stays close to vanilla OpenClaw routing and session behavior
 
 `MUX_PAIRING_CODES_JSON` format:
 

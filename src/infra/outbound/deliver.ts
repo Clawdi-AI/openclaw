@@ -1,3 +1,4 @@
+import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
   chunkByParagraph,
   chunkMarkdownTextWithMode,
@@ -20,16 +21,23 @@ import {
 import type { sendMessageDiscord } from "../../discord/send.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import type { sendMessageIMessage } from "../../imessage/send.js";
+import { logWarn } from "../../logger.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { markdownToSignalTextChunks, type SignalTextStyleRange } from "../../signal/format.js";
 import { sendMessageSignal } from "../../signal/send.js";
 import type { sendMessageSlack } from "../../slack/send.js";
 import type { sendMessageTelegram } from "../../telegram/send.js";
+import {
+  isLegacyMuxAccountId,
+  isMuxBusinessChannel,
+  resolveMuxBusinessAccountId,
+} from "../../utils/mux-account.js";
 import type { sendMessageWhatsApp } from "../../web/outbound.js";
 import { throwIfAborted } from "./abort.js";
 import { ackDelivery, enqueueDelivery, failDelivery } from "./delivery-queue.js";
 import type { OutboundIdentity } from "./identity.js";
+import { resolveOutboundSessionRoute } from "./outbound-session.js";
 import type { NormalizedOutboundPayload } from "./payloads.js";
 import { normalizeReplyPayloadsForDelivery } from "./payloads.js";
 import type { OutboundChannel } from "./targets.js";
@@ -230,14 +238,58 @@ export async function deliverOutboundPayloads(
   params: DeliverOutboundPayloadsParams,
 ): Promise<OutboundDeliveryResult[]> {
   const { channel, to, payloads } = params;
+  let resolvedAccountId = params.accountId;
+  if (isMuxBusinessChannel(channel) && isLegacyMuxAccountId(params.accountId)) {
+    resolvedAccountId = resolveMuxBusinessAccountId({
+      cfg: params.cfg,
+      channel,
+      accountId: params.accountId,
+    });
+  }
+  const providedSessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
+  let agentId = params.agentId ?? params.mirror?.agentId;
+  if (!agentId && providedSessionKey) {
+    agentId = resolveSessionAgentId({
+      sessionKey: providedSessionKey,
+      config: params.cfg,
+    });
+  }
+  let derivedRoute = null;
+  if (agentId) {
+    derivedRoute = await resolveOutboundSessionRoute({
+      cfg: params.cfg,
+      channel,
+      agentId,
+      accountId: resolvedAccountId,
+      target: to,
+      replyToId: params.replyToId,
+      threadId: params.threadId,
+    });
+  }
+  const sessionKey = derivedRoute?.sessionKey ?? providedSessionKey;
+  if (providedSessionKey && !derivedRoute) {
+    logWarn(
+      `outbound-delivery: using caller-provided sessionKey fallback channel=${channel} target=${to} agentId=${agentId ?? "unknown"}`,
+    );
+  }
+  const resolvedParams = {
+    ...params,
+    accountId: resolvedAccountId,
+    agentId,
+    sessionKey,
+  };
+  const queueSessionKey = derivedRoute ? undefined : sessionKey;
 
   // Write-ahead delivery queue: persist before sending, remove after success.
-  const queueId = params.skipQueue
-    ? null
-    : await enqueueDelivery({
+  let queueId: string | null = null;
+  if (!params.skipQueue) {
+    try {
+      queueId = await enqueueDelivery({
         channel,
         to,
-        accountId: params.accountId,
+        agentId,
+        sessionKey: queueSessionKey,
+        accountId: resolvedAccountId,
         payloads,
         threadId: params.threadId,
         replyToId: params.replyToId,
@@ -245,7 +297,13 @@ export async function deliverOutboundPayloads(
         gifPlayback: params.gifPlayback,
         silent: params.silent,
         mirror: params.mirror,
-      }).catch(() => null); // Best-effort — don't block delivery if queue write fails.
+      });
+    } catch (err) {
+      logWarn(
+        `outbound-delivery: failed to enqueue delivery channel=${channel} target=${to} error=${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   // Wrap onError to detect partial failures under bestEffort mode.
   // When bestEffort is true, per-payload errors are caught and passed to onError
@@ -254,13 +312,13 @@ export async function deliverOutboundPayloads(
   let hadPartialFailure = false;
   const wrappedParams = params.onError
     ? {
-        ...params,
+        ...resolvedParams,
         onError: (err: unknown, payload: NormalizedOutboundPayload) => {
           hadPartialFailure = true;
           params.onError!(err, payload);
         },
       }
-    : params;
+    : resolvedParams;
 
   try {
     const results = await deliverOutboundPayloadsCore(wrappedParams);
@@ -300,7 +358,7 @@ async function deliverOutboundPayloadsCore(
     params.agentId ?? params.mirror?.agentId,
   );
   const results: OutboundDeliveryResult[] = [];
-  const sessionKey = params.sessionKey ?? params.mirror?.sessionKey ?? null;
+  const sessionKey = params.sessionKey ?? null;
   const handler = await createChannelHandler({
     cfg,
     channel,

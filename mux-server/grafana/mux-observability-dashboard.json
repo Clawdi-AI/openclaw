@@ -546,6 +546,44 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "id": 12,
+      "title": "Outbound Route Resolution (5m)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "sum by (channel, mode, via) (rate(mux_outbound_route_resolution_total[5m]))",
+          "legendFormat": "{{channel}} {{mode}} {{via}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ],
   "refresh": "30s",
@@ -605,6 +643,6 @@
   "timezone": "",
   "title": "Mux Server Observability",
   "uid": "mux-server-observability",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

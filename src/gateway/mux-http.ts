@@ -3,12 +3,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { resolveAckReaction } from "../agents/identity.js";
+import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
   buildCommandTextFromArgs,
   findCommandByNativeName,
   parseCommandArgs,
-  resolveTextCommand,
   resolveCommandArgMenu,
+  resolveTextCommand,
 } from "../auto-reply/commands-registry.js";
 import type { CommandArgs } from "../auto-reply/commands-registry.types.js";
 import { dispatchInboundMessage } from "../auto-reply/dispatch.js";
@@ -18,7 +19,8 @@ import { resolveReplyToMode } from "../auto-reply/reply/reply-threading.js";
 import { routeReply } from "../auto-reply/reply/route-reply.js";
 import type { MsgContext } from "../auto-reply/templating.js";
 import { shouldAckReaction, type AckReactionScope } from "../channels/ack-reactions.js";
-import { normalizeChannelId } from "../channels/plugins/index.js";
+import { resolveControlCommandGate } from "../channels/command-gating.js";
+import { resolveMentionGatingWithBypass } from "../channels/mention-gating.js";
 import {
   asMuxRecord,
   buildTelegramRawEditMessageText,
@@ -39,14 +41,53 @@ import {
   sendTypingViaMux,
   sendViaMux,
 } from "../channels/plugins/outbound/mux.js";
+import { normalizeChannelId } from "../channels/registry.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { loadConfig } from "../config/config.js";
+import {
+  resolveChannelGroupPolicy,
+  resolveChannelGroupRequireMention,
+} from "../config/group-policy.js";
+import type { TelegramGroupConfig, TelegramTopicConfig } from "../config/types.telegram.js";
+import {
+  isDiscordGroupAllowedByPolicy,
+  normalizeDiscordAllowList,
+  resolveDiscordChannelConfigWithFallback,
+  resolveDiscordMemberAccessState,
+  resolveDiscordShouldRequireMention,
+  allowListMatches,
+  normalizeDiscordSlug,
+  type DiscordGuildEntryResolved,
+} from "../discord/monitor/allow-list.js";
 import { logVerbose, warn } from "../globals.js";
+import {
+  addChannelAllowFromStoreEntry,
+  readChannelAllowFromStore,
+} from "../pairing/pairing-store.js";
+import { resolveAgentRoute } from "../routing/resolve-route.js";
+import { resolveThreadSessionKeys } from "../routing/session-key.js";
+import { resolveTelegramAccount } from "../telegram/accounts.js";
+import {
+  firstDefined,
+  isSenderAllowed,
+  normalizeAllowFromWithStore,
+  resolveSenderAllowMatch,
+} from "../telegram/bot-access.js";
+import {
+  buildTelegramGroupPeerId,
+  buildTelegramParentPeer,
+  resolveTelegramGroupAllowFromContext,
+  resolveTelegramThreadSpec,
+} from "../telegram/bot/helpers.js";
 import {
   resolveTelegramCallbackAction,
   type TelegramCallbackButtons,
 } from "../telegram/callback-actions.js";
 import { createTelegramStreamingDispatch } from "../telegram/draft-stream.js";
+import {
+  evaluateTelegramGroupBaseAccess,
+  evaluateTelegramGroupPolicyAccess,
+} from "../telegram/group-access.js";
 import {
   buildTelegramThreadReplyParams,
   deleteMessageTelegram,
@@ -55,10 +96,19 @@ import {
   sendMessageTelegram,
   type MuxTransportOpts,
 } from "../telegram/send.js";
+import { normalizeE164 } from "../utils.js";
+import { isMuxBusinessChannel, resolveMuxBusinessAccountId } from "../utils/mux-account.js";
+import { resolveWhatsAppAccount } from "../web/accounts.js";
+import { normalizeWhatsAppTarget, isWhatsAppGroupJid } from "../whatsapp/normalize.js";
 import { readJsonBody } from "./hooks.js";
 import { verifyMuxInboundJwt } from "./mux-jwt.js";
+import { addMuxPairedSender, readMuxPairedSenders } from "./mux-paired-senders.js";
 
 const DEFAULT_MUX_MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+type MuxAccessResult =
+  | { allowed: false }
+  | { allowed: true; commandAuthorized: boolean; effectiveWasMentioned?: boolean };
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
@@ -79,6 +129,38 @@ function resolveOpenClawIdHeader(req: IncomingMessage): string | null {
   const raw = req.headers["x-openclaw-id"];
   const value = Array.isArray(raw) ? raw[0] : raw;
   return readMuxNonEmptyString(value) ?? null;
+}
+
+function isDirectChat(chatType: string | undefined): boolean {
+  return (chatType ?? "direct") === "direct";
+}
+
+function readMuxStringishId(value: unknown): string | undefined {
+  return (
+    readMuxNonEmptyString(value) ??
+    (typeof value === "number" && Number.isFinite(value) ? String(Math.trunc(value)) : undefined)
+  );
+}
+
+function sanitizeDiscordRoleId(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  return "";
+}
+
+function resolveTelegramMuxMessageData(channelData: Record<string, unknown> | undefined): {
+  telegramData: Record<string, unknown> | undefined;
+  rawMessage: Record<string, unknown> | undefined;
+  rawChat: Record<string, unknown> | undefined;
+} {
+  const telegramData = asMuxRecord(channelData?.telegram);
+  const rawMessage = asMuxRecord(telegramData?.rawMessage);
+  const rawChat = asMuxRecord(rawMessage?.chat);
+  return { telegramData, rawMessage, rawChat };
 }
 
 async function authorizeMuxInboundRequest(params: {
@@ -126,6 +208,7 @@ async function authorizeMuxInboundRequest(params: {
 function resolveTelegramCallbackPayload(params: {
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
+  accountId: string;
 }): {
   data: string;
   chatId: string;
@@ -133,13 +216,13 @@ function resolveTelegramCallbackPayload(params: {
   messageThreadId?: number;
   isGroup: boolean;
   isForum: boolean;
-  accountId?: string;
+  accountId: string;
 } | null {
   const eventKind = readMuxNonEmptyString(params.payload.event?.kind);
   if (eventKind !== "callback") {
     return null;
   }
-  const telegramData = asMuxRecord(params.channelData?.telegram);
+  const { telegramData, rawMessage, rawChat } = resolveTelegramMuxMessageData(params.channelData);
   const callbackData = readMuxNonEmptyString(telegramData?.callbackData);
   if (!callbackData) {
     return null;
@@ -155,9 +238,6 @@ function resolveTelegramCallbackPayload(params: {
   if (!chatId) {
     return null;
   }
-
-  const rawMessage = asMuxRecord(telegramData?.rawMessage);
-  const rawChat = asMuxRecord(rawMessage?.chat);
   const fallbackThreadId = resolveMuxThreadId(params.payload.threadId, params.channelData);
   const messageThreadId =
     readMuxPositiveInt(rawMessage?.message_thread_id) ??
@@ -169,16 +249,896 @@ function resolveTelegramCallbackPayload(params: {
     chatId,
     callbackMessageId,
     messageThreadId,
-    isGroup: (readMuxNonEmptyString(params.payload.chatType) ?? "direct") !== "direct",
+    isGroup: !isDirectChat(readMuxNonEmptyString(params.payload.chatType)),
     isForum: rawChat?.is_forum === true,
-    accountId: readMuxNonEmptyString(params.payload.accountId),
+    accountId: params.accountId,
   };
+}
+
+function stripMuxProviderPrefix(raw: string, provider: string): string {
+  const prefix = `${provider.toLowerCase()}:`;
+  return raw.toLowerCase().startsWith(prefix) ? raw.slice(prefix.length) : raw;
+}
+
+function resolveTelegramInboundPeer(params: {
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+}): {
+  chatId: string;
+  isGroup: boolean;
+  isForum: boolean;
+  messageThreadId?: number;
+} | null {
+  const chatIdFromData = readMuxNonEmptyString(params.channelData?.chatId);
+  const chatIdFromTo = readMuxNonEmptyString(params.payload.to)?.replace(/^(telegram|tg):/i, "");
+  const chatId = chatIdFromData ?? chatIdFromTo;
+  if (!chatId) {
+    return null;
+  }
+
+  const { rawMessage, rawChat } = resolveTelegramMuxMessageData(params.channelData);
+  const fallbackThreadId = resolveMuxThreadId(params.payload.threadId, params.channelData);
+  const messageThreadId =
+    readMuxPositiveInt(rawMessage?.message_thread_id) ??
+    (typeof fallbackThreadId === "number"
+      ? fallbackThreadId
+      : readMuxPositiveInt(fallbackThreadId));
+  return {
+    chatId,
+    isGroup: !isDirectChat(readMuxNonEmptyString(params.payload.chatType)),
+    isForum: rawChat?.is_forum === true,
+    messageThreadId,
+  };
+}
+
+function resolveDiscordInboundPeer(params: {
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+}): { kind: "direct" | "group" | "channel"; id: string; guildId?: string } | null {
+  const guildId = readMuxNonEmptyString(params.channelData?.guildId);
+  const isDirect = isDirectChat(readMuxNonEmptyString(params.payload.chatType));
+  if (isDirect) {
+    const from = readMuxNonEmptyString(params.payload.from);
+    if (!from) {
+      return null;
+    }
+    const peerId = stripMuxProviderPrefix(from, "discord").replace(/^(user|dm):/i, "");
+    return peerId ? { kind: "direct", id: peerId } : null;
+  }
+
+  const channelIdFromData = readMuxNonEmptyString(params.channelData?.channelId);
+  const channelIdFromTo = readMuxNonEmptyString(params.payload.to);
+  const channelId = channelIdFromData
+    ? channelIdFromData
+    : channelIdFromTo
+      ? stripMuxProviderPrefix(channelIdFromTo, "discord").replace(/^channel:/i, "")
+      : undefined;
+  if (!channelId) {
+    return null;
+  }
+  return {
+    kind: guildId ? "channel" : "group",
+    id: channelId,
+    guildId: guildId ?? undefined,
+  };
+}
+
+function resolveMuxInboundOriginatingTo(params: {
+  channel: "telegram" | "discord" | "whatsapp";
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+}): string | null {
+  if (params.channel === "discord") {
+    const peer = resolveDiscordInboundPeer({
+      payload: params.payload,
+      channelData: params.channelData,
+    });
+    if (!peer) {
+      return null;
+    }
+    return peer.kind === "direct" ? `user:${peer.id}` : `channel:${peer.id}`;
+  }
+  return readMuxNonEmptyString(params.payload.to) ?? null;
+}
+
+function resolveDiscordMuxSender(params: {
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+}): { senderId?: string; senderName?: string; senderTag?: string; memberRoleIds: string[] } {
+  const discordData = asMuxRecord(params.channelData?.discord);
+  const rawMessage = asMuxRecord(discordData?.rawMessage);
+  const author = asMuxRecord(rawMessage?.author);
+  const member = asMuxRecord(rawMessage?.member);
+  const senderId =
+    readMuxStringishId(author?.id) ??
+    readMuxNonEmptyString(params.payload.from)?.replace(/^discord:(user:|dm:)?/i, "");
+  const senderName =
+    readMuxNonEmptyString(author?.username) ?? readMuxNonEmptyString(author?.global_name);
+  const discriminator = readMuxNonEmptyString(author?.discriminator);
+  const senderTag = senderName
+    ? discriminator && discriminator !== "0"
+      ? `${senderName}#${discriminator}`
+      : senderName
+    : undefined;
+  const rawRoles = Array.isArray(member?.roles) ? member.roles : [];
+  const memberRoleIds = rawRoles.map(sanitizeDiscordRoleId).filter(Boolean);
+  return {
+    senderId,
+    senderName,
+    senderTag,
+    memberRoleIds,
+  };
+}
+
+function resolveDiscordGuildInfo(params: {
+  cfg: OpenClawConfig;
+  guildId?: string;
+}): DiscordGuildEntryResolved | null {
+  if (!params.guildId) {
+    return null;
+  }
+  const guildEntries = params.cfg.channels?.discord?.guilds;
+  if (!guildEntries) {
+    return null;
+  }
+  const match =
+    guildEntries[params.guildId] ??
+    guildEntries[normalizeDiscordSlug(params.guildId)] ??
+    guildEntries["*"];
+  if (!match) {
+    return null;
+  }
+  return {
+    ...match,
+    id: params.guildId,
+    slug: normalizeDiscordSlug(params.guildId),
+  };
+}
+
+function parseDiscordParentChannelIdFromRouteKey(routeKey: string | undefined): string | undefined {
+  const trimmed = readMuxNonEmptyString(routeKey);
+  if (!trimmed) {
+    return undefined;
+  }
+  const match = trimmed.match(/^discord:[^:]+:guild:[^:]+:channel:([^:]+):thread:[^:]+$/i);
+  return match?.[1] || undefined;
+}
+
+function resolveWhatsAppInboundPeer(params: { payload: MuxInboundPayload }): {
+  kind: "direct" | "group";
+  id: string;
+} | null {
+  const isGroup = !isDirectChat(readMuxNonEmptyString(params.payload.chatType));
+  const groupTarget = normalizeWhatsAppTarget(readMuxNonEmptyString(params.payload.to) ?? "");
+  if (isGroup && groupTarget && isWhatsAppGroupJid(groupTarget)) {
+    return { kind: "group", id: groupTarget };
+  }
+  const directTarget =
+    normalizeWhatsAppTarget(readMuxNonEmptyString(params.payload.from) ?? "") ??
+    normalizeWhatsAppTarget(readMuxNonEmptyString(params.payload.to) ?? "");
+  if (!directTarget) {
+    return null;
+  }
+  return {
+    kind: isWhatsAppGroupJid(directTarget) ? "group" : "direct",
+    id: directTarget,
+  };
+}
+
+function normalizeWhatsAppAllowList(values: string[] | undefined): {
+  hasEntries: boolean;
+  hasWildcard: boolean;
+  entries: string[];
+} {
+  const list = Array.isArray(values) ? values : [];
+  const hasWildcard = list.some((entry) => String(entry).trim() === "*");
+  const entries = list.map((entry) => normalizeE164(String(entry).trim())).filter(Boolean);
+  return {
+    hasEntries: hasWildcard || entries.length > 0,
+    hasWildcard,
+    entries,
+  };
+}
+
+function resolveTelegramInboundBusinessSessionKey(params: {
+  cfg: OpenClawConfig;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  accountId: string;
+  fallbackSessionKey: string;
+}): string {
+  const peer = resolveTelegramInboundPeer({
+    payload: params.payload,
+    channelData: params.channelData,
+  });
+  if (!peer) {
+    warn("[mux] falling back to transport session key for telegram inbound: missing chat peer");
+    return params.fallbackSessionKey;
+  }
+  const threadSpec = resolveTelegramThreadSpec({
+    isGroup: peer.isGroup,
+    isForum: peer.isForum,
+    messageThreadId: peer.messageThreadId,
+  });
+  const resolvedThreadId = threadSpec.scope === "forum" ? threadSpec.id : undefined;
+  const route = resolveAgentRoute({
+    cfg: params.cfg,
+    channel: "telegram",
+    accountId: params.accountId,
+    peer: {
+      kind: peer.isGroup ? "group" : "direct",
+      id: peer.isGroup ? buildTelegramGroupPeerId(peer.chatId, resolvedThreadId) : peer.chatId,
+    },
+    parentPeer: buildTelegramParentPeer({
+      isGroup: peer.isGroup,
+      resolvedThreadId,
+      chatId: peer.chatId,
+    }),
+  });
+  // Match native Telegram inbound: forum topics change the routed peer,
+  // while DM topics fork the session key after routing.
+  if (threadSpec.scope === "dm" && threadSpec.id != null) {
+    return resolveThreadSessionKeys({
+      baseSessionKey: route.sessionKey,
+      threadId: String(threadSpec.id),
+    }).sessionKey;
+  }
+  return route.sessionKey;
+}
+
+function resolveDiscordInboundBusinessSessionKey(params: {
+  cfg: OpenClawConfig;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  accountId: string;
+  fallbackSessionKey: string;
+}): string {
+  const peer = resolveDiscordInboundPeer({
+    payload: params.payload,
+    channelData: params.channelData,
+  });
+  if (!peer) {
+    warn("[mux] falling back to transport session key for discord inbound: missing peer");
+    return params.fallbackSessionKey;
+  }
+  return resolveAgentRoute({
+    cfg: params.cfg,
+    channel: "discord",
+    accountId: params.accountId,
+    guildId: peer.guildId,
+    peer: { kind: peer.kind, id: peer.id },
+  }).sessionKey;
+}
+
+function resolveWhatsAppInboundBusinessSessionKey(params: {
+  cfg: OpenClawConfig;
+  payload: MuxInboundPayload;
+  accountId: string;
+  fallbackSessionKey: string;
+}): string {
+  const peer = resolveWhatsAppInboundPeer({ payload: params.payload });
+  if (!peer) {
+    warn("[mux] falling back to transport session key for whatsapp inbound: missing peer");
+    return params.fallbackSessionKey;
+  }
+  return resolveAgentRoute({
+    cfg: params.cfg,
+    channel: "whatsapp",
+    accountId: params.accountId,
+    peer: { kind: peer.kind, id: peer.id },
+  }).sessionKey;
+}
+
+function resolveMuxInboundBusinessSessionKey(params: {
+  cfg: OpenClawConfig;
+  channel: "telegram" | "discord" | "whatsapp";
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  accountId: string;
+  fallbackSessionKey: string;
+}): string {
+  if (params.channel === "telegram") {
+    return resolveTelegramInboundBusinessSessionKey({
+      cfg: params.cfg,
+      payload: params.payload,
+      channelData: params.channelData,
+      accountId: params.accountId,
+      fallbackSessionKey: params.fallbackSessionKey,
+    });
+  }
+
+  if (params.channel === "discord") {
+    return resolveDiscordInboundBusinessSessionKey({
+      cfg: params.cfg,
+      payload: params.payload,
+      channelData: params.channelData,
+      accountId: params.accountId,
+      fallbackSessionKey: params.fallbackSessionKey,
+    });
+  }
+
+  return resolveWhatsAppInboundBusinessSessionKey({
+    cfg: params.cfg,
+    payload: params.payload,
+    accountId: params.accountId,
+    fallbackSessionKey: params.fallbackSessionKey,
+  });
+}
+
+function isMuxPostPairingSynthetic(params: {
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  messageId: string;
+}): boolean {
+  const pairing = asMuxRecord(params.channelData?.pairing);
+  if (readMuxNonEmptyString(pairing?.kind)?.toLowerCase() === "post-pair") {
+    return true;
+  }
+  return params.messageId.startsWith("synth:pair:");
+}
+
+function resolveTelegramMuxSender(params: {
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+}): { senderId?: string; senderUsername?: string } {
+  const { rawMessage } = resolveTelegramMuxMessageData(params.channelData);
+  const from = asMuxRecord(rawMessage?.from);
+  const senderId =
+    readMuxStringishId(from?.id) ??
+    readMuxNonEmptyString(params.payload.from)?.replace(/^(telegram|tg):/i, "");
+  const senderUsername = readMuxNonEmptyString(from?.username);
+  return {
+    senderId,
+    senderUsername,
+  };
+}
+
+function resolveTelegramMuxGroupConfig(params: {
+  cfg: OpenClawConfig;
+  accountId: string;
+  chatId: string | number;
+  messageThreadId?: number;
+}): {
+  groupConfig?: TelegramGroupConfig;
+  topicConfig?: TelegramTopicConfig;
+} {
+  const telegramCfg = resolveTelegramAccount({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  }).config;
+  const groups = telegramCfg.groups;
+  if (!groups) {
+    return { groupConfig: undefined, topicConfig: undefined };
+  }
+  const groupKey = String(params.chatId);
+  const groupConfig = groups[groupKey] ?? groups["*"];
+  const topicConfig =
+    params.messageThreadId != null
+      ? groupConfig?.topics?.[String(params.messageThreadId)]
+      : undefined;
+  return { groupConfig, topicConfig };
+}
+
+async function bootstrapMuxPairedSender(params: {
+  channel: "telegram" | "discord" | "whatsapp";
+  accountId: string;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  messageId: string;
+  chatType: string;
+}): Promise<void> {
+  if (
+    !isMuxPostPairingSynthetic({
+      payload: params.payload,
+      channelData: params.channelData,
+      messageId: params.messageId,
+    })
+  ) {
+    return;
+  }
+
+  const routeKey = readMuxNonEmptyString(params.channelData?.routeKey);
+  const senderId =
+    params.channel === "telegram"
+      ? resolveTelegramMuxSender({
+          payload: params.payload,
+          channelData: params.channelData,
+        }).senderId
+      : readMuxNonEmptyString(params.payload.from)?.replace(
+          /^(discord:(user|dm):|discord:|whatsapp:)/i,
+          "",
+        );
+  if (!senderId) {
+    return;
+  }
+
+  if (isDirectChat(params.chatType)) {
+    try {
+      await addChannelAllowFromStoreEntry({
+        channel: params.channel,
+        entry: senderId,
+        accountId: params.accountId,
+      });
+    } catch (error) {
+      warn(
+        `[mux] failed to persist paired DM sender for ${params.channel}:${params.accountId}: ${(error as Error).message}`,
+      );
+    }
+    return;
+  }
+
+  if (!routeKey) {
+    return;
+  }
+  try {
+    await addMuxPairedSender({
+      channel: params.channel,
+      accountId: params.accountId,
+      routeKey,
+      senderId,
+    });
+  } catch (error) {
+    warn(
+      `[mux] failed to persist paired sender for ${params.channel}:${params.accountId}:${routeKey}: ${(error as Error).message}`,
+    );
+  }
+}
+
+async function resolveTelegramMuxAccess(params: {
+  cfg: OpenClawConfig;
+  accountId: string;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  body: string;
+  chatType: string;
+  messageId: string;
+  wasMentioned: boolean;
+}): Promise<MuxAccessResult> {
+  const telegramAccount = resolveTelegramAccount({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  const telegramCfg = telegramAccount.config;
+  const sender = resolveTelegramMuxSender({
+    payload: params.payload,
+    channelData: params.channelData,
+  });
+  const isGroup = !isDirectChat(params.chatType);
+  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
+
+  if (!isGroup) {
+    const dmPolicy = telegramCfg.dmPolicy ?? "pairing";
+    if (dmPolicy === "disabled") {
+      return { allowed: false };
+    }
+    const storeAllowFrom = await readChannelAllowFromStore(
+      "telegram",
+      process.env,
+      params.accountId,
+    ).catch(() => []);
+    const effectiveDmAllow = normalizeAllowFromWithStore({
+      allowFrom: telegramCfg.allowFrom,
+      storeAllowFrom,
+    });
+    if (!effectiveDmAllow.hasEntries) {
+      return { allowed: true, commandAuthorized: true };
+    }
+    if (dmPolicy !== "open") {
+      const allowMatch = resolveSenderAllowMatch({
+        allow: effectiveDmAllow,
+        senderId: sender.senderId,
+        senderUsername: sender.senderUsername,
+      });
+      const allowed =
+        effectiveDmAllow.hasWildcard || (effectiveDmAllow.hasEntries && allowMatch.allowed);
+      if (!allowed) {
+        return { allowed: false };
+      }
+    }
+    const commandAuthorized = resolveControlCommandGate({
+      useAccessGroups,
+      authorizers: [
+        {
+          configured: effectiveDmAllow.hasEntries,
+          allowed: isSenderAllowed({
+            allow: effectiveDmAllow,
+            senderId: sender.senderId,
+            senderUsername: sender.senderUsername,
+          }),
+        },
+      ],
+      allowTextCommands: true,
+      hasControlCommand: hasControlCommand(params.body, params.cfg, {}),
+    }).commandAuthorized;
+    return { allowed: true, commandAuthorized };
+  }
+
+  const peer = resolveTelegramInboundPeer({
+    payload: params.payload,
+    channelData: params.channelData,
+  });
+  if (!peer) {
+    return { allowed: false };
+  }
+  const groupAllowFrom =
+    telegramCfg.groupAllowFrom ??
+    (telegramCfg.allowFrom && telegramCfg.allowFrom.length > 0 ? telegramCfg.allowFrom : undefined);
+  const groupAllowContext = await resolveTelegramGroupAllowFromContext({
+    chatId: peer.chatId,
+    accountId: params.accountId,
+    isForum: peer.isForum,
+    messageThreadId: peer.messageThreadId,
+    groupAllowFrom,
+    resolveTelegramGroupConfig: (chatId, messageThreadId) =>
+      resolveTelegramMuxGroupConfig({
+        cfg: params.cfg,
+        accountId: params.accountId,
+        chatId,
+        messageThreadId,
+      }),
+  });
+  const routeKey =
+    readMuxNonEmptyString(params.channelData?.routeKey) ?? `telegram:default:chat:${peer.chatId}`;
+  const pairedSenders = await readMuxPairedSenders({
+    channel: "telegram",
+    accountId: params.accountId,
+    routeKey,
+  }).catch(() => []);
+  const runtimePairedSenders = groupAllowContext.hasGroupAllowOverride ? [] : pairedSenders;
+  const effectiveGroupAllow = normalizeAllowFromWithStore({
+    allowFrom: groupAllowContext.groupAllowOverride ?? groupAllowFrom,
+    storeAllowFrom: [...groupAllowContext.storeAllowFrom, ...runtimePairedSenders],
+  });
+  const baseAccess = evaluateTelegramGroupBaseAccess({
+    isGroup: true,
+    groupConfig: groupAllowContext.groupConfig,
+    topicConfig: groupAllowContext.topicConfig,
+    hasGroupAllowOverride: groupAllowContext.hasGroupAllowOverride,
+    effectiveGroupAllow,
+    senderId: sender.senderId,
+    senderUsername: sender.senderUsername,
+    enforceAllowOverride: true,
+    requireSenderForAllowOverride: false,
+  });
+  if (!baseAccess.allowed) {
+    return { allowed: false };
+  }
+
+  const policyAccess = evaluateTelegramGroupPolicyAccess({
+    isGroup: true,
+    chatId: peer.chatId,
+    cfg: params.cfg,
+    telegramCfg,
+    topicConfig: groupAllowContext.topicConfig,
+    groupConfig: groupAllowContext.groupConfig,
+    effectiveGroupAllow,
+    senderId: sender.senderId,
+    senderUsername: sender.senderUsername,
+    resolveGroupPolicy: (chatId) =>
+      resolveChannelGroupPolicy({
+        cfg: params.cfg,
+        channel: "telegram",
+        accountId: params.accountId,
+        groupId: String(chatId),
+      }),
+    enforcePolicy: true,
+    useTopicAndGroupOverrides: true,
+    enforceAllowlistAuthorization: true,
+    allowEmptyAllowlistEntries: false,
+    requireSenderForAllowlistAuthorization: true,
+    checkChatAllowlist: false,
+  });
+  if (!policyAccess.allowed) {
+    return { allowed: false };
+  }
+
+  const requireMention =
+    firstDefined(
+      groupAllowContext.topicConfig?.requireMention,
+      groupAllowContext.groupConfig?.requireMention,
+      resolveChannelGroupRequireMention({
+        cfg: params.cfg,
+        channel: "telegram",
+        accountId: params.accountId,
+        groupId: String(peer.chatId),
+      }),
+    ) ?? false;
+  const commandAuthorized = resolveControlCommandGate({
+    useAccessGroups,
+    authorizers: [
+      {
+        configured: effectiveGroupAllow.hasEntries,
+        allowed: isSenderAllowed({
+          allow: effectiveGroupAllow,
+          senderId: sender.senderId,
+          senderUsername: sender.senderUsername,
+        }),
+      },
+    ],
+    allowTextCommands: true,
+    hasControlCommand: hasControlCommand(params.body, params.cfg, {}),
+  }).commandAuthorized;
+  const mentionGate = resolveMentionGatingWithBypass({
+    isGroup: true,
+    requireMention,
+    canDetectMention: true,
+    wasMentioned: params.wasMentioned,
+    hasAnyMention: params.wasMentioned,
+    allowTextCommands: true,
+    hasControlCommand: hasControlCommand(params.body, params.cfg, {}),
+    commandAuthorized,
+  });
+  if (mentionGate.shouldSkip) {
+    return { allowed: false };
+  }
+  return {
+    allowed: true,
+    commandAuthorized,
+    effectiveWasMentioned: mentionGate.effectiveWasMentioned,
+  };
+}
+
+async function resolveDiscordMuxAccess(params: {
+  cfg: OpenClawConfig;
+  accountId: string;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  body: string;
+  chatType: string;
+  wasMentioned: boolean;
+}): Promise<MuxAccessResult> {
+  const discordCfg = params.cfg.channels?.discord ?? {};
+  const hasControlCommandInMessage = hasControlCommand(params.body, params.cfg, {});
+  const sender = resolveDiscordMuxSender({
+    payload: params.payload,
+    channelData: params.channelData,
+  });
+  const isDirect = isDirectChat(params.chatType);
+  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
+
+  if (isDirect) {
+    const dmPolicy = discordCfg.dmPolicy ?? discordCfg.dm?.policy ?? "pairing";
+    if (dmPolicy === "disabled") {
+      return { allowed: false };
+    }
+    if (dmPolicy === "open") {
+      return { allowed: true, commandAuthorized: true };
+    }
+    const storeAllowFrom = await readChannelAllowFromStore(
+      "discord",
+      process.env,
+      params.accountId,
+    ).catch(() => []);
+    const configuredAllowFrom = discordCfg.allowFrom ?? discordCfg.dm?.allowFrom ?? [];
+    const allowList = normalizeDiscordAllowList(
+      [...configuredAllowFrom.map(String), ...storeAllowFrom],
+      ["discord:", "user:", "pk:"],
+    );
+    if (!allowList) {
+      return { allowed: true, commandAuthorized: true };
+    }
+    const allowed = allowListMatches(allowList, {
+      id: sender.senderId ?? "",
+      name: sender.senderName,
+      tag: sender.senderTag,
+    });
+    if (!allowed) {
+      return { allowed: false };
+    }
+    return { allowed: true, commandAuthorized: true };
+  }
+
+  const guildId = readMuxNonEmptyString(params.channelData?.guildId);
+  const channelId = readMuxNonEmptyString(params.channelData?.channelId);
+  if (!guildId || !channelId) {
+    return { allowed: false };
+  }
+  const guildInfo = resolveDiscordGuildInfo({ cfg: params.cfg, guildId });
+  const routeKey = readMuxNonEmptyString(params.channelData?.routeKey);
+  const parentChannelId = parseDiscordParentChannelIdFromRouteKey(routeKey);
+  const channelConfig = resolveDiscordChannelConfigWithFallback({
+    guildInfo,
+    channelId,
+    channelSlug: "",
+    ...(parentChannelId ? { parentId: parentChannelId, scope: "thread" as const } : {}),
+  });
+
+  const channelAllowlistConfigured =
+    Boolean(guildInfo?.channels) && Object.keys(guildInfo?.channels ?? {}).length > 0;
+  const channelAllowed = channelConfig?.allowed !== false;
+  if (
+    !isDiscordGroupAllowedByPolicy({
+      groupPolicy: discordCfg.groupPolicy ?? params.cfg.channels?.defaults?.groupPolicy ?? "open",
+      guildAllowlisted: true,
+      channelAllowlistConfigured,
+      channelAllowed,
+    })
+  ) {
+    return { allowed: false };
+  }
+  if (channelConfig?.enabled === false || channelConfig?.allowed === false) {
+    return { allowed: false };
+  }
+
+  const { hasAccessRestrictions, memberAllowed } = resolveDiscordMemberAccessState({
+    channelConfig,
+    guildInfo,
+    memberRoleIds: sender.memberRoleIds,
+    sender: {
+      id: sender.senderId ?? "",
+      name: sender.senderName,
+      tag: sender.senderTag,
+    },
+  });
+  if (hasAccessRestrictions && !memberAllowed) {
+    return { allowed: false };
+  }
+
+  const pairedSenders = await readMuxPairedSenders({
+    channel: "discord",
+    accountId: params.accountId,
+    routeKey: routeKey ?? `discord:default:guild:${guildId}`,
+  }).catch(() => []);
+  const configuredOwnerAllow = discordCfg.allowFrom?.map(String) ?? discordCfg.dm?.allowFrom ?? [];
+  const ownerAllow =
+    configuredOwnerAllow.length > 0
+      ? configuredOwnerAllow.map(String)
+      : hasControlCommandInMessage
+        ? [...configuredOwnerAllow.map(String), ...pairedSenders]
+        : [];
+  const ownerAllowList = normalizeDiscordAllowList(ownerAllow, ["discord:", "user:", "pk:"]);
+  const ownerOk = ownerAllowList
+    ? allowListMatches(ownerAllowList, {
+        id: sender.senderId ?? "",
+        name: sender.senderName,
+        tag: sender.senderTag,
+      })
+    : false;
+  const commandGate = resolveControlCommandGate({
+    useAccessGroups,
+    authorizers: [
+      { configured: ownerAllowList != null, allowed: ownerOk },
+      { configured: hasAccessRestrictions, allowed: memberAllowed },
+    ],
+    modeWhenAccessGroupsOff: "configured",
+    allowTextCommands: true,
+    hasControlCommand: hasControlCommandInMessage,
+  });
+  if (commandGate.shouldBlock) {
+    return { allowed: false };
+  }
+
+  const requireMention = resolveDiscordShouldRequireMention({
+    isGuildMessage: true,
+    isThread: parentChannelId != null,
+    channelConfig,
+    guildInfo,
+  });
+  const mentionGate = resolveMentionGatingWithBypass({
+    isGroup: true,
+    requireMention,
+    canDetectMention: true,
+    wasMentioned: params.wasMentioned,
+    hasAnyMention: params.wasMentioned,
+    allowTextCommands: true,
+    hasControlCommand: hasControlCommandInMessage,
+    commandAuthorized: commandGate.commandAuthorized,
+  });
+  if (mentionGate.shouldSkip) {
+    return { allowed: false };
+  }
+  return {
+    allowed: true,
+    commandAuthorized: commandGate.commandAuthorized,
+    effectiveWasMentioned: mentionGate.effectiveWasMentioned,
+  };
+}
+
+async function resolveWhatsAppMuxAccess(params: {
+  cfg: OpenClawConfig;
+  accountId: string;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  chatType: string;
+}): Promise<MuxAccessResult> {
+  const account = resolveWhatsAppAccount({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
+  const peer = resolveWhatsAppInboundPeer({ payload: params.payload });
+  const senderId = normalizeWhatsAppTarget(readMuxNonEmptyString(params.payload.from) ?? "");
+  const isGroup = !isDirectChat(params.chatType);
+
+  if (!isGroup) {
+    const dmPolicy = account.dmPolicy ?? "pairing";
+    if (dmPolicy === "disabled") {
+      return { allowed: false };
+    }
+    if (dmPolicy === "open") {
+      return { allowed: true, commandAuthorized: true };
+    }
+    const storeAllowFrom = await readChannelAllowFromStore(
+      "whatsapp",
+      process.env,
+      account.accountId,
+    ).catch(() => []);
+    const effectiveDmAllow = normalizeWhatsAppAllowList([
+      ...(account.allowFrom ?? []),
+      ...storeAllowFrom,
+    ]);
+    if (!effectiveDmAllow.hasEntries) {
+      return { allowed: true, commandAuthorized: true };
+    }
+    if (!senderId) {
+      return { allowed: false };
+    }
+    const senderAllowed =
+      effectiveDmAllow.hasWildcard || effectiveDmAllow.entries.includes(senderId);
+    if (!senderAllowed) {
+      return { allowed: false };
+    }
+    return { allowed: true, commandAuthorized: true };
+  }
+
+  const groupPolicy = account.groupPolicy ?? params.cfg.channels?.defaults?.groupPolicy ?? "open";
+  if (groupPolicy === "disabled") {
+    return { allowed: false };
+  }
+  const configuredGroupAllowFrom =
+    account.groupAllowFrom ??
+    (account.allowFrom && account.allowFrom.length > 0 ? account.allowFrom : undefined);
+  const routeKey =
+    readMuxNonEmptyString(params.channelData?.routeKey) ??
+    (peer ? `whatsapp:${account.accountId}:chat:${peer.id}` : undefined);
+  const pairedSenders =
+    routeKey == null
+      ? []
+      : await readMuxPairedSenders({
+          channel: "whatsapp",
+          accountId: account.accountId,
+          routeKey,
+        }).catch(() => []);
+  const runtimePairedSenders =
+    configuredGroupAllowFrom && configuredGroupAllowFrom.length > 0 ? [] : pairedSenders;
+  const effectiveGroupAllow = normalizeWhatsAppAllowList([
+    ...(configuredGroupAllowFrom ?? []),
+    ...runtimePairedSenders,
+  ]);
+  const senderAllowed = Boolean(
+    senderId && (effectiveGroupAllow.hasWildcard || effectiveGroupAllow.entries.includes(senderId)),
+  );
+  if (groupPolicy === "allowlist") {
+    if (!effectiveGroupAllow.hasEntries || !senderAllowed) {
+      return { allowed: false };
+    }
+  }
+
+  if (!useAccessGroups) {
+    return { allowed: true, commandAuthorized: true };
+  }
+  return {
+    allowed: true,
+    commandAuthorized: senderAllowed,
+  };
+}
+
+function applyMuxAccessToContext(ctx: MsgContext, access: MuxAccessResult): boolean {
+  if (!access.allowed) {
+    return false;
+  }
+  ctx.CommandAuthorized = access.commandAuthorized;
+  if (typeof access.effectiveWasMentioned === "boolean") {
+    ctx.WasMentioned = access.effectiveWasMentioned;
+  }
+  return true;
 }
 
 async function sendTelegramEditViaMux(params: {
   cfg: OpenClawConfig;
   sessionKey: string;
   accountId?: string;
+  to: string;
   messageId: number;
   text: string;
   buttons: TelegramCallbackButtons;
@@ -193,6 +1153,7 @@ async function sendTelegramEditViaMux(params: {
     channel: "telegram",
     sessionKey: params.sessionKey,
     accountId: params.accountId,
+    to: params.to,
     raw: {
       telegram: telegramEdit,
     },
@@ -320,8 +1281,7 @@ export async function handleMuxInboundHttpRequest(
 
   const payload = toMuxInboundPayload(body.value);
   const channel = normalizeChannelId(readMuxNonEmptyString(payload.channel));
-  const sessionKey = readMuxNonEmptyString(payload.sessionKey);
-  const originatingTo = readMuxNonEmptyString(payload.to);
+  const transportSessionKey = readMuxNonEmptyString(payload.sessionKey);
   const messageId =
     readMuxNonEmptyString(payload.messageId ?? payload.eventId) ?? `mux:${Date.now()}`;
   const rawMessage = typeof payload.body === "string" ? payload.body : "";
@@ -337,7 +1297,16 @@ export async function handleMuxInboundHttpRequest(
     sendJson(res, 400, { ok: false, error: "channel required" });
     return true;
   }
-  if (!sessionKey) {
+  if (!isMuxBusinessChannel(channel)) {
+    sendJson(res, 400, { ok: false, error: "unsupported mux channel" });
+    return true;
+  }
+  const originatingTo = resolveMuxInboundOriginatingTo({
+    channel,
+    payload,
+    channelData,
+  });
+  if (!transportSessionKey) {
     sendJson(res, 400, { ok: false, error: "sessionKey required" });
     return true;
   }
@@ -345,8 +1314,23 @@ export async function handleMuxInboundHttpRequest(
     sendJson(res, 400, { ok: false, error: "to required" });
     return true;
   }
+  const accountId = resolveMuxBusinessAccountId({
+    cfg,
+    channel,
+    accountId: readMuxNonEmptyString(payload.accountId),
+  });
+  const sessionKey = resolveMuxInboundBusinessSessionKey({
+    cfg,
+    channel,
+    payload,
+    channelData,
+    accountId,
+    fallbackSessionKey: transportSessionKey,
+  });
   const callbackPayload =
-    channel === "telegram" ? resolveTelegramCallbackPayload({ payload, channelData }) : null;
+    channel === "telegram"
+      ? resolveTelegramCallbackPayload({ payload, channelData, accountId })
+      : null;
   if (!rawMessage.trim() && attachments.length === 0 && !callbackPayload) {
     sendJson(res, 400, { ok: false, error: "body or attachment required" });
     return true;
@@ -357,7 +1341,7 @@ export async function handleMuxInboundHttpRequest(
     try {
       const callbackAction = await resolveTelegramCallbackAction({
         cfg,
-        accountId: callbackPayload.accountId,
+        accountId,
         data: callbackPayload.data,
         chatId: callbackPayload.chatId,
         isGroup: callbackPayload.isGroup,
@@ -375,7 +1359,8 @@ export async function handleMuxInboundHttpRequest(
         await sendTelegramEditViaMux({
           cfg,
           sessionKey,
-          accountId: callbackPayload.accountId,
+          accountId,
+          to: originatingTo,
           messageId: callbackPayload.callbackMessageId,
           text: callbackAction.text,
           buttons: callbackAction.buttons,
@@ -396,6 +1381,10 @@ export async function handleMuxInboundHttpRequest(
   // For Telegram: set Surface = channel so dispatch-from-config delivers through our
   // callback instead of routing via routeReply (Surface matches OriginatingChannel).
   const isTelegramStreaming = channel === "telegram";
+  let telegramAccess:
+    | { allowed: false }
+    | { allowed: true; commandAuthorized: boolean; effectiveWasMentioned?: boolean }
+    | null = null;
   const ctx: MsgContext = {
     Body: inboundBody,
     BodyForAgent: inboundBody,
@@ -405,10 +1394,12 @@ export async function handleMuxInboundHttpRequest(
     SessionKey: sessionKey,
     From: readMuxNonEmptyString(payload.from),
     To: originatingTo,
-    AccountId: readMuxNonEmptyString(payload.accountId),
+    AccountId: accountId,
     MessageSid: messageId,
     Timestamp: readMuxOptionalNumber(payload.timestampMs),
-    ChatType: readMuxNonEmptyString(payload.chatType) ?? "direct",
+    ChatType: isDirectChat(readMuxNonEmptyString(payload.chatType))
+      ? "direct"
+      : (readMuxNonEmptyString(payload.chatType) ?? "direct"),
     Provider: channel,
     Surface: isTelegramStreaming ? channel : "mux",
     OriginatingChannel: channel,
@@ -425,6 +1416,55 @@ export async function handleMuxInboundHttpRequest(
   const dispatchPromise = (async () => {
     let tmpDir: string | undefined;
     try {
+      await bootstrapMuxPairedSender({
+        channel,
+        accountId,
+        payload,
+        channelData,
+        messageId,
+        chatType: String(ctx.ChatType ?? "direct"),
+      });
+
+      if (channel === "telegram") {
+        telegramAccess = await resolveTelegramMuxAccess({
+          cfg,
+          accountId,
+          payload,
+          channelData,
+          body: inboundBody,
+          chatType: String(ctx.ChatType ?? "direct"),
+          messageId,
+          wasMentioned: callbackPayload != null || payload.wasMentioned === true,
+        });
+        if (!applyMuxAccessToContext(ctx, telegramAccess)) {
+          return;
+        }
+      } else if (channel === "discord") {
+        const discordAccess = await resolveDiscordMuxAccess({
+          cfg,
+          accountId,
+          payload,
+          channelData,
+          body: inboundBody,
+          chatType: String(ctx.ChatType ?? "direct"),
+          wasMentioned: payload.wasMentioned === true,
+        });
+        if (!applyMuxAccessToContext(ctx, discordAccess)) {
+          return;
+        }
+      } else {
+        const whatsappAccess = await resolveWhatsAppMuxAccess({
+          cfg,
+          accountId,
+          payload,
+          channelData,
+          chatType: String(ctx.ChatType ?? "direct"),
+        });
+        if (!applyMuxAccessToContext(ctx, whatsappAccess)) {
+          return;
+        }
+      }
+
       // Resolve attachments to temp files (same pattern as vanilla TG channel).
       if (attachments.length > 0) {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mux-att-"));
@@ -468,6 +1508,8 @@ export async function handleMuxInboundHttpRequest(
                 channel: typingChannel,
                 accountId: ctx.AccountId,
                 sessionKey,
+                to: originatingTo,
+                ...(ctx.MessageThreadId != null ? { threadId: ctx.MessageThreadId } : {}),
               });
             } catch {
               // Best-effort typing signal for mux transport.
@@ -615,6 +1657,7 @@ async function dispatchMuxTelegram(params: {
           channel: "telegram",
           sessionKey,
           accountId: ctx.AccountId,
+          to: originatingTo,
           raw: {
             telegram: {
               method: "sendMessage",
@@ -633,6 +1676,7 @@ async function dispatchMuxTelegram(params: {
           channel: "telegram",
           sessionKey,
           accountId: ctx.AccountId,
+          to: originatingTo,
           raw: {
             telegram: {
               method: "editMessageText",

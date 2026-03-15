@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "../../../config/config.js";
 import { loadOrCreateDeviceIdentity } from "../../../infra/device-identity.js";
 import type { PollInput } from "../../../polls.js";
-import { DEFAULT_ACCOUNT_ID } from "../../../routing/session-key.js";
+import {
+  isLegacyMuxAccountId,
+  LEGACY_MUX_ACCOUNT_ID,
+  resolveDefaultMuxBusinessAccountId,
+  resolveMuxBusinessAccountId,
+} from "../../../utils/mux-account.js";
 
 type SupportedMuxChannel = "whatsapp" | "telegram" | "discord";
 
@@ -116,20 +121,16 @@ function resolveChannelMuxConfig(params: {
   accountId?: string;
 }): ResolvedChannelMuxConfig {
   const { cfg, channel, accountId } = params;
-  const resolvedAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
-  if (channel === "telegram") {
-    const channelCfg = cfg.channels?.telegram;
-    const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
-    return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
-  }
-  if (channel === "discord") {
-    const channelCfg = cfg.channels?.discord;
-    const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
-    return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
-  }
-  const channelCfg = cfg.channels?.whatsapp;
+  const channelCfg =
+    channel === "telegram"
+      ? cfg.channels?.telegram
+      : channel === "discord"
+        ? cfg.channels?.discord
+        : cfg.channels?.whatsapp;
+  const resolvedAccountId = resolveMuxBusinessAccountId({ cfg, channel, accountId });
   const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
-  return normalizeChannelMuxConfig(accountCfg?.mux ?? channelCfg?.mux);
+  const legacyMuxCfg = channelCfg?.accounts?.[LEGACY_MUX_ACCOUNT_ID]?.mux;
+  return normalizeChannelMuxConfig(channelCfg?.mux ?? accountCfg?.mux ?? legacyMuxCfg);
 }
 
 function resolveDefaultOpenClawId(): string {
@@ -159,6 +160,14 @@ export function isMuxEnabled(params: {
   channel: SupportedMuxChannel;
   accountId?: string;
 }): boolean {
+  const defaultAccountId = resolveDefaultMuxBusinessAccountId(params);
+  if (
+    params.accountId &&
+    !isLegacyMuxAccountId(params.accountId) &&
+    params.accountId !== defaultAccountId
+  ) {
+    return false;
+  }
   return resolveChannelMuxConfig(params).enabled;
 }
 
@@ -508,10 +517,15 @@ export function __resetMuxRuntimeAuthCacheForTest() {
 }
 
 export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendResponse> {
-  const resolved = requireMuxConfig({
+  const accountId = resolveMuxBusinessAccountId({
     cfg: params.cfg,
     channel: params.channel,
     accountId: params.accountId,
+  });
+  const resolved = requireMuxConfig({
+    cfg: params.cfg,
+    channel: params.channel,
+    accountId,
     sessionKey: params.sessionKey,
   });
 
@@ -520,7 +534,7 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
     requestId,
     channel: params.channel,
     sessionKey: resolved.sessionKey,
-    accountId: params.accountId,
+    accountId,
     to: params.to,
     text: params.text ?? "",
     mediaUrl: params.mediaUrl,
@@ -555,11 +569,18 @@ export async function sendTypingViaMux(params: {
   channel: SupportedMuxChannel;
   accountId?: string;
   sessionKey?: string | null;
+  to?: string;
+  threadId?: string | number;
 }): Promise<void> {
-  const resolved = requireMuxConfig({
+  const accountId = resolveMuxBusinessAccountId({
     cfg: params.cfg,
     channel: params.channel,
     accountId: params.accountId,
+  });
+  const resolved = requireMuxConfig({
+    cfg: params.cfg,
+    channel: params.channel,
+    accountId,
     sessionKey: params.sessionKey,
   });
 
@@ -569,7 +590,9 @@ export async function sendTypingViaMux(params: {
     action: "typing",
     channel: params.channel,
     sessionKey: resolved.sessionKey,
-    accountId: params.accountId,
+    accountId,
+    ...(params.to ? { to: params.to } : {}),
+    ...(params.threadId != null ? { threadId: String(params.threadId) } : {}),
     openclawId: resolved.openclawId,
   };
 

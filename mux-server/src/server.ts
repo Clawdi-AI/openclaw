@@ -4,6 +4,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { RequestClient } from "@buape/carbon";
 import WebSocket from "ws";
 import {
@@ -164,6 +165,14 @@ type WhatsAppBoundRoute = {
   accountId: string;
   chatJid: string;
 };
+
+type ResolvedBoundRoute<T> = {
+  route: T;
+  routeKey: string;
+  via: "session" | "route";
+};
+
+type OutboundResolutionMode = "session-first" | "target-first";
 
 type TenantInboundTarget = {
   url: string;
@@ -467,6 +476,30 @@ let discordRuntimeModulesPromise: Promise<DiscordRuntimeModules> | null = null;
 async function loadWebRuntimeModules(): Promise<WebRuntimeModules> {
   if (!webRuntimeModulesPromise) {
     webRuntimeModulesPromise = (async () => {
+      const runtimeOverridePath = readNonEmptyString(process.env.MUX_WEB_RUNTIME_MODULE_PATH);
+      if (runtimeOverridePath) {
+        const overrideHref = pathToFileURL(path.resolve(runtimeOverridePath)).href;
+        const runtimeModule = (await import(overrideHref)) as {
+          monitorWebInbox?: WebRuntimeModules["monitorWebInbox"];
+          sendMessageWhatsApp?: WebRuntimeModules["sendMessageWhatsApp"];
+          sendTypingWhatsApp?: WebRuntimeModules["sendTypingWhatsApp"];
+          setActiveWebListener?: WebRuntimeModules["setActiveWebListener"];
+        };
+        if (
+          typeof runtimeModule.monitorWebInbox !== "function" ||
+          typeof runtimeModule.sendMessageWhatsApp !== "function" ||
+          typeof runtimeModule.sendTypingWhatsApp !== "function" ||
+          typeof runtimeModule.setActiveWebListener !== "function"
+        ) {
+          throw new Error("failed to load WhatsApp runtime modules from override path");
+        }
+        return {
+          monitorWebInbox: runtimeModule.monitorWebInbox,
+          sendMessageWhatsApp: runtimeModule.sendMessageWhatsApp,
+          sendTypingWhatsApp: runtimeModule.sendTypingWhatsApp,
+          setActiveWebListener: runtimeModule.setActiveWebListener,
+        };
+      }
       const inboundModulePath = "../../src/web/inbound.js";
       const outboundModulePath = "../../src/web/outbound.js";
       const activeListenerModulePath = "../../src/web/active-listener.js";
@@ -536,6 +569,9 @@ const telegramApiBaseUrl = (
 const discordApiBaseUrl = (
   process.env.MUX_DISCORD_API_BASE_URL || "https://discord.com/api/v10"
 ).replace(/\/+$/, "");
+const outboundResolutionMode = resolveOutboundResolutionMode(
+  process.env.MUX_OUTBOUND_RESOLUTION_MODE,
+);
 // OpenClaw account id for mux-routed inbound events. Keep this separate from
 // platform account ids so direct channel bots can remain unchanged.
 const openclawMuxAccountId = readNonEmptyString(process.env.MUX_OPENCLAW_ACCOUNT_ID) || "default";
@@ -1906,6 +1942,20 @@ function readUnsignedNumericString(value: unknown): string | undefined {
   return trimmed;
 }
 
+function readSignedNumericString(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value !== 0) {
+    return String(Math.trunc(value));
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed) || trimmed === "0" || trimmed === "-0") {
+    return undefined;
+  }
+  return trimmed;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
@@ -2019,6 +2069,41 @@ function shouldRetryTelegramWithoutHtmlParseMode(params: {
   return TELEGRAM_PARSE_ERR_RE.test(readTelegramResultDescription(params.result));
 }
 
+function shouldRetryTelegramWithoutThread(params: {
+  body: Record<string, unknown>;
+  result: Record<string, unknown>;
+}): boolean {
+  return (
+    readPositiveInt(params.body.message_thread_id) !== undefined &&
+    /message thread not found/i.test(readTelegramResultDescription(params.result))
+  );
+}
+
+async function withTelegramThreadFallback(params: {
+  body: Record<string, unknown>;
+  attempt: (
+    effectiveBody: Record<string, unknown>,
+  ) => Promise<{ response: Response; result: Record<string, unknown> }>;
+}): Promise<{
+  response: Response;
+  result: Record<string, unknown>;
+}> {
+  let finalBody: Record<string, unknown> = { ...params.body };
+  let attempt = await params.attempt(finalBody);
+  if (
+    (!attempt.response.ok || attempt.result.ok !== true) &&
+    shouldRetryTelegramWithoutThread({
+      body: finalBody,
+      result: attempt.result,
+    })
+  ) {
+    finalBody = { ...finalBody };
+    delete finalBody.message_thread_id;
+    attempt = await params.attempt(finalBody);
+  }
+  return attempt;
+}
+
 async function sendTelegram(method: string, body: Record<string, unknown>) {
   const token = requireTelegramBotToken();
   const url = `${telegramApiBaseUrl}/bot${token}/${method}`;
@@ -2063,6 +2148,35 @@ async function sendTelegram(method: string, body: Record<string, unknown>) {
   });
   const result = (await response.json()) as Record<string, unknown>;
   return { response, result };
+}
+
+async function sendTelegramWithFallbacks(params: {
+  method: string;
+  body: Record<string, unknown>;
+}): Promise<{
+  response: Response;
+  result: Record<string, unknown>;
+}> {
+  return await withTelegramThreadFallback({
+    body: params.body,
+    attempt: async (effectiveBody) => {
+      let finalBody: Record<string, unknown> = { ...effectiveBody };
+      let { response, result } = await sendTelegram(params.method, finalBody);
+      if (
+        (!response.ok || result.ok !== true) &&
+        shouldRetryTelegramWithoutHtmlParseMode({
+          method: params.method,
+          body: finalBody,
+          result,
+        })
+      ) {
+        finalBody = { ...finalBody };
+        delete finalBody.parse_mode;
+        ({ response, result } = await sendTelegram(params.method, finalBody));
+      }
+      return { response, result };
+    },
+  });
 }
 
 function parseDiscordJsonBody(text: string): Record<string, unknown> {
@@ -3163,29 +3277,14 @@ async function sendTelegramPairingNotice(params: {
   if (canUseThreadId && params.topicId) {
     body.message_thread_id = params.topicId;
   }
-  const firstAttempt = await sendTelegram("sendMessage", body);
-  if (firstAttempt.response.ok && firstAttempt.result.ok === true) {
+  const attempt = await withTelegramThreadFallback({
+    body,
+    attempt: async (effectiveBody) => await sendTelegram("sendMessage", effectiveBody),
+  });
+  if (attempt.response.ok && attempt.result.ok === true) {
     return;
   }
-
-  // Topic IDs can become stale (or Telegram can reject edge-case topic IDs).
-  // Fall back to chat-level notices so bot-control commands still respond.
-  const description =
-    typeof firstAttempt.result.description === "string" ? firstAttempt.result.description : "";
-  const shouldRetryWithoutThread = canUseThreadId && /message thread not found/i.test(description);
-  if (shouldRetryWithoutThread) {
-    const retryBody: Record<string, unknown> = {
-      chat_id: params.chatId,
-      text: params.text,
-      ...(params.parseMode ? { parse_mode: params.parseMode } : {}),
-    };
-    const retryAttempt = await sendTelegram("sendMessage", retryBody);
-    if (retryAttempt.response.ok && retryAttempt.result.ok === true) {
-      return;
-    }
-    throw new Error(`telegram pairing notice failed (${retryAttempt.response.status})`);
-  }
-  throw new Error(`telegram pairing notice failed (${firstAttempt.response.status})`);
+  throw new Error(`telegram pairing notice failed (${attempt.response.status})`);
 }
 
 async function answerTelegramCallbackQuery(params: {
@@ -3483,14 +3582,9 @@ function buildDiscordThreadScopedSessionKey(baseSessionKey: string, threadId: st
 function resolveDiscordBindingRouteKeyForClaim(params: {
   incomingRoute: DiscordBoundRoute;
 }): string {
-  if (
-    params.incomingRoute.kind === "guild" &&
-    params.incomingRoute.threadId &&
-    params.incomingRoute.channelId
-  ) {
+  if (params.incomingRoute.kind === "guild") {
     return buildDiscordGuildRouteKey({
       guildId: params.incomingRoute.guildId,
-      channelId: params.incomingRoute.channelId,
     });
   }
   return buildDiscordRouteKey(params.incomingRoute);
@@ -3661,52 +3755,309 @@ function parseDiscordOutboundTarget(value: unknown): DiscordOutboundTarget | nul
   return null;
 }
 
-function resolveTelegramBoundRoute(params: {
-  tenantId: string;
-  channel: string;
-  sessionKey: string;
-}): TelegramBoundRoute | null {
-  const row = stmtResolveSessionRouteBinding.get(
-    params.tenantId,
-    params.channel,
-    params.sessionKey,
-  ) as SessionRouteBindingRow | undefined;
-  if (!row) {
-    return null;
+function uniqueRouteKeys(routeKeys: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const routeKey of routeKeys) {
+    const trimmed = readNonEmptyString(routeKey);
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    unique.push(trimmed);
   }
-  return parseTelegramRouteKey(resolveBoundRouteKeyFromSession(row));
+  return unique;
 }
 
-function resolveDiscordBoundRoute(params: {
+function resolveOutboundResolutionMode(value: unknown): OutboundResolutionMode {
+  const normalized = readNonEmptyString(value)?.toLowerCase();
+  return normalized === "target-first" ? "target-first" : "session-first";
+}
+
+function resolveRouteKeyBySession(params: {
   tenantId: string;
-  channel: string;
+  channel: "telegram" | "discord" | "whatsapp";
   sessionKey: string;
-}): DiscordBoundRoute | null {
-  const row = stmtResolveSessionRouteBinding.get(
+}): string | null {
+  const exactRow = stmtResolveSessionRouteBinding.get(
     params.tenantId,
     params.channel,
     params.sessionKey,
   ) as SessionRouteBindingRow | undefined;
-  if (!row) {
+  return exactRow ? resolveBoundRouteKeyFromSession(exactRow) : null;
+}
+
+function resolveRouteKeyByTarget(params: {
+  tenantId: string;
+  channel: "telegram" | "discord" | "whatsapp";
+  routeKeys?: string[];
+}): string | null {
+  for (const routeKey of uniqueRouteKeys(params.routeKeys ?? [])) {
+    const row = stmtSelectActiveBindingByTenantAndRoute.get(
+      params.tenantId,
+      params.channel,
+      routeKey,
+    ) as ExistingBindingRow | undefined;
+    if (!row?.binding_id || row.status !== "active") {
+      continue;
+    }
+    return routeKey;
+  }
+  return null;
+}
+
+function resolveSessionRouteBinding(params: {
+  tenantId: string;
+  channel: "telegram" | "discord" | "whatsapp";
+  sessionKey: string;
+  routeKeys?: string[];
+  mode?: OutboundResolutionMode;
+}): { routeKey: string; via: "session" | "route" } | null {
+  const mode = params.mode ?? "session-first";
+  if (mode === "target-first") {
+    const routeKey = resolveRouteKeyByTarget(params);
+    if (routeKey) {
+      return { routeKey, via: "route" };
+    }
+    const exactRouteKey = resolveRouteKeyBySession(params);
+    if (exactRouteKey) {
+      return { routeKey: exactRouteKey, via: "session" };
+    }
     return null;
   }
-  return parseDiscordRouteKey(resolveBoundRouteKeyFromSession(row));
+
+  const exactRouteKey = resolveRouteKeyBySession(params);
+  if (exactRouteKey) {
+    return { routeKey: exactRouteKey, via: "session" };
+  }
+  const routeKey = resolveRouteKeyByTarget(params);
+  if (routeKey) {
+    return { routeKey, via: "route" };
+  }
+
+  return null;
+}
+
+function parseTelegramOutboundChatId(value: unknown): string | null {
+  const direct = readSignedNumericString(value);
+  if (direct) {
+    return direct;
+  }
+  const prefixed = readNonEmptyString(value)?.match(/^(?:telegram|tg):(-?\d+)$/i);
+  return prefixed?.[1] ?? null;
+}
+
+function listTelegramOutboundRouteKeys(params: {
+  requestedTo?: unknown;
+  rawBody?: Record<string, unknown>;
+  requestedThreadId?: number;
+}): string[] {
+  const rawChatId = parseTelegramOutboundChatId(params.rawBody?.chat_id);
+  const requestedChatId = parseTelegramOutboundChatId(params.requestedTo);
+  if (rawChatId && requestedChatId && rawChatId !== requestedChatId) {
+    return [];
+  }
+  const rawThreadId = readPositiveInt(params.rawBody?.message_thread_id);
+  if (rawThreadId && params.requestedThreadId && rawThreadId !== params.requestedThreadId) {
+    return [];
+  }
+  const chatId = rawChatId ?? requestedChatId;
+  if (!chatId) {
+    return [];
+  }
+  const topicId = rawThreadId ?? params.requestedThreadId ?? undefined;
+  return uniqueRouteKeys([
+    topicId ? buildTelegramRouteKey(chatId, topicId) : null,
+    buildTelegramRouteKey(chatId),
+  ]);
+}
+
+async function hasDiscordOutboundTargetConflict(params: {
+  requestedTo?: unknown;
+  requestedThreadId?: string;
+}): Promise<boolean> {
+  const target = parseDiscordOutboundTarget(params.requestedTo);
+  const threadId = readUnsignedNumericString(params.requestedThreadId);
+  if (!target || !threadId) {
+    return false;
+  }
+  if (target.kind === "user") {
+    return true;
+  }
+  if (target.id === threadId) {
+    return false;
+  }
+  try {
+    const threadInfo = await resolveDiscordChannelInfo(threadId);
+    return threadInfo.parentId !== target.id;
+  } catch {
+    return false;
+  }
+}
+
+async function listDiscordOutboundRouteKeys(params: {
+  requestedTo?: unknown;
+  requestedThreadId?: string;
+}): Promise<string[]> {
+  if (await hasDiscordOutboundTargetConflict(params)) {
+    return [];
+  }
+  const threadId = readUnsignedNumericString(params.requestedThreadId);
+  if (threadId) {
+    try {
+      const info = await resolveDiscordChannelInfo(threadId);
+      if (info.guildId) {
+        return uniqueRouteKeys([
+          info.parentId
+            ? buildDiscordGuildRouteKey({
+                guildId: info.guildId,
+                channelId: info.parentId,
+                threadId,
+              })
+            : null,
+          buildDiscordGuildRouteKey({ guildId: info.guildId, threadId }),
+          info.parentId
+            ? buildDiscordGuildRouteKey({
+                guildId: info.guildId,
+                channelId: info.parentId,
+              })
+            : null,
+          buildDiscordGuildRouteKey({ guildId: info.guildId }),
+        ]);
+      }
+    } catch {
+      // Fall through to target-based lookup below.
+    }
+  }
+
+  const target = parseDiscordOutboundTarget(params.requestedTo);
+  if (!target) {
+    return [];
+  }
+  if (target.kind === "user") {
+    return [buildDiscordDmRouteKey(target.id)];
+  }
+
+  try {
+    const info = await resolveDiscordChannelInfo(target.id);
+    if (!info.guildId) {
+      return [];
+    }
+    if (info.parentId) {
+      return uniqueRouteKeys([
+        buildDiscordGuildRouteKey({
+          guildId: info.guildId,
+          channelId: info.parentId,
+          threadId: target.id,
+        }),
+        buildDiscordGuildRouteKey({ guildId: info.guildId, threadId: target.id }),
+        buildDiscordGuildRouteKey({ guildId: info.guildId, channelId: info.parentId }),
+        buildDiscordGuildRouteKey({ guildId: info.guildId }),
+      ]);
+    }
+    return uniqueRouteKeys([
+      buildDiscordGuildRouteKey({ guildId: info.guildId, channelId: target.id }),
+      buildDiscordGuildRouteKey({ guildId: info.guildId }),
+    ]);
+  } catch {
+    return [];
+  }
+}
+
+async function resolveDiscordExplicitThreadParentId(
+  threadId: string | undefined,
+): Promise<string | undefined> {
+  const normalizedThreadId = readUnsignedNumericString(threadId);
+  if (!normalizedThreadId) {
+    return undefined;
+  }
+  try {
+    const info = await resolveDiscordChannelInfo(normalizedThreadId);
+    return info.parentId ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseWhatsAppOutboundChatJid(value: unknown): string | null {
+  const raw = readNonEmptyString(value);
+  if (!raw) {
+    return null;
+  }
+  const withoutPrefix = raw.replace(/^whatsapp:/i, "").trim();
+  if (withoutPrefix.includes("@")) {
+    return withoutPrefix;
+  }
+  const digits = withoutPrefix.replace(/[^\d]/g, "");
+  if (!digits) {
+    return null;
+  }
+  return `${digits}@s.whatsapp.net`;
+}
+
+function listWhatsAppOutboundRouteKeys(params: {
+  requestedTo?: unknown;
+  accountId?: string | null;
+  rawSend?: Record<string, unknown> | null;
+}): string[] {
+  const outerChatJid = parseWhatsAppOutboundChatJid(params.requestedTo);
+  const innerChatJid =
+    parseWhatsAppOutboundChatJid(params.rawSend?.to) ??
+    parseWhatsAppOutboundChatJid(params.rawSend?.chatJid);
+  if (outerChatJid && innerChatJid && outerChatJid !== innerChatJid) {
+    return [];
+  }
+  const chatJid = outerChatJid;
+  if (!chatJid) {
+    return [];
+  }
+  const accountIds = uniqueRouteKeys([params.accountId, whatsappAccountId, openclawMuxAccountId]);
+  return accountIds.map((accountId) => buildWhatsAppRouteKey(chatJid, accountId));
+}
+
+function resolveTelegramBoundRoute(params: {
+  tenantId: string;
+  channel: "telegram";
+  sessionKey: string;
+  routeKeys?: string[];
+  mode?: OutboundResolutionMode;
+}): ResolvedBoundRoute<TelegramBoundRoute> | null {
+  const resolved = resolveSessionRouteBinding(params);
+  if (!resolved) {
+    return null;
+  }
+  const route = parseTelegramRouteKey(resolved.routeKey);
+  return route ? { route, routeKey: resolved.routeKey, via: resolved.via } : null;
+}
+
+async function resolveDiscordBoundRoute(params: {
+  tenantId: string;
+  channel: "discord";
+  sessionKey: string;
+  routeKeys?: string[];
+  mode?: OutboundResolutionMode;
+}): Promise<ResolvedBoundRoute<DiscordBoundRoute> | null> {
+  const resolved = resolveSessionRouteBinding(params);
+  if (!resolved) {
+    return null;
+  }
+  const route = parseDiscordRouteKey(resolved.routeKey);
+  return route ? { route, routeKey: resolved.routeKey, via: resolved.via } : null;
 }
 
 function resolveWhatsAppBoundRoute(params: {
   tenantId: string;
-  channel: string;
+  channel: "whatsapp";
   sessionKey: string;
-}): WhatsAppBoundRoute | null {
-  const row = stmtResolveSessionRouteBinding.get(
-    params.tenantId,
-    params.channel,
-    params.sessionKey,
-  ) as SessionRouteBindingRow | undefined;
-  if (!row) {
+  routeKeys?: string[];
+  mode?: OutboundResolutionMode;
+}): ResolvedBoundRoute<WhatsAppBoundRoute> | null {
+  const resolved = resolveSessionRouteBinding(params);
+  if (!resolved) {
     return null;
   }
-  return parseWhatsAppRouteKey(resolveBoundRouteKeyFromSession(row));
+  const route = parseWhatsAppRouteKey(resolved.routeKey);
+  return route ? { route, routeKey: resolved.routeKey, via: resolved.via } : null;
 }
 
 async function resolveDiscordOutboundChannelId(params: {
@@ -3721,6 +4072,20 @@ async function resolveDiscordOutboundChannelId(params: {
 
   let channelId =
     params.boundRoute.threadId ?? params.requestedThreadId ?? params.boundRoute.channelId;
+  const explicitThreadParentId = await resolveDiscordExplicitThreadParentId(
+    params.requestedThreadId,
+  );
+  if (
+    params.boundRoute.channelId &&
+    explicitThreadParentId &&
+    explicitThreadParentId !== params.boundRoute.channelId
+  ) {
+    return {
+      ok: false,
+      statusCode: 403,
+      error: "discord channel not allowed for this bound guild",
+    };
+  }
   if (!channelId) {
     const target = parseDiscordOutboundTarget(params.requestedTo);
     if (target?.kind === "user") {
@@ -3951,6 +4316,7 @@ async function sendPostPairingSyntheticInbound(params: {
   const prompt = resolvePostPairingPrompt(params.channel);
   const now = Date.now();
   const syntheticId = `synth:pair:${randomUUID()}`;
+  const discordRoute = params.channel === "discord" ? parseDiscordRouteKey(params.routeKey) : null;
 
   let payload: Record<string, unknown>;
   if (params.channel === "telegram") {
@@ -3979,10 +4345,11 @@ async function sendPostPairingSyntheticInbound(params: {
       rawBody: prompt,
       fromId: params.fromId,
       channelId: params.chatId,
-      guildId: null,
+      guildId: discordRoute?.kind === "guild" ? discordRoute.guildId : null,
       routeKey: params.routeKey,
       chatType: params.chatType,
       timestampMs: now,
+      threadId: discordRoute?.kind === "guild" ? discordRoute.threadId : undefined,
       rawMessage: {},
       media: null,
       attachments: [],
@@ -5042,6 +5409,11 @@ async function runOutboundAction(params: {
   channel: string;
   sessionKey: string;
   action?: string;
+  requestedTo?: unknown;
+  requestedThreadId?: number;
+  requestedDiscordThreadId?: string;
+  accountId?: string | null;
+  mode?: OutboundResolutionMode;
 }): Promise<SendResult> {
   if (params.action !== "typing") {
     return {
@@ -5055,12 +5427,17 @@ async function runOutboundAction(params: {
   }
 
   if (params.channel === "telegram") {
-    const boundRoute = resolveTelegramBoundRoute({
+    const resolvedRoute = resolveTelegramBoundRoute({
       tenantId: params.tenant.id,
       channel: params.channel,
       sessionKey: params.sessionKey,
+      mode: params.mode,
+      routeKeys: listTelegramOutboundRouteKeys({
+        requestedTo: params.requestedTo,
+        requestedThreadId: params.requestedThreadId,
+      }),
     });
-    if (!boundRoute) {
+    if (!resolvedRoute) {
       return {
         statusCode: 403,
         bodyText: JSON.stringify({
@@ -5070,6 +5447,12 @@ async function runOutboundAction(params: {
         }),
       };
     }
+    metrics.recordOutboundRouteResolution({
+      channel: "telegram",
+      mode: params.mode ?? "session-first",
+      via: resolvedRoute.via,
+    });
+    const boundRoute = resolvedRoute.route;
     const body: Record<string, unknown> = {
       chat_id: boundRoute.chatId,
       action: "typing",
@@ -5091,12 +5474,17 @@ async function runOutboundAction(params: {
   }
 
   if (params.channel === "discord") {
-    const boundRoute = resolveDiscordBoundRoute({
+    const resolvedRoute = await resolveDiscordBoundRoute({
       tenantId: params.tenant.id,
       channel: params.channel,
       sessionKey: params.sessionKey,
+      mode: params.mode,
+      routeKeys: await listDiscordOutboundRouteKeys({
+        requestedTo: params.requestedTo,
+        requestedThreadId: params.requestedDiscordThreadId,
+      }),
     });
-    if (!boundRoute) {
+    if (!resolvedRoute) {
       return {
         statusCode: 403,
         bodyText: JSON.stringify({
@@ -5106,10 +5494,16 @@ async function runOutboundAction(params: {
         }),
       };
     }
+    metrics.recordOutboundRouteResolution({
+      channel: "discord",
+      mode: params.mode ?? "session-first",
+      via: resolvedRoute.via,
+    });
+    const boundRoute = resolvedRoute.route;
     const resolvedTarget = await resolveDiscordOutboundChannelId({
       boundRoute,
-      requestedTo: undefined,
-      requestedThreadId: undefined,
+      requestedTo: params.requestedTo,
+      requestedThreadId: params.requestedDiscordThreadId,
     });
     if (!resolvedTarget.ok) {
       return {
@@ -5133,12 +5527,17 @@ async function runOutboundAction(params: {
   }
 
   if (params.channel === "whatsapp") {
-    const boundRoute = resolveWhatsAppBoundRoute({
+    const resolvedRoute = resolveWhatsAppBoundRoute({
       tenantId: params.tenant.id,
       channel: params.channel,
       sessionKey: params.sessionKey,
+      mode: params.mode,
+      routeKeys: listWhatsAppOutboundRouteKeys({
+        requestedTo: params.requestedTo,
+        accountId: params.accountId,
+      }),
     });
-    if (!boundRoute) {
+    if (!resolvedRoute) {
       return {
         statusCode: 403,
         bodyText: JSON.stringify({
@@ -5148,6 +5547,12 @@ async function runOutboundAction(params: {
         }),
       };
     }
+    metrics.recordOutboundRouteResolution({
+      channel: "whatsapp",
+      mode: params.mode ?? "session-first",
+      via: resolvedRoute.via,
+    });
+    const boundRoute = resolvedRoute.route;
     const { sendTypingWhatsApp } = await loadWebRuntimeModules();
     try {
       await sendTypingWhatsApp(boundRoute.chatJid, {
@@ -8257,6 +8662,11 @@ const server = http.createServer(async (req, res) => {
           channel,
           sessionKey,
           action: operation.action,
+          requestedTo: payload.to,
+          requestedThreadId,
+          requestedDiscordThreadId,
+          accountId: readNonEmptyString(payload.accountId),
+          mode: outboundResolutionMode,
         });
       }
       if (!hasText && mediaUrls.length === 0 && !rawOutbound) {
@@ -8266,12 +8676,21 @@ const server = http.createServer(async (req, res) => {
         };
       }
       if (channel === "telegram") {
-        const boundRoute = resolveTelegramBoundRoute({
+        const telegramRaw = asRecord(rawOutbound?.telegram);
+        const telegramRawMethod = readNonEmptyString(telegramRaw?.method);
+        const telegramRawBody = asRecord(telegramRaw?.body);
+        const resolvedRoute = resolveTelegramBoundRoute({
           tenantId: tenant.id,
           channel,
           sessionKey,
+          mode: outboundResolutionMode,
+          routeKeys: listTelegramOutboundRouteKeys({
+            requestedTo: payload.to,
+            rawBody: telegramRawBody ?? undefined,
+            requestedThreadId,
+          }),
         });
-        if (!boundRoute) {
+        if (!resolvedRoute) {
           return {
             statusCode: 403,
             bodyText: JSON.stringify({
@@ -8281,14 +8700,26 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
+        metrics.recordOutboundRouteResolution({
+          channel: "telegram",
+          mode: outboundResolutionMode,
+          via: resolvedRoute.via,
+        });
+        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
+          log({
+            type: "outbound_route_fallback",
+            tenantId: tenant.id,
+            channel,
+            sessionKey,
+            routeKey: resolvedRoute.routeKey,
+          });
+        }
 
+        const boundRoute = resolvedRoute.route;
         const to = boundRoute.chatId;
         const messageThreadId = boundRoute.topicId ?? requestedThreadId;
         const isGeneralForumTopic =
           boundRoute.topicId === TELEGRAM_GENERAL_TOPIC_ID && to.startsWith("-");
-        const telegramRaw = asRecord(rawOutbound?.telegram);
-        const telegramRawMethod = readNonEmptyString(telegramRaw?.method);
-        const telegramRawBody = asRecord(telegramRaw?.body);
         if (telegramRawMethod && telegramRawBody) {
           const telegramMethod = ALLOWED_TELEGRAM_METHODS.has(telegramRawMethod)
             ? telegramRawMethod
@@ -8340,19 +8771,10 @@ const server = http.createServer(async (req, res) => {
               }
             }
           }
-          let { response, result } = await sendTelegram(telegramMethod, finalBody);
-          if (
-            (!response.ok || result.ok !== true) &&
-            shouldRetryTelegramWithoutHtmlParseMode({
-              method: telegramMethod,
-              body: finalBody,
-              result,
-            })
-          ) {
-            const retryBody: Record<string, unknown> = { ...finalBody };
-            delete retryBody.parse_mode;
-            ({ response, result } = await sendTelegram(telegramMethod, retryBody));
-          }
+          const { response, result } = await sendTelegramWithFallbacks({
+            method: telegramMethod,
+            body: finalBody,
+          });
           if (!response.ok || result.ok !== true) {
             // Telegram returns 400 "message is not modified" when an editMessageText
             // call produces the same rendered text.  The direct bot path (grammY)
@@ -8399,12 +8821,20 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (channel === "discord") {
-        const boundRoute = resolveDiscordBoundRoute({
+        const discordRaw = asRecord(rawOutbound?.discord);
+        const discordRawBody = asRecord(discordRaw?.body);
+        const discordRawSend = asRecord(discordRaw?.send);
+        const resolvedRoute = await resolveDiscordBoundRoute({
           tenantId: tenant.id,
           channel,
           sessionKey,
+          mode: outboundResolutionMode,
+          routeKeys: await listDiscordOutboundRouteKeys({
+            requestedTo: payload.to,
+            requestedThreadId: requestedDiscordThreadId,
+          }),
         });
-        if (!boundRoute) {
+        if (!resolvedRoute) {
           return {
             statusCode: 403,
             bodyText: JSON.stringify({
@@ -8414,10 +8844,22 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
+        metrics.recordOutboundRouteResolution({
+          channel: "discord",
+          mode: outboundResolutionMode,
+          via: resolvedRoute.via,
+        });
+        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
+          log({
+            type: "outbound_route_fallback",
+            tenantId: tenant.id,
+            channel,
+            sessionKey,
+            routeKey: resolvedRoute.routeKey,
+          });
+        }
 
-        const discordRaw = asRecord(rawOutbound?.discord);
-        const discordRawBody = asRecord(discordRaw?.body);
-        const discordRawSend = asRecord(discordRaw?.send);
+        const boundRoute = resolvedRoute.route;
         if (!discordRawBody && !discordRawSend) {
           return {
             statusCode: 400,
@@ -8520,12 +8962,20 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (channel === "whatsapp") {
-        const boundRoute = resolveWhatsAppBoundRoute({
+        const whatsappRaw = asRecord(rawOutbound?.whatsapp);
+        const whatsappRawSend = asRecord(whatsappRaw?.send);
+        const resolvedRoute = resolveWhatsAppBoundRoute({
           tenantId: tenant.id,
           channel,
           sessionKey,
+          mode: outboundResolutionMode,
+          routeKeys: listWhatsAppOutboundRouteKeys({
+            requestedTo: payload.to,
+            accountId: readNonEmptyString(payload.accountId),
+            rawSend: whatsappRawSend,
+          }),
         });
-        if (!boundRoute) {
+        if (!resolvedRoute) {
           return {
             statusCode: 403,
             bodyText: JSON.stringify({
@@ -8535,10 +8985,23 @@ const server = http.createServer(async (req, res) => {
             }),
           };
         }
+        metrics.recordOutboundRouteResolution({
+          channel: "whatsapp",
+          mode: outboundResolutionMode,
+          via: resolvedRoute.via,
+        });
+        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
+          log({
+            type: "outbound_route_fallback",
+            tenantId: tenant.id,
+            channel,
+            sessionKey,
+            routeKey: resolvedRoute.routeKey,
+          });
+        }
 
+        const boundRoute = resolvedRoute.route;
         const { sendMessageWhatsApp } = await loadWebRuntimeModules();
-        const whatsappRaw = asRecord(rawOutbound?.whatsapp);
-        const whatsappRawSend = asRecord(whatsappRaw?.send);
         const whatsappText =
           typeof whatsappRawSend?.text === "string"
             ? whatsappRawSend.text

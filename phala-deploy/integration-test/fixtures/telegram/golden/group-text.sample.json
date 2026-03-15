@@ -1,0 +1,28 @@
+{
+  "update_id": 700101,
+  "message": {
+    "message_id": 900101,
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Mux",
+      "username": "mux_user",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": -555001,
+      "title": "Integration Group",
+      "type": "group",
+      "all_members_are_administrators": false,
+      "accepted_gift_types": {
+        "unlimited_gifts": false,
+        "limited_gifts": false,
+        "unique_gifts": false,
+        "premium_subscription": false,
+        "gifts_from_channels": false
+      }
+    },
+    "date": 1700000001,
+    "text": "hello from telegram group fixture"
+  }
+}

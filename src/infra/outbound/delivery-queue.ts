@@ -4,6 +4,7 @@ import path from "node:path";
 import type { ReplyPayload } from "../../auto-reply/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { resolveStateDir } from "../../config/paths.js";
+import { logWarn } from "../../logger.js";
 import type { OutboundChannel } from "./targets.js";
 
 const QUEUE_DIRNAME = "delivery-queue";
@@ -30,6 +31,8 @@ export interface QueuedDelivery {
   enqueuedAt: number;
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  agentId?: string;
+  sessionKey?: string | null;
   accountId?: string;
   /**
    * Original payloads before plugin hooks. On recovery, hooks re-run on these
@@ -56,6 +59,22 @@ function resolveFailedDir(stateDir?: string): string {
   return path.join(resolveQueueDir(stateDir), FAILED_DIRNAME);
 }
 
+async function quarantineMalformedQueueEntry(params: {
+  file: string;
+  filePath: string;
+  stateDir?: string;
+  error: unknown;
+}): Promise<void> {
+  const failedDir = resolveFailedDir(params.stateDir);
+  await fs.promises.mkdir(failedDir, { recursive: true, mode: 0o700 });
+  const invalidName = params.file.replace(/\.json$/i, ".invalid.json");
+  const dest = path.join(failedDir, invalidName);
+  await fs.promises.rename(params.filePath, dest);
+  logWarn(
+    `outbound-delivery: moved malformed queue entry ${params.file} to failed/ (${params.error instanceof Error ? params.error.message : String(params.error)})`,
+  );
+}
+
 /** Ensure the queue directory (and failed/ subdirectory) exist. */
 export async function ensureQueueDir(stateDir?: string): Promise<string> {
   const queueDir = resolveQueueDir(stateDir);
@@ -68,6 +87,8 @@ export async function ensureQueueDir(stateDir?: string): Promise<string> {
 type QueuedDeliveryParams = {
   channel: Exclude<OutboundChannel, "none">;
   to: string;
+  agentId?: string;
+  sessionKey?: string | null;
   accountId?: string;
   payloads: ReplyPayload[];
   threadId?: string | number | null;
@@ -89,6 +110,8 @@ export async function enqueueDelivery(
     enqueuedAt: Date.now(),
     channel: params.channel,
     to: params.to,
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
     accountId: params.accountId,
     payloads: params.payloads,
     threadId: params.threadId,
@@ -168,8 +191,19 @@ export async function loadPendingDeliveries(stateDir?: string): Promise<QueuedDe
       }
       const raw = await fs.promises.readFile(filePath, "utf-8");
       entries.push(JSON.parse(raw));
-    } catch {
-      // Skip malformed or inaccessible entries.
+    } catch (err) {
+      try {
+        await quarantineMalformedQueueEntry({
+          file,
+          filePath,
+          stateDir,
+          error: err,
+        });
+      } catch (moveErr) {
+        logWarn(
+          `outbound-delivery: failed to quarantine malformed queue entry ${file} (${moveErr instanceof Error ? moveErr.message : String(moveErr)})`,
+        );
+      }
     }
   }
   return entries;
@@ -276,6 +310,8 @@ export async function recoverPendingDeliveries(opts: {
         cfg: opts.cfg,
         channel: entry.channel,
         to: entry.to,
+        agentId: entry.agentId,
+        sessionKey: entry.sessionKey,
         accountId: entry.accountId,
         payloads: entry.payloads,
         threadId: entry.threadId,

@@ -1,0 +1,30 @@
+{
+  "update_id": 700301,
+  "message": {
+    "message_id": 900301,
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Mux",
+      "username": "mux_user",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": 424242,
+      "first_name": "Mux",
+      "username": "mux_user",
+      "type": "private"
+    },
+    "date": 1700000003,
+    "photo": [
+      {
+        "file_id": "AgACAgEAAxkBAAIGuWms1kT_N9SgtdAuX8xvKeixaPSDAALhC2sbRuBpRTeEtSd1icZZAQADAgADbQADOgQ",
+        "file_unique_id": "AQAD4QtrG0bgaUVy",
+        "file_size": 310,
+        "width": 50,
+        "height": 50
+      }
+    ],
+    "caption": "photo fixture caption"
+  }
+}

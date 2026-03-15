@@ -125,6 +125,42 @@ What the Telegram e2e tests cover:
 
 For operational notes and quick takeover context, see `phala-deploy/local-mux-e2e/FORUM_GROUP_HANDOFF.md`.
 
+## Telegram Capture Mode
+
+The stack includes an optional Telegram Bot API capture proxy for generating
+high-fidelity mocked integration fixtures from real traffic.
+
+Bring the stack up with mux-server pointed at the proxy:
+
+```bash
+MUX_TELEGRAM_API_BASE_URL=http://telegram-capture:18990 \
+  ./phala-deploy/local-mux-e2e/scripts/up.sh
+```
+
+Then run the Telegram E2E flow and export sanitized fixture samples:
+
+```bash
+./phala-deploy/local-mux-e2e/scripts/e2e-telegram.sh
+node --import tsx phala-deploy/local-mux-e2e/scripts/export-telegram-fixtures.ts
+```
+
+Artifacts:
+
+- raw capture log:
+  `phala-deploy/local-mux-e2e/state/telegram-capture/captures.ndjson`
+- sanitized fixture output:
+  `phala-deploy/integration-test/fixtures/telegram/golden/*.sample.json`
+
+Current automated capture is enough to generate golden samples for:
+
+- DM text
+- non-forum group text
+- forum-topic text
+- callback query tap
+- photo
+- document
+- voice
+
 ## Smoke Flow (Manual)
 
 1. Pair one chat per channel.

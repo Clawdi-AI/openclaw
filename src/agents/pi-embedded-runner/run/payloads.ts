@@ -215,6 +215,10 @@ export function buildEmbeddedRunPayloads(params: {
     }
     return isRawApiErrorPayload(trimmed);
   };
+  const fallbackAnswerTextParsed = fallbackAnswerText
+    ? parseReplyDirectives(fallbackAnswerText)
+    : undefined;
+
   const answerTexts = (
     params.assistantTexts.length
       ? params.assistantTexts
@@ -245,6 +249,34 @@ export function buildEmbeddedRunPayloads(params: {
       replyToCurrent,
     });
     hasUserFacingAssistantReply = true;
+  }
+
+  const fallbackAnswerTextWithMedia =
+    fallbackAnswerTextParsed && (fallbackAnswerTextParsed.mediaUrls?.length ?? 0) > 0
+      ? fallbackAnswerTextParsed
+      : null;
+  if (fallbackAnswerTextWithMedia) {
+    const fallbackText = fallbackAnswerTextWithMedia.text ?? "";
+    const fallbackNormalized = normalizeTextForComparison(fallbackText);
+    const matchingReply = replyItems.find((item) => {
+      if ((item.media?.length ?? 0) > 0) {
+        return false;
+      }
+      if (item.text === fallbackText) {
+        return true;
+      }
+      if (!fallbackNormalized || !item.text) {
+        return false;
+      }
+      return normalizeTextForComparison(item.text) === fallbackNormalized;
+    });
+    if (matchingReply) {
+      matchingReply.media = fallbackAnswerTextWithMedia.mediaUrls;
+      matchingReply.audioAsVoice ||= fallbackAnswerTextWithMedia.audioAsVoice;
+      matchingReply.replyToId ??= fallbackAnswerTextWithMedia.replyToId;
+      matchingReply.replyToTag ||= fallbackAnswerTextWithMedia.replyToTag;
+      matchingReply.replyToCurrent ||= fallbackAnswerTextWithMedia.replyToCurrent;
+    }
   }
 
   if (params.lastToolError) {

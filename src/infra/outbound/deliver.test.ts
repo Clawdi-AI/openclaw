@@ -37,6 +37,9 @@ const queueMocks = vi.hoisted(() => ({
   ackDelivery: vi.fn(async () => {}),
   failDelivery: vi.fn(async () => {}),
 }));
+const loggerMocks = vi.hoisted(() => ({
+  logWarn: vi.fn(),
+}));
 
 vi.mock("../../config/sessions.js", async () => {
   const actual = await vi.importActual<typeof import("../../config/sessions.js")>(
@@ -59,6 +62,13 @@ vi.mock("./delivery-queue.js", () => ({
   ackDelivery: queueMocks.ackDelivery,
   failDelivery: queueMocks.failDelivery,
 }));
+vi.mock("../../logger.js", async () => {
+  const actual = await vi.importActual<typeof import("../../logger.js")>("../../logger.js");
+  return {
+    ...actual,
+    logWarn: loggerMocks.logWarn,
+  };
+});
 
 const { deliverOutboundPayloads, normalizeOutboundPayloads } = await import("./deliver.js");
 
@@ -101,6 +111,7 @@ describe("deliverOutboundPayloads", () => {
     queueMocks.ackDelivery.mockResolvedValue(undefined);
     queueMocks.failDelivery.mockReset();
     queueMocks.failDelivery.mockResolvedValue(undefined);
+    loggerMocks.logWarn.mockReset();
   });
 
   afterEach(() => {
@@ -178,6 +189,85 @@ describe("deliverOutboundPayloads", () => {
       "123",
       "hi",
       expect.objectContaining({ accountId: "default", verbose: false, textMode: "html" }),
+    );
+  });
+
+  it("persists agentId in the queued delivery entry when mux routing can be rederived", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" });
+
+    await deliverOutboundPayloads({
+      cfg: telegramChunkConfig,
+      channel: "telegram",
+      to: "123",
+      agentId: "main",
+      payloads: [{ text: "hi" }],
+      deps: { sendTelegram },
+    });
+
+    expect(queueMocks.enqueueDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "main",
+        sessionKey: undefined,
+      }),
+    );
+  });
+
+  it("derives mux telegram transport from agentId and outbound target", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "123" });
+    const cfg: OpenClawConfig = {
+      channels: {
+        telegram: {
+          botToken: "tok-1",
+          mux: { enabled: true },
+        },
+      },
+    };
+
+    await deliverOutboundPayloads({
+      cfg,
+      channel: "telegram",
+      to: "123",
+      agentId: "main",
+      payloads: [{ text: "hi" }],
+      deps: { sendTelegram },
+    });
+
+    expect(sendTelegram).toHaveBeenCalledWith(
+      "123",
+      "hi",
+      expect.objectContaining({
+        mux: expect.objectContaining({
+          sessionKey: "agent:main:main",
+        }),
+      }),
+    );
+  });
+
+  it("warns when outbound delivery falls back to the caller-provided sessionKey", async () => {
+    const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "c1" });
+
+    await deliverOutboundPayloads({
+      cfg: telegramChunkConfig,
+      channel: "telegram",
+      to: "telegram:",
+      sessionKey: "agent:main:main",
+      payloads: [{ text: "hi" }],
+      deps: { sendTelegram },
+    });
+
+    expect(loggerMocks.logWarn).toHaveBeenCalledWith(
+      expect.stringContaining("using caller-provided sessionKey fallback"),
+    );
+    expect(queueMocks.enqueueDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "main",
+        sessionKey: "agent:main:main",
+      }),
+    );
+    expect(sendTelegram).toHaveBeenCalledWith(
+      "telegram:",
+      "hi",
+      expect.objectContaining({ verbose: false, textMode: "html" }),
     );
   });
 

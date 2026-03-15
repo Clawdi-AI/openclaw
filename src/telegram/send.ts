@@ -496,6 +496,7 @@ async function sendMessageTelegramViaMux(
       channel: "telegram",
       sessionKey: opts.mux.sessionKey,
       accountId,
+      to: chatId,
       raw: { telegram: raw },
     });
   };
@@ -894,6 +895,7 @@ export async function reactMessageTelegram(
   opts: TelegramReactionOpts = {},
 ): Promise<{ ok: true } | { ok: false; warning: string }> {
   if (opts.mux) {
+    const chatId = normalizeChatId(String(chatIdInput));
     const messageId = normalizeMessageId(messageIdInput);
     const raw = buildTelegramRawSetMessageReaction({
       messageId,
@@ -905,6 +907,7 @@ export async function reactMessageTelegram(
       channel: "telegram",
       sessionKey: opts.mux.sessionKey,
       accountId: opts.mux.accountId ?? opts.accountId,
+      to: chatId,
       raw: { telegram: raw },
     });
     return { ok: true };
@@ -959,6 +962,7 @@ export async function deleteMessageTelegram(
   opts: TelegramDeleteOpts = {},
 ): Promise<{ ok: true }> {
   if (opts.mux) {
+    const chatId = normalizeChatId(String(chatIdInput));
     const messageId = normalizeMessageId(messageIdInput);
     const raw = buildTelegramRawDeleteMessage({ messageId });
     await sendViaMux({
@@ -966,6 +970,7 @@ export async function deleteMessageTelegram(
       channel: "telegram",
       sessionKey: opts.mux.sessionKey,
       accountId: opts.mux.accountId ?? opts.accountId,
+      to: chatId,
       raw: { telegram: raw },
     });
     return { ok: true };
@@ -1030,6 +1035,7 @@ export async function editMessageTelegram(
       channel: "telegram",
       sessionKey: opts.mux.sessionKey,
       accountId: opts.mux.accountId ?? opts.accountId,
+      to: chatId,
       raw: { telegram: raw },
     });
     return { ok: true, messageId: String(messageId), chatId };
@@ -1180,6 +1186,7 @@ export async function sendStickerTelegram(
       channel: "telegram",
       sessionKey: opts.mux.sessionKey,
       accountId: opts.mux.accountId ?? opts.accountId,
+      to: chatId,
       raw: { telegram: raw },
     });
     return { messageId: String(result.messageId ?? "unknown"), chatId };
@@ -1299,6 +1306,7 @@ export async function sendPollTelegram(
       channel: "telegram",
       sessionKey: opts.mux.sessionKey,
       accountId: opts.mux.accountId ?? opts.accountId,
+      to: chatId,
       raw: { telegram: raw },
     });
     return { messageId: String(result.messageId ?? "unknown"), chatId };
@@ -1439,6 +1447,7 @@ export async function createForumTopicTelegram(
       channel: "telegram",
       sessionKey: opts.mux.sessionKey,
       accountId: opts.mux.accountId ?? opts.accountId,
+      to: normalizedChatId,
       raw: { telegram: raw },
     });
     const muxResult = result as Record<string, unknown>;

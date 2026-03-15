@@ -1,0 +1,62 @@
+{
+  "update_id": 700002,
+  "callback_query": {
+    "id": "cbq-900010",
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Integration",
+      "username": "integration_user",
+      "language_code": "en"
+    },
+    "message": {
+      "message_id": 900010,
+      "from": {
+        "id": 999001,
+        "is_bot": true,
+        "first_name": "Integration Bot",
+        "username": "integration_bot",
+        "language_code": "en"
+      },
+      "chat": {
+        "id": 424242,
+        "first_name": "Integration",
+        "username": "integration_user",
+        "type": "private"
+      },
+      "date": 1700000000,
+      "message_thread_id": 1094,
+      "text": "Browse providers",
+      "entities": [
+        {
+          "offset": 30,
+          "length": 10,
+          "type": "bot_command"
+        }
+      ],
+      "reply_markup": {
+        "inline_keyboard": [
+          [
+            {
+              "text": "on",
+              "callback_data": "/reasoning on"
+            },
+            {
+              "text": "off",
+              "callback_data": "/reasoning off"
+            }
+          ],
+          [
+            {
+              "text": "stream",
+              "callback_data": "/reasoning stream"
+            }
+          ]
+        ]
+      },
+      "is_topic_message": true
+    },
+    "chat_instance": "-6211715487574766932",
+    "data": "mdl_prov"
+  }
+}

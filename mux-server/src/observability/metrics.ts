@@ -14,6 +14,8 @@ type InboundOutcome = "forwarded" | "deferred" | "dropped" | "error";
 type PairingOutcome = "success" | "invalid" | "ignored";
 type PairingClaimType = "fresh" | "repaired" | "takeover" | "unknown";
 type AuthSurface = "tenant" | "admin" | "register";
+type OutboundResolutionMode = "session-first" | "target-first";
+type OutboundResolutionVia = "session" | "route";
 type LogLikeEvent = Record<string, unknown> & { type?: unknown; claimType?: unknown };
 
 function normalizeUserId(value: unknown): string | null {
@@ -79,6 +81,12 @@ export function createMuxMetrics() {
     help: "Outbound request duration in milliseconds.",
     labelNames: ["channel", "method"] as const,
     buckets: HISTOGRAM_BUCKETS_MS,
+    registers: [registry],
+  });
+  const outboundRouteResolution = new Counter({
+    name: "mux_outbound_route_resolution_total",
+    help: "Outbound bound-route resolutions grouped by channel, mode and source.",
+    labelNames: ["channel", "mode", "via"] as const,
     registers: [registry],
   });
   const pairing = new Counter({
@@ -177,6 +185,18 @@ export function createMuxMetrics() {
         { channel, method },
         Number.isFinite(params.durationMs) && params.durationMs >= 0 ? params.durationMs : 0,
       );
+    },
+
+    recordOutboundRouteResolution(params: {
+      channel: MetricsChannel;
+      mode: OutboundResolutionMode;
+      via: OutboundResolutionVia;
+    }) {
+      outboundRouteResolution.inc({
+        channel: params.channel,
+        mode: params.mode,
+        via: params.via,
+      });
     },
 
     recordPairingClaim,
