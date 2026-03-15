@@ -79,6 +79,7 @@ type StartHarnessParams = {
   workspaceFiles?: Record<string, string | Uint8Array>;
   gatewayRuntime?: "current" | "legacy";
   legacyRepoPath?: string;
+  configTransform?: (cfg: OpenClawConfig) => OpenClawConfig;
 };
 
 function buildHarnessPaths(tempDir: string): HarnessPaths {
@@ -376,8 +377,8 @@ export type MuxOpenClawHarness = {
   stateDir: string;
   workspaceDir: string;
   openclawId: string;
-  readSessionStore: () => Record<string, unknown>;
-  waitForSessionStoreEntry: (key: string) => Promise<Record<string, unknown>>;
+  readSessionStore: (agentId?: string) => Record<string, unknown>;
+  waitForSessionStoreEntry: (key: string, agentId?: string) => Promise<Record<string, unknown>>;
   readRecentLogs: () => { gateway: string; muxServer: string };
   restartGateway: () => Promise<void>;
   close: () => Promise<void>;
@@ -445,7 +446,7 @@ export async function startMuxOpenClawHarness(
       }),
     );
 
-    const cfg = buildHarnessConfig({
+    const baseConfig = buildHarnessConfig({
       channel,
       workspaceDir: paths.workspaceDir,
       openAiBaseUrl: openai.baseUrl,
@@ -453,6 +454,7 @@ export async function startMuxOpenClawHarness(
       gatewayPort,
       telegramStreamMode: params.telegramStreamMode,
     });
+    const cfg = params.configTransform ? params.configTransform(baseConfig) : baseConfig;
     await writeFile(paths.configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 
     let gateway = await startGatewayProcess({
@@ -499,9 +501,9 @@ export async function startMuxOpenClawHarness(
       claimedSessionKey: params.claimedSessionKey,
     });
 
-    const readSessionStore = () => {
+    const readSessionStore = (agentId = "main") => {
       clearSessionStoreCacheForTest();
-      return loadSessionStore(resolveStorePath(undefined, { agentId: "main" }), {
+      return loadSessionStore(resolveStorePath(undefined, { agentId }), {
         skipCache: true,
       });
     };
@@ -520,11 +522,11 @@ export async function startMuxOpenClawHarness(
       workspaceDir: paths.workspaceDir,
       openclawId,
       readSessionStore,
-      waitForSessionStoreEntry: async (key: string) => {
+      waitForSessionStoreEntry: async (key: string, agentId = "main") => {
         return await waitForCondition(
-          () => readSessionStore()[key] as Record<string, unknown> | undefined,
+          () => readSessionStore(agentId)[key] as Record<string, unknown> | undefined,
           10_000,
-          `timed out waiting for session store entry ${key}`,
+          `timed out waiting for session store entry ${key} (agent ${agentId})`,
         );
       },
       readRecentLogs: () => ({
