@@ -87,4 +87,23 @@ describe("buildReplyPayloads media filter integration", () => {
 
     expect(replyPayloads).toEqual([]);
   });
+
+  it("drops final text-only payloads after block streaming already emitted text", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: {
+        enqueue: () => {},
+        flush: async () => {},
+        stop: () => {},
+        hasBuffered: () => false,
+        didStream: () => true,
+        isAborted: () => false,
+        hasSentPayload: () => false,
+      },
+      payloads: [{ text: "Final message" }],
+    });
+
+    expect(replyPayloads).toEqual([]);
+  });
 });

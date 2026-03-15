@@ -98,9 +98,20 @@ export function buildReplyPayloads(params: {
   // emitted by the block pipeline, such as later media-bearing replies.
   const filteredPayloads =
     params.blockStreamingEnabled && !params.blockReplyPipeline?.isAborted()
-      ? mediaFilteredPayloads.filter(
-          (payload) => !params.blockReplyPipeline?.hasSentPayload(payload),
-        )
+      ? mediaFilteredPayloads.filter((payload) => {
+          if (params.blockReplyPipeline?.hasSentPayload(payload)) {
+            return false;
+          }
+          // Once block streaming delivered text successfully, suppress final text-only payloads.
+          // Keep later media-bearing payloads that were never emitted by the stream pipeline.
+          if (params.blockReplyPipeline?.didStream()) {
+            const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
+            if (!hasMedia) {
+              return false;
+            }
+          }
+          return true;
+        })
       : params.directlySentBlockKeys?.size
         ? mediaFilteredPayloads.filter(
             (payload) => !params.directlySentBlockKeys!.has(createBlockReplyPayloadKey(payload)),
