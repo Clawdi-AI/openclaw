@@ -6,6 +6,7 @@ import type {
 } from "./types.base.js";
 import type { ChannelHeartbeatVisibilityConfig } from "./types.channels.js";
 import type { DmConfig } from "./types.messages.js";
+import type { ChannelMuxConfig } from "./types.mux.js";
 import type { GroupToolPolicyBySenderConfig, GroupToolPolicyConfig } from "./types.tools.js";
 
 export type WhatsAppActionConfig = {
@@ -103,6 +104,8 @@ export type WhatsAppConfig = WhatsAppConfigCore &
     defaultAccount?: string;
     /** Per-action tool gating (default: true for all). */
     actions?: WhatsAppActionConfig;
+    /** Optional mux transport override for this account/channel. */
+    mux?: ChannelMuxConfig;
   };
 
 export type WhatsAppAccountConfig = WhatsAppConfigCore &
@@ -113,4 +116,6 @@ export type WhatsAppAccountConfig = WhatsAppConfigCore &
     enabled?: boolean;
     /** Override auth directory (Baileys multi-file auth state). */
     authDir?: string;
+    /** Optional mux transport override for this account/channel. */
+    mux?: ChannelMuxConfig;
   };

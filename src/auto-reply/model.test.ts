@@ -36,6 +36,13 @@ describe("extractModelDirective", () => {
       expect(result.rawProfile).toBe("myprofile");
     });
 
+    it("extracts /model@botname with argument", () => {
+      const result = extractModelDirective("/model@openclaw_bot gpt-5");
+      expect(result.hasDirective).toBe(true);
+      expect(result.rawModel).toBe("gpt-5");
+      expect(result.cleaned).toBe("");
+    });
+
     it("keeps OpenRouter preset paths that include @ in the model name", () => {
       const result = extractModelDirective("/model openrouter/@preset/kimi-2-5");
       expect(result.hasDirective).toBe(true);
@@ -111,6 +118,13 @@ describe("extractModelDirective", () => {
       const result = extractModelDirective("/GPT", { aliases: ["gpt"] });
       expect(result.hasDirective).toBe(true);
       expect(result.rawModel).toBe("GPT");
+    });
+
+    it("recognizes alias commands with Telegram bot mentions", () => {
+      const result = extractModelDirective("/gpt@openclaw_bot", { aliases: ["gpt"] });
+      expect(result.hasDirective).toBe(true);
+      expect(result.rawModel).toBe("gpt");
+      expect(result.cleaned).toBe("");
     });
 
     it("does not match alias without leading slash", () => {

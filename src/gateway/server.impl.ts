@@ -6,6 +6,7 @@ import { initSubagentRegistry } from "../agents/subagent-registry.js";
 import { getTotalPendingReplies } from "../auto-reply/reply/dispatcher-registry.js";
 import type { CanvasHostServer } from "../canvas-host/server.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
+import { startMuxRuntimeRegistrationLoop } from "../channels/plugins/outbound/mux.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { isRestartEnabled } from "../config/commands.js";
@@ -144,6 +145,7 @@ const logReload = log.child("reload");
 const logHooks = log.child("hooks");
 const logPlugins = log.child("plugins");
 const logWsControl = log.child("ws");
+const logMux = log.child("mux");
 const logSecrets = log.child("secrets");
 const gatewayRuntime = runtimeForLogger(log);
 const canvasRuntime = runtimeForLogger(logCanvas);
@@ -563,6 +565,10 @@ export async function startGatewayServer(
 
   const wizardRunner = opts.wizardRunner ?? runOnboardingWizard;
   const { wizardSessions, findRunningWizard, purgeWizardSession } = createWizardSessionTracker();
+  const stopMuxRegistration = startMuxRuntimeRegistrationLoop({
+    cfg: cfgAtStart,
+    log: logMux,
+  });
 
   const deps = createDefaultDeps();
   let canvasHostServer: CanvasHostServer | null = null;
@@ -1046,6 +1052,7 @@ export async function startGatewayServer(
 
   return {
     close: async (opts) => {
+      stopMuxRegistration();
       // Run gateway_stop plugin hook before shutdown
       await runGlobalGatewayStopSafely({
         event: { reason: opts?.reason ?? "gateway stopping" },

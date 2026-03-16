@@ -518,6 +518,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   }
   const mirrorMediaUrls =
     mergedMediaUrls.length > 0 ? mergedMediaUrls : mediaUrl ? [mediaUrl] : undefined;
+  const sendSessionKey = outboundRoute?.sessionKey ?? input.sessionKey;
   throwIfAborted(abortSignal);
   const send = await executeSendAction({
     ctx: {
@@ -526,6 +527,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
       params,
       agentId,
       accountId: accountId ?? undefined,
+      sessionKey: sendSessionKey,
       gateway,
       toolContext: input.toolContext,
       deps: input.deps,
@@ -625,6 +627,7 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
       channel,
       params,
       accountId: accountId ?? undefined,
+      sessionKey: input.sessionKey,
       gateway,
       toolContext: input.toolContext,
       dryRun,
@@ -674,6 +677,7 @@ async function handlePluginAction(ctx: ResolvedActionContext): Promise<MessageAc
     cfg,
     params,
     accountId: accountId ?? undefined,
+    sessionKey: input.sessionKey,
     requesterSenderId: input.requesterSenderId ?? undefined,
     gateway,
     toolContext: input.toolContext,

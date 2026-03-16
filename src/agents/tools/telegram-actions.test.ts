@@ -526,6 +526,32 @@ describe("handleTelegramAction", () => {
     );
   });
 
+  it("uses mux transport when __sessionKey is provided and telegram mux is enabled", async () => {
+    const cfg = telegramConfig({
+      mux: { enabled: true },
+    });
+    await handleTelegramAction(
+      {
+        action: "sendMessage",
+        to: "123456",
+        content: "hello",
+        __sessionKey: "agent:main:main",
+      },
+      cfg,
+    );
+    expect(sendMessageTelegram).toHaveBeenCalledWith(
+      "123456",
+      "hello",
+      expect.objectContaining({
+        cfg,
+        mux: expect.objectContaining({
+          cfg,
+          sessionKey: "agent:main:main",
+        }),
+      }),
+    );
+  });
+
   it("requires content when no mediaUrl is provided", async () => {
     await expect(
       handleTelegramAction(

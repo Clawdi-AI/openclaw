@@ -1,5 +1,8 @@
+import path from "node:path";
 import type { OpenClawConfig } from "../config/config.js";
+import { mergeInboundPathRoots } from "../media/inbound-path-policy.js";
 import { runAudioTranscription } from "./audio-transcription-runner.js";
+import { resolveMediaAttachmentLocalRoots } from "./runner.js";
 
 /**
  * Transcribe an audio file using the configured media-understanding provider.
@@ -24,6 +27,15 @@ export async function transcribeAudioFile(params: {
     ctx,
     cfg: params.cfg,
     agentDir: params.agentDir,
+    // The caller already provided an explicit local file path; trust that
+    // parent directory in addition to the standard inbound media roots.
+    localPathRoots: mergeInboundPathRoots(
+      [path.dirname(path.resolve(params.filePath))],
+      resolveMediaAttachmentLocalRoots({
+        cfg: params.cfg,
+        ctx,
+      }),
+    ),
   });
   return { text: transcript };
 }

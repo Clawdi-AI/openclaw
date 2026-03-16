@@ -28,6 +28,7 @@ export type OutboundSendContext = {
   /** Active agent id for per-agent outbound media root scoping. */
   agentId?: string;
   accountId?: string | null;
+  sessionKey?: string;
   gateway?: OutboundGatewayContext;
   toolContext?: ChannelThreadingToolContext;
   deps?: OutboundSendDeps;
@@ -62,6 +63,7 @@ async function tryHandleWithPluginAction(params: {
     params: params.ctx.params,
     mediaLocalRoots,
     accountId: params.ctx.accountId ?? undefined,
+    sessionKey: params.ctx.sessionKey,
     gateway: params.ctx.gateway,
     toolContext: params.ctx.toolContext,
     dryRun: params.ctx.dryRun,
@@ -125,6 +127,7 @@ export async function executeSendAction(params: {
     to: params.to,
     content: params.message,
     agentId: params.ctx.agentId,
+    sessionKey: params.ctx.sessionKey,
     mediaUrl: params.mediaUrl || undefined,
     mediaUrls: params.mediaUrls,
     channel: params.ctx.channel || undefined,
@@ -182,6 +185,7 @@ export async function executePollAction(params: {
     durationHours: params.durationHours ?? undefined,
     channel: params.ctx.channel,
     accountId: params.ctx.accountId ?? undefined,
+    sessionKey: params.ctx.sessionKey,
     threadId: params.threadId ?? undefined,
     silent: params.ctx.silent ?? undefined,
     isAnonymous: params.isAnonymous ?? undefined,

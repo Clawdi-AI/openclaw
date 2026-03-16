@@ -289,6 +289,24 @@ describe("routeReply", () => {
     );
   });
 
+  it("routes built-in channels even when the plugin registry is empty", async () => {
+    mocks.deliverOutboundPayloads.mockResolvedValue([{ channel: "discord", messageId: "m1" }]);
+    setActivePluginRegistry(emptyRegistry);
+    const res = await routeReply({
+      payload: { text: "hi" },
+      channel: "discord",
+      to: "user:42",
+      cfg: {} as never,
+    });
+    expect(res.ok).toBe(true);
+    expect(mocks.deliverOutboundPayloads).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "discord",
+        to: "user:42",
+      }),
+    );
+  });
+
   it("passes replyToId to Telegram sends", async () => {
     mocks.sendMessageTelegram.mockClear();
     await routeReply({

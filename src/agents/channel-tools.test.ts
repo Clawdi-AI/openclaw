@@ -84,4 +84,31 @@ describe("channel tools", () => {
     expect(listChannelSupportedActions({ cfg, channel: "polltest" })).toEqual([]);
     expect(listAllChannelSupportedActions({ cfg })).toEqual([]);
   });
+
+  it("falls back to built-in telegram actions when the registry is empty", () => {
+    setActivePluginRegistry(createTestRegistry([]));
+
+    const cfg = {
+      channels: {
+        telegram: {
+          accounts: {
+            mux: {
+              mux: {
+                enabled: true,
+                baseUrl: "http://127.0.0.1:18788",
+                authToken: "test-token",
+              },
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    expect(listChannelSupportedActions({ cfg, channel: "telegram" })).toEqual(
+      expect.arrayContaining(["send", "react", "poll", "delete", "edit", "topic-create"]),
+    );
+    expect(listAllChannelSupportedActions({ cfg })).toEqual(
+      expect.arrayContaining(["send", "react", "poll", "delete", "edit", "topic-create"]),
+    );
+  });
 });

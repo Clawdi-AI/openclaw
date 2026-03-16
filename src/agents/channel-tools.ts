@@ -1,9 +1,13 @@
 import { getChannelDock } from "../channels/dock.js";
-import { getChannelPlugin, listChannelPlugins } from "../channels/plugins/index.js";
+import { listChannelPlugins } from "../channels/plugins/index.js";
+import {
+  getChannelMessageActionsAdapter,
+  listChannelMessageActionAdapters,
+} from "../channels/plugins/message-actions.js";
 import type {
   ChannelAgentTool,
+  ChannelMessageActionAdapter,
   ChannelMessageActionName,
-  ChannelPlugin,
 } from "../channels/plugins/types.js";
 import { normalizeAnyChannelId } from "../channels/registry.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -17,15 +21,12 @@ export function listChannelSupportedActions(params: {
   cfg?: OpenClawConfig;
   channel?: string;
 }): ChannelMessageActionName[] {
-  if (!params.channel) {
-    return [];
-  }
-  const plugin = getChannelPlugin(params.channel as Parameters<typeof getChannelPlugin>[0]);
-  if (!plugin?.actions?.listActions) {
+  const adapter = getChannelMessageActionsAdapter(params.channel);
+  if (!adapter) {
     return [];
   }
   const cfg = params.cfg ?? ({} as OpenClawConfig);
-  return runPluginListActions(plugin, cfg);
+  return runPluginListActions(params.channel ?? "<unknown>", adapter, cfg);
 }
 
 /**
@@ -35,12 +36,9 @@ export function listAllChannelSupportedActions(params: {
   cfg?: OpenClawConfig;
 }): ChannelMessageActionName[] {
   const actions = new Set<ChannelMessageActionName>();
-  for (const plugin of listChannelPlugins()) {
-    if (!plugin.actions?.listActions) {
-      continue;
-    }
+  for (const [channelId, adapter] of listChannelMessageActionAdapters()) {
     const cfg = params.cfg ?? ({} as OpenClawConfig);
-    const channelActions = runPluginListActions(plugin, cfg);
+    const channelActions = runPluginListActions(channelId, adapter, cfg);
     for (const action of channelActions) {
       actions.add(action);
     }
@@ -87,17 +85,18 @@ export function resolveChannelMessageToolHints(params: {
 const loggedListActionErrors = new Set<string>();
 
 function runPluginListActions(
-  plugin: ChannelPlugin,
+  channelId: string,
+  actions: ChannelMessageActionAdapter,
   cfg: OpenClawConfig,
 ): ChannelMessageActionName[] {
-  if (!plugin.actions?.listActions) {
+  if (!actions.listActions) {
     return [];
   }
   try {
-    const listed = plugin.actions.listActions({ cfg });
+    const listed = actions.listActions({ cfg });
     return Array.isArray(listed) ? listed : [];
   } catch (err) {
-    logListActionsError(plugin.id, err);
+    logListActionsError(channelId, err);
     return [];
   }
 }

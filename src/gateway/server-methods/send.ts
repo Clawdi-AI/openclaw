@@ -356,6 +356,7 @@ export const sendHandlers: GatewayRequestHandlers = {
       threadId?: string;
       channel?: string;
       accountId?: string;
+      sessionKey?: string;
       idempotencyKey: string;
     };
     const idem = request.idempotencyKey;
@@ -410,6 +411,10 @@ export const sendHandlers: GatewayRequestHandlers = {
       typeof request.accountId === "string" && request.accountId.trim().length
         ? request.accountId.trim()
         : undefined;
+    const sessionKey =
+      typeof request.sessionKey === "string" && request.sessionKey.trim().length
+        ? request.sessionKey.trim().toLowerCase()
+        : undefined;
     try {
       const plugin = resolveOutboundChannelPlugin({ channel, cfg });
       const outbound = plugin?.outbound;
@@ -440,6 +445,7 @@ export const sendHandlers: GatewayRequestHandlers = {
         to: resolved.to,
         poll: normalized,
         accountId,
+        sessionKey,
         threadId,
         silent: request.silent,
         isAnonymous: request.isAnonymous,

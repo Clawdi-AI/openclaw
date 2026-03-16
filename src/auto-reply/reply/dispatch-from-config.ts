@@ -225,14 +225,16 @@ export async function dispatchReplyFromConfig(params: {
     currentSurface === INTERNAL_MESSAGE_CHANNEL &&
     (surfaceChannel === INTERNAL_MESSAGE_CHANNEL || !surfaceChannel) &&
     ctx.ExplicitDeliverRoute !== true;
+  const forceExternalDeliverRoute = ctx.ExplicitDeliverRoute === true && !isInternalWebchatTurn;
   const shouldRouteToOriginating = Boolean(
     !isInternalWebchatTurn &&
     isRoutableChannel(originatingChannel) &&
     originatingTo &&
-    originatingChannel !== currentSurface,
+    (forceExternalDeliverRoute || originatingChannel !== currentSurface),
   );
+  const isSystemEventRoute = shouldRouteToOriginating && !forceExternalDeliverRoute;
   const shouldSuppressTyping =
-    shouldRouteToOriginating || originatingChannel === INTERNAL_MESSAGE_CHANNEL;
+    isSystemEventRoute || originatingChannel === INTERNAL_MESSAGE_CHANNEL;
   const ttsChannel = shouldRouteToOriginating ? originatingChannel : currentSurface;
 
   /**
@@ -400,7 +402,7 @@ export async function dispatchReplyFromConfig(params: {
       requestedPolicy: params.replyOptions?.typingPolicy,
       suppressTyping: params.replyOptions?.suppressTyping === true || shouldSuppressTyping,
       originatingChannel,
-      systemEvent: shouldRouteToOriginating,
+      systemEvent: isSystemEventRoute,
     });
 
     const replyResult = await (params.replyResolver ?? getReplyFromConfig)(

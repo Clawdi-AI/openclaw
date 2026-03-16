@@ -4,18 +4,22 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import { retryAsync } from "../../infra/retry.js";
 import { fetchRemoteMedia } from "../../media/fetch.js";
 import { saveMediaBuffer } from "../../media/store.js";
+import { resolveTelegramBotApiBaseUrl, resolveTelegramBotApiHostname } from "../api-base-url.js";
 import { shouldRetryTelegramIpv4Fallback, type TelegramTransport } from "../fetch.js";
 import { cacheSticker, getCachedSticker } from "../sticker-cache.js";
 import { resolveTelegramMediaPlaceholder } from "./helpers.js";
 import type { StickerMetadata, TelegramContext } from "./types.js";
 
 const FILE_TOO_BIG_RE = /file is too big/i;
-const TELEGRAM_MEDIA_SSRF_POLICY = {
-  // Telegram file downloads should trust api.telegram.org even when DNS/proxy
-  // resolution maps to private/internal ranges in restricted networks.
-  allowedHostnames: ["api.telegram.org"],
-  allowRfc2544BenchmarkRange: true,
-};
+
+function resolveTelegramMediaSsrfPolicy() {
+  return {
+    // Telegram file downloads should trust the configured Bot API host even
+    // when DNS/proxy resolution maps to private/internal ranges.
+    allowedHostnames: [resolveTelegramBotApiHostname()],
+    allowRfc2544BenchmarkRange: true,
+  };
+}
 
 /**
  * Returns true if the error is Telegram's "file is too big" error.
@@ -125,7 +129,7 @@ async function downloadAndSaveTelegramFile(params: {
   maxBytes: number;
   telegramFileName?: string;
 }) {
-  const url = `https://api.telegram.org/file/bot${params.token}/${params.filePath}`;
+  const url = `${resolveTelegramBotApiBaseUrl()}/file/bot${params.token}/${params.filePath.replace(/^\/+/, "")}`;
   const fetched = await fetchRemoteMedia({
     url,
     fetchImpl: params.transport.sourceFetch,
@@ -135,7 +139,7 @@ async function downloadAndSaveTelegramFile(params: {
     filePathHint: params.filePath,
     maxBytes: params.maxBytes,
     readIdleTimeoutMs: TELEGRAM_DOWNLOAD_IDLE_TIMEOUT_MS,
-    ssrfPolicy: TELEGRAM_MEDIA_SSRF_POLICY,
+    ssrfPolicy: resolveTelegramMediaSsrfPolicy(),
   });
   const originalName = params.telegramFileName ?? fetched.fileName ?? params.filePath;
   return saveMediaBuffer(

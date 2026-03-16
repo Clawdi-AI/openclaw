@@ -1,3 +1,4 @@
+import { isMuxEnabled } from "openclaw/plugin-sdk";
 import { createScopedChannelConfigBase } from "openclaw/plugin-sdk/compat";
 import {
   collectAllowlistProviderGroupPolicyWarnings,
@@ -91,7 +92,19 @@ function buildTelegramSendOptions(params: {
   replyToId?: string | null;
   threadId?: string | number | null;
   silent?: boolean | null;
+  sessionKey?: string | null;
 }): TelegramSendOptions {
+  const mux = isMuxEnabled({
+    cfg: params.cfg,
+    channel: "telegram",
+    accountId: params.accountId ?? undefined,
+  })
+    ? {
+        cfg: params.cfg,
+        sessionKey: params.sessionKey ?? "",
+        accountId: params.accountId ?? undefined,
+      }
+    : undefined;
   return {
     verbose: false,
     cfg: params.cfg,
@@ -101,6 +114,7 @@ function buildTelegramSendOptions(params: {
     replyToMessageId: parseTelegramReplyToMessageId(params.replyToId),
     accountId: params.accountId ?? undefined,
     silent: params.silent ?? undefined,
+    mux,
   };
 }
 
@@ -115,6 +129,7 @@ async function sendTelegramOutbound(params: {
   replyToId?: string | null;
   threadId?: string | number | null;
   silent?: boolean | null;
+  sessionKey?: string | null;
 }) {
   const send =
     params.deps?.sendTelegram ?? getTelegramRuntime().channel.telegram.sendMessageTelegram;
@@ -129,6 +144,7 @@ async function sendTelegramOutbound(params: {
       replyToId: params.replyToId,
       threadId: params.threadId,
       silent: params.silent,
+      sessionKey: params.sessionKey,
     }),
   );
 }
@@ -380,6 +396,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
       replyToId,
       threadId,
       silent,
+      sessionKey,
     }) => {
       const send = deps?.sendTelegram ?? getTelegramRuntime().channel.telegram.sendMessageTelegram;
       const result = await sendTelegramPayloadMessages({
@@ -393,11 +410,22 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
           replyToId,
           threadId,
           silent,
+          sessionKey,
         }),
       });
       return { channel: "telegram", ...result };
     },
-    sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, silent }) => {
+    sendText: async ({
+      cfg,
+      to,
+      text,
+      accountId,
+      deps,
+      replyToId,
+      threadId,
+      silent,
+      sessionKey,
+    }) => {
       const result = await sendTelegramOutbound({
         cfg,
         to,
@@ -407,6 +435,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
         replyToId,
         threadId,
         silent,
+        sessionKey,
       });
       return { channel: "telegram", ...result };
     },
@@ -421,6 +450,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
       replyToId,
       threadId,
       silent,
+      sessionKey,
     }) => {
       const result = await sendTelegramOutbound({
         cfg,
@@ -433,16 +463,28 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount, TelegramProb
         replyToId,
         threadId,
         silent,
+        sessionKey,
       });
       return { channel: "telegram", ...result };
     },
-    sendPoll: async ({ cfg, to, poll, accountId, threadId, silent, isAnonymous }) =>
+    sendPoll: async ({ cfg, to, poll, accountId, threadId, silent, isAnonymous, sessionKey }) =>
       await getTelegramRuntime().channel.telegram.sendPollTelegram(to, poll, {
         cfg,
         accountId: accountId ?? undefined,
         messageThreadId: parseTelegramThreadId(threadId),
         silent: silent ?? undefined,
         isAnonymous: isAnonymous ?? undefined,
+        mux: isMuxEnabled({
+          cfg,
+          channel: "telegram",
+          accountId: accountId ?? undefined,
+        })
+          ? {
+              cfg,
+              sessionKey: sessionKey ?? "",
+              accountId: accountId ?? undefined,
+            }
+          : undefined,
       }),
   },
   status: {

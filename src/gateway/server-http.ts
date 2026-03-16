@@ -54,6 +54,7 @@ import {
 } from "./hooks.js";
 import { sendGatewayAuthFailure, setDefaultSecurityHeaders } from "./http-common.js";
 import { getBearerToken } from "./http-utils.js";
+import { handleMuxInboundHttpRequest } from "./mux-http.js";
 import { resolveRequestClientIp } from "./net.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
@@ -799,6 +800,10 @@ export function createGatewayHttpServer(opts: {
               allowRealIpFallback,
               rateLimiter,
             }),
+        },
+        {
+          name: "mux-http",
+          run: () => handleMuxInboundHttpRequest(req, res),
         },
         {
           name: "slack",

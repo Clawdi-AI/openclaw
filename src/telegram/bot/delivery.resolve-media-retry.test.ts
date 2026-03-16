@@ -141,18 +141,24 @@ function createFileTooBigError(): Error {
   return new Error("GrammyError: Call to 'getFile' failed! (400: Bad Request: file is too big)");
 }
 
-async function expectTransientGetFileRetrySuccess() {
+async function expectTransientGetFileRetrySuccess(params?: {
+  expectedUrl?: string;
+  expectedHostnames?: string[];
+}) {
   const getFile = setupTransientGetFileRetry();
   const promise = resolveMedia(makeCtx("voice", getFile), MAX_MEDIA_BYTES, BOT_TOKEN);
   await flushRetryTimers();
   const result = await promise;
   expect(getFile).toHaveBeenCalledTimes(2);
+  const expectedUrl =
+    params?.expectedUrl ?? `https://api.telegram.org/file/bot${BOT_TOKEN}/voice/file_0.oga`;
+  const expectedHostnames = params?.expectedHostnames ?? ["api.telegram.org"];
   expect(fetchRemoteMedia).toHaveBeenCalledWith(
     expect.objectContaining({
-      url: `https://api.telegram.org/file/bot${BOT_TOKEN}/voice/file_0.oga`,
+      url: expectedUrl,
       ssrfPolicy: {
         allowRfc2544BenchmarkRange: true,
-        allowedHostnames: ["api.telegram.org"],
+        allowedHostnames: expectedHostnames,
       },
     }),
   );
@@ -179,6 +185,14 @@ describe("resolveMedia getFile retry", () => {
     expect(result).toEqual(
       expect.objectContaining({ path: "/tmp/file_0.oga", placeholder: "<media:audio>" }),
     );
+  });
+
+  it("uses TELEGRAM_BOT_API_BASE_URL for file downloads", async () => {
+    vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "https://tg.example.com/custom/");
+    await expectTransientGetFileRetrySuccess({
+      expectedUrl: `https://tg.example.com/custom/file/bot${BOT_TOKEN}/voice/file_0.oga`,
+      expectedHostnames: ["tg.example.com"],
+    });
   });
 
   it.each(["voice", "photo", "video"] as const)(

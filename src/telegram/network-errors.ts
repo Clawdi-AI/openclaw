@@ -102,6 +102,28 @@ function getErrorCode(err: unknown): string | undefined {
   return undefined;
 }
 
+function getTelegramRetryAfterSeconds(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") {
+    return undefined;
+  }
+  const candidate =
+    "parameters" in err && err.parameters && typeof err.parameters === "object"
+      ? (err.parameters as { retry_after?: unknown }).retry_after
+      : "response" in err &&
+          err.response &&
+          typeof err.response === "object" &&
+          "parameters" in err.response
+        ? (
+            err.response as {
+              parameters?: { retry_after?: unknown };
+            }
+          ).parameters?.retry_after
+        : "error" in err && err.error && typeof err.error === "object" && "parameters" in err.error
+          ? (err.error as { parameters?: { retry_after?: unknown } }).parameters?.retry_after
+          : undefined;
+  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined;
+}
+
 export type TelegramNetworkErrorContext = "polling" | "send" | "webhook" | "unknown";
 export type TelegramNetworkErrorOrigin = {
   method?: string | null;
@@ -152,7 +174,8 @@ export function isTelegramPollingNetworkError(err: unknown): boolean {
 /**
  * Returns true if the error is safe to retry for a non-idempotent Telegram send operation
  * (e.g. sendMessage). Only matches errors that are guaranteed to have occurred *before*
- * the request reached Telegram's servers, preventing duplicate message delivery.
+ * the request reached Telegram's servers, or explicit Telegram rejections that guarantee the
+ * message was not accepted, preventing duplicate message delivery.
  *
  * Use this instead of isRecoverableTelegramNetworkError for sendMessage/sendPhoto/etc.
  * calls where a retry would create a duplicate visible message.
@@ -164,6 +187,13 @@ export function isSafeToRetrySendError(err: unknown): boolean {
   for (const candidate of collectTelegramErrorCandidates(err)) {
     const code = normalizeCode(getErrorCode(candidate));
     if (code && PRE_CONNECT_ERROR_CODES.has(code)) {
+      return true;
+    }
+    if (typeof getTelegramRetryAfterSeconds(candidate) === "number") {
+      return true;
+    }
+    const message = formatErrorMessage(candidate).trim().toLowerCase();
+    if (message && GRAMMY_NETWORK_REQUEST_FAILED_AFTER_RE.test(message)) {
       return true;
     }
   }

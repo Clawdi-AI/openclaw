@@ -143,6 +143,7 @@ export {
   buildDiscordSendOptions,
   tagDiscordChannelResult,
 } from "./discord-send.js";
+export { isMuxEnabled, sendViaMux } from "../channels/plugins/outbound/mux.js";
 export type { KeyedAsyncQueueHooks } from "./keyed-async-queue.js";
 export { enqueueKeyedTask, KeyedAsyncQueue } from "./keyed-async-queue.js";
 export { normalizeWebhookPath, resolveWebhookPath } from "./webhook-path.js";

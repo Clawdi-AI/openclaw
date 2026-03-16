@@ -451,6 +451,52 @@ describe("dispatchReplyFromConfig", () => {
     );
   });
 
+  it("routes when explicit delivery is set even if provider matches the originating channel", async () => {
+    setNoAbort();
+    mocks.routeReply.mockClear();
+    const cfg = emptyConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "discord",
+      Surface: "mux",
+      OriginatingChannel: "discord",
+      OriginatingTo: "user:4242",
+      ExplicitDeliverRoute: true,
+    });
+
+    const replyResolver = async () => ({ text: "hi" }) satisfies ReplyPayload;
+    await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
+    expect(mocks.routeReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "discord",
+        to: "user:4242",
+      }),
+    );
+  });
+
+  it("does not suppress typing for explicit delivery routes on the same originating channel", async () => {
+    setNoAbort();
+    const cfg = emptyConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "discord",
+      Surface: "mux",
+      OriginatingChannel: "discord",
+      OriginatingTo: "user:4242",
+      ExplicitDeliverRoute: true,
+    });
+
+    const replyResolver = async (_ctx: MsgContext, opts?: GetReplyOptions) => {
+      expect(opts?.suppressTyping).toBe(false);
+      expect(opts?.typingPolicy).toBe("auto");
+      return { text: "hi" } satisfies ReplyPayload;
+    };
+
+    await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+  });
+
   it("routes media-only tool results when summaries are suppressed", async () => {
     setNoAbort();
     mocks.routeReply.mockClear();

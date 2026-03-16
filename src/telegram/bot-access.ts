@@ -64,6 +64,12 @@ export const normalizeDmAllowFromWithStore = (params: {
   dmPolicy?: string;
 }): NormalizedAllowFrom => normalizeAllowFrom(mergeDmAllowFromSources(params));
 
+export const normalizeAllowFromWithStore = (params: {
+  allowFrom?: Array<string | number>;
+  storeAllowFrom?: Array<string | number>;
+}): NormalizedAllowFrom =>
+  normalizeAllowFrom([...(params.allowFrom ?? []), ...(params.storeAllowFrom ?? [])]);
+
 export const isSenderAllowed = (params: {
   allow: NormalizedAllowFrom;
   senderId?: string;
