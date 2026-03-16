@@ -1,0 +1,23 @@
+{
+  "update_id": 700201,
+  "message": {
+    "message_id": 900201,
+    "message_thread_id": 2,
+    "date": 1700000002,
+    "text": "hello from telegram forum fixture",
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Mux",
+      "last_name": "User",
+      "username": "mux_user",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": -100777,
+      "title": "Integration Forum",
+      "type": "supergroup",
+      "is_forum": true
+    }
+  }
+}

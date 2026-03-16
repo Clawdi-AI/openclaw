@@ -1,0 +1,28 @@
+{
+  "update_id": 700401,
+  "message": {
+    "message_id": 900401,
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Mux",
+      "username": "mux_user",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": 424242,
+      "first_name": "Mux",
+      "username": "mux_user",
+      "type": "private"
+    },
+    "date": 1700000004,
+    "document": {
+      "file_name": "e2e-doc-904adfbb4ac3.txt",
+      "mime_type": "text/plain",
+      "file_id": "BQACAgEAAxkBAAIGwWms1nBB7PGJdpUjR3_bp5Pkkf7ZAAJ7BQACRuBpRfPIm8FIENi0OgQ",
+      "file_unique_id": "AgADewUAAkbgaUU",
+      "file_size": 31
+    },
+    "caption": "document fixture caption"
+  }
+}

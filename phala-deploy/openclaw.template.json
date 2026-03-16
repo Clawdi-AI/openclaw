@@ -1,0 +1,104 @@
+{
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "port": 18789,
+    "controlUi": {
+      "dangerouslyDisableDeviceAuth": true
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "calendar.add",
+        "contacts.add",
+        "reminders.add"
+      ]
+    }
+  },
+  "update": {
+    "checkOnStart": false
+  },
+  "channels": {
+    "telegram": {
+      "accounts": {
+        "default": { "enabled": false },
+        "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } }
+      }
+    },
+    "discord": {
+      "accounts": {
+        "default": { "enabled": false },
+        "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } }
+      }
+    },
+    "whatsapp": {
+      "accounts": {
+        "default": { "enabled": false },
+        "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } }
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "telegram": { "enabled": true },
+      "discord": { "enabled": true },
+      "whatsapp": { "enabled": true }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/root/.openclaw/workspace",
+      "maxConcurrent": 4,
+      "subagents": { "maxConcurrent": 8 },
+      "compaction": { "mode": "safeguard" },
+      "model": { "primary": "openai-codex/gpt-5.3-codex" },
+      "models": {
+        "openai-codex/gpt-5.3-codex": { "alias": "Codex" },
+        "openai-codex/gpt-5.1-codex-mini": { "alias": "Codex Mini" }
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "openai-codex": {
+        "baseUrl": "https://example.invalid/v1",
+        "apiKey": "set-by-gen-cvm-config",
+        "headers": { "x-api-key": "set-by-gen-cvm-config" },
+        "models": [
+          {
+            "id": "gpt-5.3-codex",
+            "name": "gpt-5.3-codex",
+            "reasoning": true,
+            "input": ["text", "image"]
+          },
+          { "id": "gpt-5.2-codex", "name": "gpt-5.2-codex" },
+          { "id": "gpt-5.1-codex-max", "name": "gpt-5.1-codex-max" },
+          { "id": "gpt-5.1-codex", "name": "gpt-5.1-codex" },
+          { "id": "gpt-5.2", "name": "gpt-5.2" },
+          { "id": "gpt-5.1", "name": "gpt-5.1" },
+          { "id": "gpt-5-codex", "name": "gpt-5-codex" },
+          { "id": "gpt-5", "name": "gpt-5" },
+          {
+            "id": "gpt-5.1-codex-mini",
+            "name": "gpt-5.1-codex-mini",
+            "reasoning": true,
+            "input": ["text", "image"]
+          },
+          { "id": "gpt-5-codex-mini", "name": "gpt-5-codex-mini" }
+        ]
+      }
+    }
+  },
+  "skills": {
+    "entries": {
+      "gog": { "enabled": false },
+      "notion": { "enabled": false },
+      "composio": {}
+    }
+  }
+}

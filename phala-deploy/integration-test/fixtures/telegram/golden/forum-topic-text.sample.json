@@ -1,0 +1,46 @@
+{
+  "update_id": 700201,
+  "message": {
+    "message_id": 900201,
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Mux",
+      "username": "mux_user",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": -100777,
+      "title": "Integration Forum",
+      "is_forum": true,
+      "type": "supergroup"
+    },
+    "date": 1700000002,
+    "message_thread_id": 2,
+    "reply_to_message": {
+      "message_id": 14,
+      "from": {
+        "id": 424242,
+        "is_bot": false,
+        "first_name": "Mux",
+        "username": "mux_user",
+        "language_code": "en"
+      },
+      "chat": {
+        "id": -100777,
+        "title": "Integration Forum",
+        "is_forum": true,
+        "type": "supergroup"
+      },
+      "date": 1700000001,
+      "message_thread_id": 2,
+      "forum_topic_created": {
+        "name": "Topic1",
+        "icon_color": 16749490
+      },
+      "is_topic_message": true
+    },
+    "text": "hello from telegram forum fixture",
+    "is_topic_message": true
+  }
+}

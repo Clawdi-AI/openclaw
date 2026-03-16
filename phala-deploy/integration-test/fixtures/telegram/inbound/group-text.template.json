@@ -1,0 +1,21 @@
+{
+  "update_id": 700101,
+  "message": {
+    "message_id": 900101,
+    "date": 1700000001,
+    "text": "hello from telegram group fixture",
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Mux",
+      "last_name": "User",
+      "username": "mux_user",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": -100555,
+      "title": "Integration Group",
+      "type": "supergroup"
+    }
+  }
+}

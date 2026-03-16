@@ -1,0 +1,55 @@
+{
+  "update_id": 700501,
+  "message": {
+    "message_id": 900501,
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Mux",
+      "username": "mux_user",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": 424242,
+      "first_name": "Mux",
+      "username": "mux_user",
+      "type": "private"
+    },
+    "date": 1700000005,
+    "message_thread_id": 1094,
+    "reply_to_message": {
+      "message_id": 1742,
+      "from": {
+        "id": 8226145701,
+        "is_bot": false,
+        "first_name": "Eli",
+        "last_name": "Testwell",
+        "username": "elitestwell",
+        "language_code": "en"
+      },
+      "chat": {
+        "id": 8226145701,
+        "first_name": "Eli",
+        "last_name": "Testwell",
+        "username": "elitestwell",
+        "type": "private"
+      },
+      "date": 1772944896,
+      "message_thread_id": 1094,
+      "forum_topic_created": {
+        "name": "/reasoning",
+        "icon_color": 7322096,
+        "is_name_implicit": true
+      },
+      "is_topic_message": true
+    },
+    "voice": {
+      "duration": 2,
+      "mime_type": "audio/ogg",
+      "file_id": "AwACAgEAAxkBAAIG1Wms_iSPLUacz4y1ih_X-zSbpxOPAAKCBQACRuBpRWmbMjXmPGXBOgQ",
+      "file_unique_id": "AgADggUAAkbgaUU",
+      "file_size": 9081
+    },
+    "is_topic_message": true
+  }
+}
