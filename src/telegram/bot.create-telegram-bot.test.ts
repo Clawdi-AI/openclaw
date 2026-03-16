@@ -691,7 +691,7 @@ describe("createTelegramBot", () => {
       expectedReplyCount: 1,
     },
     {
-      name: "blocks group messages when allowFrom is configured with @username entries (numeric IDs required)",
+      name: "allows group messages when allowFrom is configured with @username entries",
       config: {
         channels: {
           telegram: {
@@ -707,7 +707,7 @@ describe("createTelegramBot", () => {
         text: "hello",
         date: 1736380800,
       },
-      expectedReplyCount: 0,
+      expectedReplyCount: 1,
     },
     {
       name: "allows group messages from tg:-prefixed allowFrom entries case-insensitively",
@@ -1537,6 +1537,23 @@ describe("createTelegramBot", () => {
         channels: {
           telegram: {
             allowFrom: ["123456789"],
+          },
+        },
+      },
+      message: {
+        chat: { id: 777777777, type: "private" },
+        from: { id: 123456789, username: "testuser" },
+        text: "hello",
+        date: 1736380800,
+      },
+      expectedReplyCount: 1,
+    },
+    {
+      name: "allows direct messages with @username allowFrom entries",
+      config: {
+        channels: {
+          telegram: {
+            allowFrom: ["@testuser"],
           },
         },
       },

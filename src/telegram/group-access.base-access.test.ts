@@ -5,6 +5,7 @@ import { evaluateTelegramGroupBaseAccess } from "./group-access.js";
 function allow(entries: string[], hasWildcard = false): NormalizedAllowFrom {
   return {
     entries,
+    usernames: [],
     hasWildcard,
     hasEntries: entries.length > 0 || hasWildcard,
     invalidEntries: [],

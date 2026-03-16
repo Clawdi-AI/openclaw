@@ -53,6 +53,12 @@ function normalizeResolvedModel(params: { provider: string; model: Model<Api> })
 
 export { buildModelAliasLines };
 
+function resolveDefaultModelApiForProvider(
+  provider: string,
+): ModelDefinitionConfig["api"] | undefined {
+  return normalizeProviderId(provider) === "openai-codex" ? "openai-codex-responses" : undefined;
+}
+
 function resolveConfiguredProviderConfig(
   cfg: OpenClawConfig | undefined,
   provider: string,
@@ -69,11 +75,12 @@ function resolveConfiguredProviderConfig(
 }
 
 function applyConfiguredProviderOverrides(params: {
+  provider: string;
   discoveredModel: Model<Api>;
   providerConfig?: InlineProviderConfig;
   modelId: string;
 }): Model<Api> {
-  const { discoveredModel, providerConfig, modelId } = params;
+  const { provider, discoveredModel, providerConfig, modelId } = params;
   if (!providerConfig) {
     return {
       ...discoveredModel,
@@ -105,7 +112,11 @@ function applyConfiguredProviderOverrides(params: {
 
   return {
     ...discoveredModel,
-    api: configuredModel?.api ?? providerConfig.api ?? discoveredModel.api,
+    api:
+      configuredModel?.api ??
+      providerConfig.api ??
+      resolveDefaultModelApiForProvider(provider) ??
+      discoveredModel.api,
     baseUrl: providerConfig.baseUrl ?? discoveredModel.baseUrl,
     reasoning: configuredModel?.reasoning ?? discoveredModel.reasoning,
     input: normalizedInput,
@@ -139,7 +150,7 @@ export function buildInlineProviderModels(
       ...model,
       provider: trimmed,
       baseUrl: entry?.baseUrl,
-      api: model.api ?? entry?.api,
+      api: model.api ?? entry?.api ?? resolveDefaultModelApiForProvider(trimmed),
       headers: (() => {
         const modelHeaders = sanitizeModelHeaders((model as InlineModelEntry).headers, {
           stripSecretRefMarkers: true,
@@ -173,6 +184,7 @@ export function resolveModelWithRegistry(params: {
     return normalizeResolvedModel({
       provider,
       model: applyConfiguredProviderOverrides({
+        provider,
         discoveredModel: model,
         providerConfig,
         modelId,
@@ -197,6 +209,7 @@ export function resolveModelWithRegistry(params: {
     return normalizeResolvedModel({
       provider,
       model: applyConfiguredProviderOverrides({
+        provider,
         discoveredModel: forwardCompat,
         providerConfig,
         modelId,
@@ -238,7 +251,8 @@ export function resolveModelWithRegistry(params: {
       model: {
         id: modelId,
         name: modelId,
-        api: providerConfig?.api ?? "openai-responses",
+        api:
+          providerConfig?.api ?? resolveDefaultModelApiForProvider(provider) ?? "openai-responses",
         provider,
         baseUrl: providerConfig?.baseUrl,
         reasoning: configuredModel?.reasoning ?? false,

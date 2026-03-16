@@ -26,11 +26,12 @@ const SEARCH_PROVIDERS = ["brave", "gemini", "grok", "kimi", "perplexity"] as co
 const DEFAULT_SEARCH_COUNT = 5;
 const MAX_SEARCH_COUNT = 10;
 
-const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
-const BRAVE_LLM_CONTEXT_ENDPOINT = "https://api.search.brave.com/res/v1/llm/context";
+const BRAVE_DEFAULT_BASE_URL = "https://api.search.brave.com";
+const BRAVE_SEARCH_PATH = "/res/v1/web/search";
+const BRAVE_LLM_CONTEXT_PATH = "/res/v1/llm/context";
 const DEFAULT_PERPLEXITY_BASE_URL = "https://openrouter.ai/api/v1";
 const PERPLEXITY_DIRECT_BASE_URL = "https://api.perplexity.ai";
-const PERPLEXITY_SEARCH_ENDPOINT = "https://api.perplexity.ai/search";
+const PERPLEXITY_SEARCH_PATH = "/search";
 const DEFAULT_PERPLEXITY_MODEL = "perplexity/sonar-pro";
 const PERPLEXITY_KEY_PREFIXES = ["pplx-"];
 const OPENROUTER_KEY_PREFIXES = ["sk-or-"];
@@ -680,6 +681,14 @@ function resolveBraveConfig(search?: WebSearchConfig): BraveConfig {
   return brave as BraveConfig;
 }
 
+function resolveBraveBaseUrl(search?: WebSearchConfig): string {
+  const fromConfig =
+    search && "baseUrl" in search && typeof search.baseUrl === "string"
+      ? search.baseUrl.trim()
+      : "";
+  return fromConfig || BRAVE_DEFAULT_BASE_URL;
+}
+
 function resolveBraveMode(brave: BraveConfig): "web" | "llm-context" {
   return brave.mode === "llm-context" ? "llm-context" : "web";
 }
@@ -783,6 +792,18 @@ function isDirectPerplexityBaseUrl(baseUrl: string): boolean {
   }
 }
 
+function isOpenRouterBaseUrl(baseUrl: string): boolean {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) {
+    return false;
+  }
+  try {
+    return new URL(trimmed).hostname.toLowerCase() === "openrouter.ai";
+  } catch {
+    return false;
+  }
+}
+
 function resolvePerplexityRequestModel(baseUrl: string, model: string): string {
   if (!isDirectPerplexityBaseUrl(baseUrl)) {
     return model;
@@ -800,27 +821,24 @@ function resolvePerplexityTransport(perplexity?: PerplexityConfig): {
   const auth = resolvePerplexityApiKey(perplexity);
   const baseUrl = resolvePerplexityBaseUrl(perplexity, auth.source, auth.apiKey);
   const model = resolvePerplexityModel(perplexity);
-  const hasLegacyOverride = Boolean(
-    (perplexity?.baseUrl && perplexity.baseUrl.trim()) ||
-    (perplexity?.model && perplexity.model.trim()),
-  );
+  const hasModelOverride = Boolean(perplexity?.model && perplexity.model.trim());
   return {
     ...auth,
     baseUrl,
     model,
-    transport:
-      hasLegacyOverride || !isDirectPerplexityBaseUrl(baseUrl) ? "chat_completions" : "search_api",
+    transport: hasModelOverride || isOpenRouterBaseUrl(baseUrl) ? "chat_completions" : "search_api",
   };
 }
 
 function resolvePerplexitySchemaTransportHint(
   perplexity?: PerplexityConfig,
 ): PerplexityTransport | undefined {
-  const hasLegacyOverride = Boolean(
-    (perplexity?.baseUrl && perplexity.baseUrl.trim()) ||
-    (perplexity?.model && perplexity.model.trim()),
-  );
-  return hasLegacyOverride ? "chat_completions" : undefined;
+  const hasModelOverride = Boolean(perplexity?.model && perplexity.model.trim());
+  const baseUrl =
+    perplexity && typeof perplexity.baseUrl === "string" ? perplexity.baseUrl.trim() : "";
+  return hasModelOverride || (baseUrl && isOpenRouterBaseUrl(baseUrl))
+    ? "chat_completions"
+    : undefined;
 }
 
 function resolveGrokConfig(search?: WebSearchConfig): GrokConfig {
@@ -1154,6 +1172,10 @@ function resolveSiteName(url: string | undefined): string | undefined {
   }
 }
 
+function joinBaseUrlPath(baseUrl: string, path: string): string {
+  return `${baseUrl.trim().replace(/\/$/, "")}${path}`;
+}
+
 async function throwWebSearchApiError(res: Response, providerLabel: string): Promise<never> {
   const detailResult = await readResponseText(res, { maxBytes: 64_000 });
   const detail = detailResult.text;
@@ -1163,6 +1185,7 @@ async function throwWebSearchApiError(res: Response, providerLabel: string): Pro
 async function runPerplexitySearchApi(params: {
   query: string;
   apiKey: string;
+  baseUrl?: string;
   count: number;
   timeoutSeconds: number;
   country?: string;
@@ -1176,6 +1199,7 @@ async function runPerplexitySearchApi(params: {
 }): Promise<
   Array<{ title: string; url: string; description: string; published?: string; siteName?: string }>
 > {
+  const baseUrl = (params.baseUrl || PERPLEXITY_DIRECT_BASE_URL).trim().replace(/\/$/, "");
   const body: Record<string, unknown> = {
     query: params.query,
     max_results: params.count,
@@ -1208,7 +1232,7 @@ async function runPerplexitySearchApi(params: {
 
   return withTrustedWebSearchEndpoint(
     {
-      url: PERPLEXITY_SEARCH_ENDPOINT,
+      url: `${baseUrl}${PERPLEXITY_SEARCH_PATH}`,
       timeoutSeconds: params.timeoutSeconds,
       init: {
         method: "POST",
@@ -1525,6 +1549,7 @@ function mapBraveLlmContextResults(
 async function runBraveLlmContextSearch(params: {
   query: string;
   apiKey: string;
+  baseUrl?: string;
   timeoutSeconds: number;
   country?: string;
   search_lang?: string;
@@ -1538,7 +1563,9 @@ async function runBraveLlmContextSearch(params: {
   }>;
   sources?: BraveLlmContextResponse["sources"];
 }> {
-  const url = new URL(BRAVE_LLM_CONTEXT_ENDPOINT);
+  const url = new URL(
+    joinBaseUrlPath(params.baseUrl || BRAVE_DEFAULT_BASE_URL, BRAVE_LLM_CONTEXT_PATH),
+  );
   url.searchParams.set("q", params.query);
   if (params.country) {
     url.searchParams.set("country", params.country);
@@ -1603,6 +1630,7 @@ async function runWebSearch(params: {
   kimiBaseUrl?: string;
   kimiModel?: string;
   braveMode?: "web" | "llm-context";
+  braveBaseUrl?: string;
 }): Promise<Record<string, unknown>> {
   const effectiveBraveMode = params.braveMode ?? "web";
   const providerSpecificKey =
@@ -1614,7 +1642,7 @@ async function runWebSearch(params: {
           ? (params.geminiModel ?? DEFAULT_GEMINI_MODEL)
           : params.provider === "kimi"
             ? `${params.kimiBaseUrl ?? DEFAULT_KIMI_BASE_URL}:${params.kimiModel ?? DEFAULT_KIMI_MODEL}`
-            : "";
+            : (params.braveBaseUrl ?? BRAVE_DEFAULT_BASE_URL);
   const cacheKey = normalizeCacheKey(
     params.provider === "brave" && effectiveBraveMode === "llm-context"
       ? `${params.provider}:llm-context:${params.query}:${params.country || "default"}:${params.search_lang || params.language || "default"}:${params.freshness || "default"}`
@@ -1659,6 +1687,7 @@ async function runWebSearch(params: {
     const results = await runPerplexitySearchApi({
       query: params.query,
       apiKey: params.apiKey,
+      baseUrl: params.perplexityBaseUrl,
       count: params.count,
       timeoutSeconds: params.timeoutSeconds,
       country: params.country,
@@ -1777,6 +1806,7 @@ async function runWebSearch(params: {
     const { results: llmResults, sources } = await runBraveLlmContextSearch({
       query: params.query,
       apiKey: params.apiKey,
+      baseUrl: params.braveBaseUrl,
       timeoutSeconds: params.timeoutSeconds,
       country: params.country,
       search_lang: params.search_lang,
@@ -1809,7 +1839,9 @@ async function runWebSearch(params: {
     return payload;
   }
 
-  const url = new URL(BRAVE_SEARCH_ENDPOINT);
+  const url = new URL(
+    joinBaseUrlPath(params.braveBaseUrl || BRAVE_DEFAULT_BASE_URL, BRAVE_SEARCH_PATH),
+  );
   url.searchParams.set("q", params.query);
   url.searchParams.set("count", String(params.count));
   if (params.country) {
@@ -1911,6 +1943,7 @@ export function createWebSearchTool(options?: {
   const kimiConfig = resolveKimiConfig(search);
   const braveConfig = resolveBraveConfig(search);
   const braveMode = resolveBraveMode(braveConfig);
+  const braveBaseUrl = resolveBraveBaseUrl(search);
 
   const description =
     provider === "perplexity"
@@ -1971,7 +2004,7 @@ export function createWebSearchTool(options?: {
           error: "unsupported_country",
           message:
             provider === "perplexity"
-              ? "country filtering is only supported by the native Perplexity Search API path. Remove Perplexity baseUrl/model overrides or use a direct PERPLEXITY_API_KEY to enable it."
+              ? "country filtering is only supported by the native Perplexity Search API path. Remove the Perplexity model override or use a direct/custom Search API base URL to enable it."
               : `country filtering is not supported by the ${provider} provider. Only Brave and Perplexity support country filtering.`,
           docs: "https://docs.openclaw.ai/tools/web",
         });
@@ -1986,7 +2019,7 @@ export function createWebSearchTool(options?: {
           error: "unsupported_language",
           message:
             provider === "perplexity"
-              ? "language filtering is only supported by the native Perplexity Search API path. Remove Perplexity baseUrl/model overrides or use a direct PERPLEXITY_API_KEY to enable it."
+              ? "language filtering is only supported by the native Perplexity Search API path. Remove the Perplexity model override or use a direct/custom Search API base URL to enable it."
               : `language filtering is not supported by the ${provider} provider. Only Brave and Perplexity support language filtering.`,
           docs: "https://docs.openclaw.ai/tools/web",
         });
@@ -2073,7 +2106,7 @@ export function createWebSearchTool(options?: {
           error: "unsupported_date_filter",
           message:
             provider === "perplexity"
-              ? "date_after/date_before are only supported by the native Perplexity Search API path. Remove Perplexity baseUrl/model overrides or use a direct PERPLEXITY_API_KEY to enable them."
+              ? "date_after/date_before are only supported by the native Perplexity Search API path. Remove the Perplexity model override or use a direct/custom Search API base URL to enable them."
               : `date_after/date_before filtering is not supported by the ${provider} provider. Only Brave and Perplexity support date filtering.`,
           docs: "https://docs.openclaw.ai/tools/web",
         });
@@ -2119,7 +2152,7 @@ export function createWebSearchTool(options?: {
           error: "unsupported_domain_filter",
           message:
             provider === "perplexity"
-              ? "domain_filter is only supported by the native Perplexity Search API path. Remove Perplexity baseUrl/model overrides or use a direct PERPLEXITY_API_KEY to enable it."
+              ? "domain_filter is only supported by the native Perplexity Search API path. Remove the Perplexity model override or use a direct/custom Search API base URL to enable it."
               : `domain_filter is not supported by the ${provider} provider. Only Perplexity supports domain filtering.`,
           docs: "https://docs.openclaw.ai/tools/web",
         });
@@ -2155,7 +2188,7 @@ export function createWebSearchTool(options?: {
         return jsonResult({
           error: "unsupported_content_budget",
           message:
-            "max_tokens and max_tokens_per_page are only supported by the native Perplexity Search API path. Remove Perplexity baseUrl/model overrides or use a direct PERPLEXITY_API_KEY to enable them.",
+            "max_tokens and max_tokens_per_page are only supported by the native Perplexity Search API path. Remove the Perplexity model override or use a direct/custom Search API base URL to enable them.",
           docs: "https://docs.openclaw.ai/tools/web",
         });
       }
@@ -2186,6 +2219,7 @@ export function createWebSearchTool(options?: {
         kimiBaseUrl: resolveKimiBaseUrl(kimiConfig),
         kimiModel: resolveKimiModel(kimiConfig),
         braveMode,
+        braveBaseUrl,
       });
       return jsonResult(result);
     },
@@ -2201,6 +2235,7 @@ export const __testing = {
   isDirectPerplexityBaseUrl,
   resolvePerplexityRequestModel,
   resolvePerplexityApiKey,
+  resolveBraveBaseUrl,
   normalizeBraveLanguageParams,
   normalizeFreshness,
   normalizeToIsoDate,

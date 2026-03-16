@@ -461,6 +461,8 @@ export type ToolsConfig = {
       provider?: "brave" | "gemini" | "grok" | "kimi" | "perplexity";
       /** Brave Search API key (optional; defaults to BRAVE_API_KEY env var). */
       apiKey?: SecretInput;
+      /** Brave Search base URL override (default: "https://api.search.brave.com"). */
+      baseUrl?: string;
       /** Default search results count (1-10). */
       maxResults?: number;
       /** Timeout in seconds for search requests. */
@@ -501,9 +503,9 @@ export type ToolsConfig = {
       perplexity?: {
         /** API key for Perplexity (defaults to PERPLEXITY_API_KEY env var). */
         apiKey?: SecretInput;
-        /** @deprecated Legacy Sonar/OpenRouter field. Ignored by Search API. */
+        /** Search API or proxy base URL override (default: "https://api.perplexity.ai"). OpenRouter stays on the chat-completions compatibility path. */
         baseUrl?: string;
-        /** @deprecated Legacy Sonar/OpenRouter field. Ignored by Search API. */
+        /** Optional Sonar/OpenRouter model override. Setting this opts Perplexity into the chat-completions compatibility path. */
         model?: string;
       };
     };

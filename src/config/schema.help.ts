@@ -663,6 +663,8 @@ export const FIELD_HELP: Record<string, string> = {
   "tools.web.search.provider":
     'Search provider ("brave", "gemini", "grok", "kimi", or "perplexity"). Auto-detected from available API keys if omitted.',
   "tools.web.search.apiKey": "Brave Search API key (fallback: BRAVE_API_KEY env var).",
+  "tools.web.search.baseUrl":
+    'Optional Brave Search base URL override (default: "https://api.search.brave.com"). Used for both Brave web and llm-context endpoints.',
   "tools.web.search.maxResults": "Number of results to return (1-10).",
   "tools.web.search.timeoutSeconds": "Timeout in seconds for web_search requests.",
   "tools.web.search.cacheTtlMinutes": "Cache TTL in minutes for web_search results.",
@@ -681,9 +683,9 @@ export const FIELD_HELP: Record<string, string> = {
   "tools.web.search.perplexity.apiKey":
     "Perplexity or OpenRouter API key (fallback: PERPLEXITY_API_KEY or OPENROUTER_API_KEY env var). Direct Perplexity keys default to the Search API; OpenRouter keys use Sonar chat completions.",
   "tools.web.search.perplexity.baseUrl":
-    "Optional Perplexity/OpenRouter chat-completions base URL override. Setting this opts Perplexity into the legacy Sonar/OpenRouter compatibility path.",
+    'Optional Perplexity Search API or proxy base URL override (default: "https://api.perplexity.ai"). Custom proxy URLs use the /search endpoint; OpenRouter base URLs stay on the chat-completions compatibility path.',
   "tools.web.search.perplexity.model":
-    'Optional Sonar/OpenRouter model override (default: "perplexity/sonar-pro"). Setting this opts Perplexity into the legacy chat-completions compatibility path.',
+    'Optional Sonar/OpenRouter model override (default: "perplexity/sonar-pro"). Setting this opts Perplexity into the chat-completions compatibility path.',
   "tools.web.fetch.enabled": "Enable the web_fetch tool (lightweight HTTP fetch).",
   "tools.web.fetch.maxChars": "Max characters returned by web_fetch (truncated).",
   "tools.web.fetch.maxCharsCap":

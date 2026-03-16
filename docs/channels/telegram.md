@@ -113,13 +113,13 @@ Token resolution order is account-aware. In practice, config values win over env
     - `open` (requires `allowFrom` to include `"*"`)
     - `disabled`
 
-    `channels.telegram.allowFrom` accepts numeric Telegram user IDs. `telegram:` / `tg:` prefixes are accepted and normalized.
+    `channels.telegram.allowFrom` accepts Telegram user IDs or `@username` values. `telegram:` / `tg:` prefixes are accepted and normalized.
     `dmPolicy: "allowlist"` with empty `allowFrom` blocks all DMs and is rejected by config validation.
-    The onboarding wizard accepts `@username` input and resolves it to numeric IDs.
-    If you upgraded and your config contains `@username` allowlist entries, run `openclaw doctor --fix` to resolve them (best-effort; requires a Telegram bot token).
+    The onboarding wizard accepts `@username` input and can resolve it to numeric IDs.
+    If you want durable config that survives Telegram username changes, prefer numeric IDs.
     If you previously relied on pairing-store allowlist files, `openclaw doctor --fix` can recover entries into `channels.telegram.allowFrom` in allowlist flows (for example when `dmPolicy: "allowlist"` has no explicit IDs yet).
 
-    For one-owner bots, prefer `dmPolicy: "allowlist"` with explicit numeric `allowFrom` IDs to keep access policy durable in config (instead of depending on previous pairing approvals).
+    For one-owner bots, prefer `dmPolicy: "allowlist"` with explicit numeric `allowFrom` IDs to keep access policy durable in config (instead of depending on previous pairing approvals or mutable usernames).
 
     ### Finding your Telegram user ID
 
@@ -896,11 +896,11 @@ Primary reference:
 - `channels.telegram.botToken`: bot token (BotFather).
 - `channels.telegram.tokenFile`: read token from a regular file path. Symlinks are rejected.
 - `channels.telegram.dmPolicy`: `pairing | allowlist | open | disabled` (default: pairing).
-- `channels.telegram.allowFrom`: DM allowlist (numeric Telegram user IDs). `allowlist` requires at least one sender ID. `open` requires `"*"`. `openclaw doctor --fix` can resolve legacy `@username` entries to IDs and can recover allowlist entries from pairing-store files in allowlist migration flows.
+- `channels.telegram.allowFrom`: DM allowlist (Telegram user IDs or `@username` values). `allowlist` requires at least one sender entry. `open` requires `"*"`. Negative chat IDs still belong under `channels.telegram.groups`. `openclaw doctor --fix` can recover allowlist entries from pairing-store files in allowlist migration flows.
 - `channels.telegram.actions.poll`: enable or disable Telegram poll creation (default: enabled; still requires `sendMessage`).
 - `channels.telegram.defaultTo`: default Telegram target used by CLI `--deliver` when no explicit `--reply-to` is provided.
 - `channels.telegram.groupPolicy`: `open | allowlist | disabled` (default: allowlist).
-- `channels.telegram.groupAllowFrom`: group sender allowlist (numeric Telegram user IDs). `openclaw doctor --fix` can resolve legacy `@username` entries to IDs. Non-numeric entries are ignored at auth time. Group auth does not use DM pairing-store fallback (`2026.2.25+`).
+- `channels.telegram.groupAllowFrom`: group sender allowlist (Telegram user IDs or `@username` values). Negative chat IDs are ignored here and should be configured under `channels.telegram.groups`. Group auth does not use DM pairing-store fallback (`2026.2.25+`).
 - Multi-account precedence:
   - When two or more account IDs are configured, set `channels.telegram.defaultAccount` (or include `channels.telegram.accounts.default`) to make default routing explicit.
   - If neither is set, OpenClaw falls back to the first normalized account ID and `openclaw doctor` warns.

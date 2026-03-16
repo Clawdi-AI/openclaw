@@ -7,7 +7,7 @@ export type TelegramGroupMembershipAuditEntry = {
   status?: string | null;
   error?: string | null;
   matchKey?: string;
-  matchSource?: "id";
+  matchSource?: "id" | "username";
 };
 
 export type TelegramGroupMembershipAudit = {
