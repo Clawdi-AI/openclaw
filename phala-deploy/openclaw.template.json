@@ -6,8 +6,26 @@
     "mode": "local",
     "bind": "lan",
     "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": "__GATEWAY_AUTH_TOKEN__"
+    },
     "controlUi": {
       "dangerouslyDisableDeviceAuth": true
+    },
+    "http": {
+      "endpoints": {
+        "mux": {
+          "enabled": true,
+          "baseUrl": "__MUX_BASE_URL__",
+          "registerKey": "__MUX_REGISTER_KEY__",
+          "inboundUrl": "__MUX_INBOUND_URL__"
+        }
+      }
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
     },
     "nodes": {
       "denyCommands": [
@@ -23,8 +41,18 @@
   "update": {
     "checkOnStart": false
   },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
   "channels": {
     "telegram": {
+      "reactionLevel": "extensive",
+      "actions": {
+        "sticker": true
+      },
       "accounts": {
         "default": { "enabled": false },
         "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } }
@@ -56,8 +84,9 @@
       "maxConcurrent": 4,
       "subagents": { "maxConcurrent": 8 },
       "compaction": { "mode": "safeguard" },
-      "model": { "primary": "openai-codex/gpt-5.3-codex" },
+      "model": { "primary": "__MODEL_PRIMARY__" },
       "models": {
+        "openai-codex/gpt-5.4": { "alias": "GPT-5.4" },
         "openai-codex/gpt-5.3-codex": { "alias": "Codex" },
         "openai-codex/gpt-5.1-codex-mini": { "alias": "Codex Mini" }
       }
@@ -65,10 +94,16 @@
   },
   "models": {
     "providers": {
+      "openai": {
+        "baseUrl": "__OPENAI_BASE_URL__",
+        "apiKey": "__OPENAI_API_KEY__",
+        "headers": { "x-api-key": "__OPENAI_HEADER_API_KEY__" },
+        "models": [{ "id": "gpt-4o-transcribe", "name": "gpt-4o-transcribe" }]
+      },
       "openai-codex": {
-        "baseUrl": "https://example.invalid/v1",
-        "apiKey": "set-by-gen-cvm-config",
-        "headers": { "x-api-key": "set-by-gen-cvm-config" },
+        "baseUrl": "__CODEX_API_ENDPOINT__",
+        "apiKey": "__CODEX_API_KEY__",
+        "headers": { "x-api-key": "__CODEX_HEADER_API_KEY__" },
         "models": [
           {
             "id": "gpt-5.3-codex",
@@ -91,6 +126,33 @@
           },
           { "id": "gpt-5-codex-mini", "name": "gpt-5-codex-mini" }
         ]
+      }
+    }
+  },
+  "tools": {
+    "media": {
+      "audio": {
+        "enabled": true,
+        "models": [{ "provider": "openai", "model": "gpt-4o-transcribe" }]
+      }
+    },
+    "web": {
+      "search": {
+        "enabled": "__WEB_SEARCH_ENABLED__",
+        "provider": "__WEB_SEARCH_PROVIDER__",
+        "apiKey": "__BRAVE_SEARCH_API_KEY__",
+        "baseUrl": "__BRAVE_SEARCH_BASE_URL__",
+        "perplexity": {
+          "apiKey": "__PERPLEXITY_API_KEY__",
+          "baseUrl": "__PERPLEXITY_BASE_URL__"
+        }
+      },
+      "fetch": {
+        "firecrawl": {
+          "enabled": "__FIRECRAWL_ENABLED__",
+          "apiKey": "__FIRECRAWL_API_KEY__",
+          "baseUrl": "__FIRECRAWL_BASE_URL__"
+        }
       }
     }
   },

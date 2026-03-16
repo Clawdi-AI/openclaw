@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Generate OPENCLAW_CONFIG_B64 for CVM deployments.
 #
-# Reads openclaw.template.json for static config, then merges in dynamic
-# values (secrets, URLs, model config) derived from environment variables.
+# Renders openclaw.template.json with deployment-specific values derived
+# from environment variables.
 #
 # Required env vars:
 #   MASTER_KEY         — derives gateway auth token via HKDF-SHA256
@@ -26,7 +26,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/openclaw.template.json"
+RENDERER="${SCRIPT_DIR}/render-openclaw-config.mjs"
 [[ -f "$TEMPLATE" ]] || { echo "ERROR: template not found: $TEMPLATE" >&2; exit 1; }
+[[ -f "$RENDERER" ]] || { echo "ERROR: renderer not found: $RENDERER" >&2; exit 1; }
 
 GATEWAY_PORT=18789
 MODEL_PRIMARY="openai-codex/gpt-5.3-codex"
@@ -47,80 +49,19 @@ INBOUND_URL="https://\${DSTACK_APP_ID}-${GATEWAY_PORT}.\${DSTACK_GATEWAY_DOMAIN}
 # Payload: {"https://api.openai.com/auth":{"chatgpt_account_id":"acct_sub2api_proxy"},"exp":9999999999}
 CODEX_MOCK_JWT="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF9zdWIyYXBpX3Byb3h5In0sImV4cCI6OTk5OTk5OTk5OX0.c3ViMmFwaQ"
 
-# --- Merge dynamic values into template ---
-CONFIG_JSON=$(node -e "
-  const fs = require('fs');
-  const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
-
-  // Gateway auth + mux endpoint (dynamic/secret)
-  cfg.gateway.auth = { mode: 'token', token: process.argv[2] };
-  cfg.gateway.http = {
-    endpoints: {
-      mux: {
-        enabled: true,
-        baseUrl: process.argv[3],
-        registerKey: process.argv[4],
-        inboundUrl: process.argv[5],
-      },
-    },
-  };
-
-  // Model config — Codex via sub2api.
-  // Preserve template-provided model definitions and only inject runtime auth/baseUrl.
-  cfg.agents = cfg.agents || {};
-  cfg.agents.defaults = cfg.agents.defaults || {};
-  cfg.agents.defaults.model = { primary: process.argv[6] };
-  cfg.agents.defaults.models = cfg.agents.defaults.models || {};
-  if (!cfg.agents.defaults.models['openai-codex/gpt-5.3-codex']) {
-    cfg.agents.defaults.models['openai-codex/gpt-5.3-codex'] = { alias: 'Codex' };
-  }
-  if (!cfg.agents.defaults.models['openai-codex/gpt-5.1-codex-mini']) {
-    cfg.agents.defaults.models['openai-codex/gpt-5.1-codex-mini'] = { alias: 'Codex Mini' };
-  }
-
-  cfg.models = cfg.models || {};
-  cfg.models.providers = cfg.models.providers || {};
-  const codexProvider = cfg.models.providers['openai-codex'] || {};
-  const requiredSwitchModels = [
-    { id: 'gpt-5.3-codex', name: 'gpt-5.3-codex', reasoning: true, input: ['text', 'image'] },
-    { id: 'gpt-5.1-codex-mini', name: 'gpt-5.1-codex-mini', reasoning: true, input: ['text', 'image'] },
-  ];
-  const existingModels = Array.isArray(codexProvider.models) ? codexProvider.models : [];
-  for (const model of requiredSwitchModels) {
-    const existingIndex = existingModels.findIndex((entry) => entry?.id === model.id);
-    if (existingIndex === -1) {
-      existingModels.push(model);
-      continue;
-    }
-    const current = existingModels[existingIndex] || {};
-    const currentInput = Array.isArray(current.input)
-      ? current.input.filter((value) => typeof value === 'string')
-      : [];
-    existingModels[existingIndex] = {
-      ...current,
-      ...model,
-      input: Array.from(new Set([...currentInput, ...model.input])),
-      reasoning: true,
-    };
-  }
-  cfg.models.providers['openai-codex'] = {
-    ...codexProvider,
-    baseUrl: process.argv[7],
-    apiKey: process.argv[8],
-    headers: {
-      ...(codexProvider.headers || {}),
-      'x-api-key': process.argv[9],
-    },
-    models: existingModels,
-  };
-
-  // Brave Search web tool (optional)
-  const braveKey = process.argv[10] || '';
-  if (braveKey) {
-    cfg.tools = { web: { search: { enabled: true, provider: 'brave', apiKey: braveKey } } };
-  }
-
-  process.stdout.write(JSON.stringify(cfg, null, 2));
-" "$TEMPLATE" "$GATEWAY_AUTH_TOKEN" "$MUX_BASE_URL" "$MUX_REGISTER_KEY" "$INBOUND_URL" "$MODEL_PRIMARY" "$CODEX_API_ENDPOINT" "$CODEX_MOCK_JWT" "$CODEX_API_KEY" "${BRAVE_SEARCH_API_KEY:-}")
+CONFIG_JSON=$(
+  RENDER_GATEWAY_AUTH_TOKEN="$GATEWAY_AUTH_TOKEN" \
+  RENDER_MUX_BASE_URL="$MUX_BASE_URL" \
+  RENDER_MUX_REGISTER_KEY="$MUX_REGISTER_KEY" \
+  RENDER_MUX_INBOUND_URL="$INBOUND_URL" \
+  RENDER_MODEL_PRIMARY="$MODEL_PRIMARY" \
+  RENDER_OPENAI_BASE_URL="$CODEX_API_ENDPOINT" \
+  RENDER_OPENAI_API_KEY="$CODEX_API_KEY" \
+  RENDER_OPENAI_HEADER_API_KEY="$CODEX_API_KEY" \
+  RENDER_CODEX_API_ENDPOINT="$CODEX_API_ENDPOINT" \
+  RENDER_CODEX_API_KEY="$CODEX_MOCK_JWT" \
+  RENDER_CODEX_HEADER_API_KEY="$CODEX_API_KEY" \
+  node "$RENDERER" "$TEMPLATE"
+)
 
 printf '%s' "$CONFIG_JSON" | base64 -w0
