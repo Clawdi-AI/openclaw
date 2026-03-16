@@ -1,9 +1,9 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/whatsapp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { whatsappPlugin } from "./channel.js";
 
-vi.mock("openclaw/plugin-sdk", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("openclaw/plugin-sdk")>();
+vi.mock("openclaw/plugin-sdk/whatsapp", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/whatsapp")>();
   return {
     ...actual,
     loadOrCreateDeviceIdentity: () => ({

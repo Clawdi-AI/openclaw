@@ -58,3 +58,4 @@ export { WhatsAppConfigSchema } from "../config/zod-schema.providers-whatsapp.js
 export { createActionGate, readStringParam } from "../agents/tools/common.js";
 
 export { normalizeE164 } from "../utils.js";
+export { isMuxEnabled, sendViaMux } from "../channels/plugins/outbound/mux.js";
