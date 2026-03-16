@@ -7,6 +7,7 @@ export const PROVIDER_ENV_VARS: Record<string, readonly string[]> = {
   moonshot: ["MOONSHOT_API_KEY"],
   "kimi-coding": ["KIMI_API_KEY", "KIMICODE_API_KEY"],
   synthetic: ["SYNTHETIC_API_KEY"],
+  redpill: ["REDPILL_API_KEY"],
   venice: ["VENICE_API_KEY"],
   zai: ["ZAI_API_KEY", "Z_AI_API_KEY"],
   xiaomi: ["XIAOMI_API_KEY"],

@@ -20,6 +20,7 @@ import {
   DOUBAO_CODING_BASE_URL,
   DOUBAO_CODING_MODEL_CATALOG,
 } from "./doubao-models.js";
+import { discoverRedpillModels, REDPILL_BASE_URL } from "./redpill-models.js";
 import {
   buildSyntheticModelDefinition,
   SYNTHETIC_BASE_URL,
@@ -358,6 +359,14 @@ export function buildSyntheticProvider(): ProviderConfig {
     baseUrl: SYNTHETIC_BASE_URL,
     api: "anthropic-messages",
     models: SYNTHETIC_MODEL_CATALOG.map(buildSyntheticModelDefinition),
+  };
+}
+
+export function buildRedpillProvider(): ProviderConfig {
+  return {
+    baseUrl: REDPILL_BASE_URL,
+    api: "openai-completions",
+    models: discoverRedpillModels(),
   };
 }
 

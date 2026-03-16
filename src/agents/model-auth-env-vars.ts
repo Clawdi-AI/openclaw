@@ -29,6 +29,7 @@ export const PROVIDER_ENV_API_KEY_CANDIDATES: Record<string, string[]> = {
   nvidia: ["NVIDIA_API_KEY"],
   xiaomi: ["XIAOMI_API_KEY"],
   synthetic: ["SYNTHETIC_API_KEY"],
+  redpill: ["REDPILL_API_KEY"],
   venice: ["VENICE_API_KEY"],
   mistral: ["MISTRAL_API_KEY"],
   together: ["TOGETHER_API_KEY"],

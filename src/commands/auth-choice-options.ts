@@ -152,6 +152,12 @@ const AUTH_CHOICE_GROUP_DEFS: {
     choices: ["synthetic-api-key"],
   },
   {
+    value: "redpill",
+    label: "Redpill AI",
+    hint: "GPU TEE privacy-preserving inference",
+    choices: ["redpill-api-key"],
+  },
+  {
     value: "together",
     label: "Together AI",
     hint: "API key",
@@ -193,6 +199,7 @@ const PROVIDER_AUTH_CHOICE_OPTION_HINTS: Partial<Record<AuthChoice, string>> = {
   "litellm-api-key": "Unified gateway for 100+ LLM providers",
   "cloudflare-ai-gateway-api-key": "Account ID + Gateway ID + API key",
   "venice-api-key": "Privacy-focused inference (uncensored models)",
+  "redpill-api-key": "Confidential GPU TEE models via Redpill AI",
   "together-api-key": "Access to Llama, DeepSeek, Qwen, and more open models",
   "huggingface-api-key": "Inference Providers — OpenAI-compatible chat",
   "opencode-zen": "Shared OpenCode key; curated Zen catalog",
@@ -204,6 +211,7 @@ const PROVIDER_AUTH_CHOICE_OPTION_LABELS: Partial<Record<AuthChoice, string>> = 
   "moonshot-api-key-cn": "Kimi API key (.cn)",
   "kimi-code-api-key": "Kimi Code API key (subscription)",
   "cloudflare-ai-gateway-api-key": "Cloudflare AI Gateway",
+  "redpill-api-key": "Redpill AI API key",
   "opencode-zen": "OpenCode Zen catalog",
   "opencode-go": "OpenCode Go catalog",
 };

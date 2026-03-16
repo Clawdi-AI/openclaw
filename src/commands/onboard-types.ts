@@ -20,6 +20,7 @@ export type BuiltInAuthChoice =
   | "moonshot-api-key-cn"
   | "kimi-code-api-key"
   | "synthetic-api-key"
+  | "redpill-api-key"
   | "venice-api-key"
   | "together-api-key"
   | "huggingface-api-key"
@@ -70,6 +71,7 @@ export type BuiltInAuthChoiceGroupId =
   | "opencode"
   | "minimax"
   | "synthetic"
+  | "redpill"
   | "venice"
   | "mistral"
   | "qwen"
@@ -130,6 +132,7 @@ export type OnboardOptions = {
   xiaomiApiKey?: string;
   minimaxApiKey?: string;
   syntheticApiKey?: string;
+  redpillApiKey?: string;
   veniceApiKey?: string;
   togetherApiKey?: string;
   huggingfaceApiKey?: string;

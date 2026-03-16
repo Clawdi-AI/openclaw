@@ -15,6 +15,7 @@ import { PROVIDER_ENV_VARS } from "../secrets/provider-env-vars.js";
 import { normalizeSecretInput } from "../utils/normalize-secret-input.js";
 import type { SecretInputMode } from "./onboard-types.js";
 export { CLOUDFLARE_AI_GATEWAY_DEFAULT_MODEL_REF } from "../agents/cloudflare-ai-gateway.js";
+export { REDPILL_DEFAULT_MODEL_REF } from "../agents/redpill-models.js";
 export {
   MISTRAL_DEFAULT_MODEL_REF,
   XAI_DEFAULT_MODEL_REF,
@@ -316,6 +317,18 @@ export async function setSyntheticApiKey(
   upsertAuthProfile({
     profileId: "synthetic:default",
     credential: buildApiKeyCredential("synthetic", key, undefined, options),
+    agentDir: resolveAuthAgentDir(agentDir),
+  });
+}
+
+export async function setRedpillApiKey(
+  key: SecretInput,
+  agentDir?: string,
+  options?: ApiKeyStorageOptions,
+) {
+  upsertAuthProfile({
+    profileId: "redpill:default",
+    credential: buildApiKeyCredential("redpill", key, undefined, options),
     agentDir: resolveAuthAgentDir(agentDir),
   });
 }

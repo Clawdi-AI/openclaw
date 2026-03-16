@@ -35,6 +35,7 @@ import {
   buildOpenrouterProvider,
   buildQianfanProvider,
   buildQwenPortalProvider,
+  buildRedpillProvider,
   buildSyntheticProvider,
   buildTogetherProvider,
   buildXiaomiProvider,
@@ -48,6 +49,7 @@ export {
   buildNvidiaProvider,
   buildModelStudioProvider,
   buildQianfanProvider,
+  buildRedpillProvider,
   buildXiaomiProvider,
   MODELSTUDIO_BASE_URL,
   MODELSTUDIO_DEFAULT_MODEL_ID,
@@ -692,6 +694,7 @@ const SIMPLE_IMPLICIT_PROVIDER_LOADERS: ImplicitProviderLoader[] = [
     };
   }),
   withApiKey("synthetic", async ({ apiKey }) => ({ ...buildSyntheticProvider(), apiKey })),
+  withApiKey("redpill", async ({ apiKey }) => ({ ...buildRedpillProvider(), apiKey })),
   withApiKey("venice", async ({ apiKey }) => ({ ...(await buildVeniceProvider()), apiKey })),
   withApiKey("xiaomi", async ({ apiKey }) => ({ ...buildXiaomiProvider(), apiKey })),
   withApiKey("vercel-ai-gateway", async ({ apiKey }) => ({
