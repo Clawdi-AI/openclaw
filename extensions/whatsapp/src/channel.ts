@@ -1,3 +1,4 @@
+import { isMuxEnabled, sendViaMux } from "openclaw/plugin-sdk";
 import {
   buildAccountScopedDmSecurityPolicy,
   collectAllowlistProviderGroupPolicyWarnings,
@@ -284,16 +285,165 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
       );
     },
   },
-  outbound: createWhatsAppOutboundBase({
-    chunker: (text, limit) => getWhatsAppRuntime().channel.text.chunkText(text, limit),
-    sendMessageWhatsApp: async (...args) =>
-      await getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp(...args),
-    sendPollWhatsApp: async (...args) =>
-      await getWhatsAppRuntime().channel.whatsapp.sendPollWhatsApp(...args),
-    shouldLogVerbose: () => getWhatsAppRuntime().logging.shouldLogVerbose(),
-    resolveTarget: ({ to, allowFrom, mode }) =>
-      resolveWhatsAppOutboundTarget({ to, allowFrom, mode }),
-  }),
+  outbound: {
+    ...createWhatsAppOutboundBase({
+      chunker: (text, limit) => getWhatsAppRuntime().channel.text.chunkText(text, limit),
+      sendMessageWhatsApp: async (...args) =>
+        await getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp(...args),
+      sendPollWhatsApp: async (...args) =>
+        await getWhatsAppRuntime().channel.whatsapp.sendPollWhatsApp(...args),
+      shouldLogVerbose: () => getWhatsAppRuntime().logging.shouldLogVerbose(),
+      resolveTarget: ({ to, allowFrom, mode }) =>
+        resolveWhatsAppOutboundTarget({ to, allowFrom, mode }),
+    }),
+    sendText: async ({ cfg, to, text, accountId, deps, gifPlayback, sessionKey }) => {
+      if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
+          cfg,
+          channel: "whatsapp",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text,
+          raw: {
+            whatsapp: {
+              body: { text },
+              ...(gifPlayback ? { gifPlayback: true } : {}),
+            },
+          },
+        });
+        return { channel: "whatsapp", ...result };
+      }
+      const send = deps?.sendWhatsApp ?? getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp;
+      const result = await send(to, text, {
+        verbose: false,
+        cfg,
+        accountId: accountId ?? undefined,
+        gifPlayback,
+      });
+      return { channel: "whatsapp", ...result };
+    },
+    sendMedia: async ({
+      cfg,
+      to,
+      text,
+      mediaUrl,
+      mediaLocalRoots,
+      accountId,
+      deps,
+      gifPlayback,
+      sessionKey,
+    }) => {
+      if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
+          cfg,
+          channel: "whatsapp",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text,
+          mediaUrl,
+          raw: {
+            whatsapp: {
+              body: { text },
+              ...(mediaUrl ? { mediaUrl } : {}),
+              ...(gifPlayback ? { gifPlayback: true } : {}),
+            },
+          },
+        });
+        return { channel: "whatsapp", ...result };
+      }
+      const send = deps?.sendWhatsApp ?? getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp;
+      const result = await send(to, text, {
+        verbose: false,
+        cfg,
+        mediaUrl,
+        mediaLocalRoots,
+        accountId: accountId ?? undefined,
+        gifPlayback,
+      });
+      return { channel: "whatsapp", ...result };
+    },
+    sendPayload: async ({ cfg, to, payload, accountId, deps, sessionKey }) => {
+      if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+        const rawWhatsApp = (
+          payload.channelData as { raw?: { whatsapp?: Record<string, unknown> } } | undefined
+        )?.raw?.whatsapp;
+        const result = await sendViaMux({
+          cfg,
+          channel: "whatsapp",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text: payload.text ?? "",
+          mediaUrl: payload.mediaUrl,
+          mediaUrls: payload.mediaUrls,
+          channelData:
+            typeof payload.channelData === "object" && payload.channelData
+              ? (payload.channelData as Record<string, unknown>)
+              : undefined,
+          raw: {
+            whatsapp: rawWhatsApp ?? {
+              body: {
+                text: payload.text ?? "",
+                ...(payload.mediaUrl ? { mediaUrl: payload.mediaUrl } : {}),
+                ...(payload.mediaUrls?.length ? { mediaUrls: payload.mediaUrls } : {}),
+              },
+            },
+          },
+        });
+        return { channel: "whatsapp", ...result };
+      }
+      const send = deps?.sendWhatsApp ?? getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp;
+      const text = payload.text ?? "";
+      const mediaUrls = payload.mediaUrls?.length
+        ? payload.mediaUrls
+        : payload.mediaUrl
+          ? [payload.mediaUrl]
+          : [];
+      if (!text && mediaUrls.length === 0) {
+        return { channel: "whatsapp", messageId: "" };
+      }
+      if (mediaUrls.length === 0) {
+        const result = await send(to, text, {
+          verbose: false,
+          cfg,
+          accountId: accountId ?? undefined,
+        });
+        return { channel: "whatsapp", ...result };
+      }
+      let finalResult: Awaited<ReturnType<typeof send>> | undefined;
+      for (let i = 0; i < mediaUrls.length; i += 1) {
+        const mediaUrl = mediaUrls[i];
+        finalResult = await send(to, i === 0 ? text : "", {
+          verbose: false,
+          cfg,
+          mediaUrl,
+          accountId: accountId ?? undefined,
+        });
+      }
+      return { channel: "whatsapp", ...(finalResult ?? { messageId: "" }) };
+    },
+    sendPoll: async ({ cfg, to, poll, accountId, silent, sessionKey }) => {
+      if (isMuxEnabled({ cfg, channel: "whatsapp", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
+          cfg,
+          channel: "whatsapp",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text: "",
+          poll,
+        });
+        return { channel: "whatsapp", ...result };
+      }
+      return await getWhatsAppRuntime().channel.whatsapp.sendPollWhatsApp(to, poll, {
+        verbose: getWhatsAppRuntime().logging.shouldLogVerbose(),
+        accountId: accountId ?? undefined,
+        cfg,
+      });
+    },
+  },
   auth: {
     login: async ({ cfg, accountId, runtime, verbose }) => {
       const resolvedAccountId = accountId?.trim() || resolveDefaultWhatsAppAccountId(cfg);

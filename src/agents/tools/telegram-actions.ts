@@ -1,4 +1,5 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import { isMuxEnabled } from "../../channels/plugins/outbound/mux.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { readBooleanParam } from "../../plugin-sdk/boolean-param.js";
 import { resolvePollMaxSelections } from "../../polls.js";
@@ -20,6 +21,7 @@ import {
   sendMessageTelegram,
   sendPollTelegram,
   sendStickerTelegram,
+  type MuxTransportOpts,
 } from "../../telegram/send.js";
 import { getCacheStats, searchStickers } from "../../telegram/sticker-cache.js";
 import { resolveTelegramToken } from "../../telegram/token.js";
@@ -100,10 +102,23 @@ export async function handleTelegramAction(
     action: readStringParam(params, "action", { required: true }),
     accountId: readStringParam(params, "accountId"),
   };
+  const sessionKey =
+    readStringParam(params, "sessionKey") ?? readStringParam(params, "__sessionKey");
   const isActionEnabled = createTelegramActionGate({
     cfg,
     accountId,
   });
+  const mux: MuxTransportOpts | undefined = isMuxEnabled({
+    cfg,
+    channel: "telegram",
+    accountId: accountId ?? undefined,
+  })
+    ? {
+        cfg,
+        sessionKey: sessionKey ?? "",
+        accountId: accountId ?? undefined,
+      }
+    : undefined;
 
   if (action === "react") {
     // All react failures return soft results (jsonResult with ok:false) instead
@@ -144,7 +159,7 @@ export async function handleTelegramAction(
       removeErrorMessage: "Emoji is required to remove a Telegram reaction.",
     });
     const token = resolveTelegramToken(cfg, { accountId }).token;
-    if (!token) {
+    if (!token && !mux) {
       return jsonResult({
         ok: false,
         reason: "missing_token",
@@ -158,6 +173,7 @@ export async function handleTelegramAction(
         token,
         remove,
         accountId: accountId ?? undefined,
+        mux,
       });
     } catch (err) {
       const isInvalid = String(err).includes("REACTION_INVALID");
@@ -232,7 +248,7 @@ export async function handleTelegramAction(
     });
     const quoteText = readStringParam(params, "quoteText");
     const token = resolveTelegramToken(cfg, { accountId }).token;
-    if (!token) {
+    if (!token && !mux) {
       throw new Error(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
@@ -249,6 +265,7 @@ export async function handleTelegramAction(
       quoteText: quoteText ?? undefined,
       asVoice: readBooleanParam(params, "asVoice"),
       silent: readBooleanParam(params, "silent"),
+      mux,
     });
     return jsonResult({
       ok: true,
@@ -280,7 +297,7 @@ export async function handleTelegramAction(
     const isAnonymous = readBooleanParam(params, "isAnonymous");
     const silent = readBooleanParam(params, "silent");
     const token = resolveTelegramToken(cfg, { accountId }).token;
-    if (!token) {
+    if (!token && !mux) {
       throw new Error(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
@@ -302,6 +319,7 @@ export async function handleTelegramAction(
         messageThreadId: messageThreadId ?? undefined,
         isAnonymous: isAnonymous ?? undefined,
         silent: silent ?? undefined,
+        mux,
       },
     );
     return jsonResult({
@@ -324,7 +342,7 @@ export async function handleTelegramAction(
       integer: true,
     });
     const token = resolveTelegramToken(cfg, { accountId }).token;
-    if (!token) {
+    if (!token && !mux) {
       throw new Error(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
@@ -333,6 +351,7 @@ export async function handleTelegramAction(
       cfg,
       token,
       accountId: accountId ?? undefined,
+      mux,
     });
     return jsonResult({ ok: true, deleted: true });
   }
@@ -365,7 +384,7 @@ export async function handleTelegramAction(
       }
     }
     const token = resolveTelegramToken(cfg, { accountId }).token;
-    if (!token) {
+    if (!token && !mux) {
       throw new Error(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
@@ -375,6 +394,7 @@ export async function handleTelegramAction(
       token,
       accountId: accountId ?? undefined,
       buttons,
+      mux,
     });
     return jsonResult({
       ok: true,
@@ -398,7 +418,7 @@ export async function handleTelegramAction(
       integer: true,
     });
     const token = resolveTelegramToken(cfg, { accountId }).token;
-    if (!token) {
+    if (!token && !mux) {
       throw new Error(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
@@ -409,6 +429,7 @@ export async function handleTelegramAction(
       accountId: accountId ?? undefined,
       replyToMessageId: replyToMessageId ?? undefined,
       messageThreadId: messageThreadId ?? undefined,
+      mux,
     });
     return jsonResult({
       ok: true,
@@ -454,7 +475,7 @@ export async function handleTelegramAction(
     const iconColor = readNumberParam(params, "iconColor", { integer: true });
     const iconCustomEmojiId = readStringParam(params, "iconCustomEmojiId");
     const token = resolveTelegramToken(cfg, { accountId }).token;
-    if (!token) {
+    if (!token && !mux) {
       throw new Error(
         "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
       );
@@ -465,6 +486,7 @@ export async function handleTelegramAction(
       accountId: accountId ?? undefined,
       iconColor: iconColor ?? undefined,
       iconCustomEmojiId: iconCustomEmojiId ?? undefined,
+      mux,
     });
     return jsonResult({
       ok: true,

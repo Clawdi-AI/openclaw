@@ -9,9 +9,11 @@ import {
   sendWebhookMessageDiscord,
 } from "../../../discord/send.js";
 import type { OutboundIdentity } from "../../../infra/outbound/identity.js";
+import { buildDiscordRawSend } from "../mux-envelope.js";
 import { normalizeDiscordOutboundTarget } from "../normalize/discord.js";
 import type { ChannelOutboundAdapter } from "../types.js";
 import { sendTextMediaPayload } from "./direct-text-media.js";
+import { isMuxEnabled, sendViaMux } from "./mux.js";
 
 function resolveDiscordOutboundTarget(params: {
   to: string;
@@ -84,9 +86,76 @@ export const discordOutbound: ChannelOutboundAdapter = {
   textChunkLimit: 2000,
   pollMaxOptions: 10,
   resolveTarget: ({ to }) => normalizeDiscordOutboundTarget(to),
-  sendPayload: async (ctx) =>
-    await sendTextMediaPayload({ channel: "discord", ctx, adapter: discordOutbound }),
-  sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, identity, silent }) => {
+  sendPayload: async (ctx) => {
+    if (isMuxEnabled({ cfg: ctx.cfg, channel: "discord", accountId: ctx.accountId ?? undefined })) {
+      const rawDiscord = (
+        ctx.payload.channelData as { raw?: { discord?: Record<string, unknown> } } | undefined
+      )?.raw?.discord;
+      const fallbackMediaUrl =
+        ctx.payload.mediaUrl ??
+        (Array.isArray(ctx.payload.mediaUrls) && ctx.payload.mediaUrls.length > 0
+          ? ctx.payload.mediaUrls[0]
+          : undefined);
+      const result = await sendViaMux({
+        cfg: ctx.cfg,
+        channel: "discord",
+        accountId: ctx.accountId ?? undefined,
+        sessionKey: ctx.sessionKey,
+        to: ctx.to,
+        text: ctx.payload.text ?? "",
+        mediaUrl: ctx.payload.mediaUrl,
+        mediaUrls: ctx.payload.mediaUrls,
+        replyToId: ctx.replyToId,
+        threadId: ctx.threadId,
+        channelData:
+          typeof ctx.payload.channelData === "object" && ctx.payload.channelData
+            ? ctx.payload.channelData
+            : undefined,
+        raw: {
+          discord:
+            rawDiscord ??
+            buildDiscordRawSend({
+              text: ctx.payload.text ?? "",
+              mediaUrl: fallbackMediaUrl,
+              replyToId: ctx.replyToId,
+            }),
+        },
+      });
+      return { channel: "discord", ...result };
+    }
+    return await sendTextMediaPayload({ channel: "discord", ctx, adapter: discordOutbound });
+  },
+  sendText: async ({
+    cfg,
+    to,
+    text,
+    accountId,
+    deps,
+    replyToId,
+    threadId,
+    identity,
+    silent,
+    sessionKey,
+  }) => {
+    if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
+      const result = await sendViaMux({
+        cfg,
+        channel: "discord",
+        accountId: accountId ?? undefined,
+        sessionKey,
+        to,
+        text,
+        replyToId,
+        threadId,
+        raw: {
+          discord: buildDiscordRawSend({
+            text,
+            replyToId,
+          }),
+        },
+      });
+      return { channel: "discord", ...result };
+    }
     if (!silent) {
       const webhookResult = await maybeSendDiscordWebhookText({
         cfg,
@@ -122,7 +191,29 @@ export const discordOutbound: ChannelOutboundAdapter = {
     replyToId,
     threadId,
     silent,
+    sessionKey,
   }) => {
+    if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
+      const result = await sendViaMux({
+        cfg,
+        channel: "discord",
+        accountId: accountId ?? undefined,
+        sessionKey,
+        to,
+        text,
+        mediaUrl,
+        replyToId,
+        threadId,
+        raw: {
+          discord: buildDiscordRawSend({
+            text,
+            mediaUrl,
+            replyToId,
+          }),
+        },
+      });
+      return { channel: "discord", ...result };
+    }
     const send = deps?.sendDiscord ?? sendMessageDiscord;
     const target = resolveDiscordOutboundTarget({ to, threadId });
     const result = await send(target, text, {
@@ -137,6 +228,9 @@ export const discordOutbound: ChannelOutboundAdapter = {
     return { channel: "discord", ...result };
   },
   sendPoll: async ({ cfg, to, poll, accountId, threadId, silent }) => {
+    if (isMuxEnabled({ cfg, channel: "discord", accountId: accountId ?? undefined })) {
+      throw new Error("discord mux poll delivery requires sessionKey; use routed replies instead");
+    }
     const target = resolveDiscordOutboundTarget({ to, threadId });
     return await sendPollDiscord(target, poll, {
       accountId: accountId ?? undefined,

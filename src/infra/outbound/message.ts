@@ -35,6 +35,7 @@ type MessageSendParams = {
   content: string;
   /** Active agent id for per-agent outbound media root scoping. */
   agentId?: string;
+  sessionKey?: string;
   channel?: string;
   mediaUrl?: string;
   mediaUrls?: string[];
@@ -72,6 +73,7 @@ type MessagePollParams = {
   durationHours?: number;
   channel?: string;
   accountId?: string;
+  sessionKey?: string;
   threadId?: string;
   silent?: boolean;
   isAnonymous?: boolean;
@@ -233,7 +235,7 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
     const outboundSession = buildOutboundSessionContext({
       cfg,
       agentId: params.agentId,
-      sessionKey: params.mirror?.sessionKey,
+      sessionKey: params.sessionKey ?? params.mirror?.sessionKey,
     });
     const results = await deliverOutboundPayloads({
       cfg,
@@ -281,7 +283,7 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
       accountId: params.accountId,
       agentId: params.agentId,
       channel,
-      sessionKey: params.mirror?.sessionKey,
+      sessionKey: params.sessionKey ?? params.mirror?.sessionKey,
       idempotencyKey: params.idempotencyKey ?? randomIdempotencyKey(),
     },
   });
@@ -346,6 +348,7 @@ export async function sendPoll(params: MessagePollParams): Promise<MessagePollRe
       isAnonymous: params.isAnonymous,
       channel,
       accountId: params.accountId,
+      sessionKey: params.sessionKey,
       idempotencyKey: params.idempotencyKey ?? randomIdempotencyKey(),
     },
   });

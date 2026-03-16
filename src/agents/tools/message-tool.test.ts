@@ -292,6 +292,42 @@ describe("message tool schema scoping", () => {
     expect(properties.pollAnonymous).toBeUndefined();
     expect(properties.pollPublic).toBeUndefined();
   });
+
+  it("falls back to built-in telegram actions when the runtime registry is empty", () => {
+    setActivePluginRegistry(createTestRegistry([]));
+
+    const tool = createMessageTool({
+      config: {
+        channels: {
+          telegram: {
+            accounts: {
+              mux: {
+                mux: {
+                  enabled: true,
+                  baseUrl: "http://127.0.0.1:18788",
+                  authToken: "test-token",
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      currentChannelProvider: "telegram",
+    });
+    const properties = getToolProperties(tool);
+    const actionEnum = getActionEnum(properties);
+
+    expect(actionEnum).toContain("send");
+    expect(actionEnum).toContain("react");
+    expect(actionEnum).toContain("poll");
+    expect(actionEnum).toContain("delete");
+    expect(actionEnum).toContain("edit");
+    expect(actionEnum).toContain("topic-create");
+    expect(properties.buttons).toBeDefined();
+    expect(properties.pollDurationSeconds).toBeDefined();
+    expect(properties.pollAnonymous).toBeDefined();
+    expect(properties.pollPublic).toBeDefined();
+  });
 });
 
 describe("message tool description", () => {

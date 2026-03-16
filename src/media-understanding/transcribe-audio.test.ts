@@ -25,14 +25,17 @@ describe("transcribeAudioFile", () => {
       cfg: {} as OpenClawConfig,
     });
 
-    expect(runAudioTranscription).toHaveBeenCalledWith({
-      ctx: {
-        MediaPath: "/tmp/note.mp3",
-        MediaType: undefined,
-      },
-      cfg: {} as OpenClawConfig,
-      agentDir: undefined,
-    });
+    expect(runAudioTranscription).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctx: {
+          MediaPath: "/tmp/note.mp3",
+          MediaType: undefined,
+        },
+        cfg: {} as OpenClawConfig,
+        agentDir: undefined,
+        localPathRoots: expect.arrayContaining(["/tmp"]),
+      }),
+    );
     expect(result).toEqual({ text: "hello" });
   });
 

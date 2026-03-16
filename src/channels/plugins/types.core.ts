@@ -333,6 +333,7 @@ export type ChannelMessageActionContext = {
   params: Record<string, unknown>;
   mediaLocalRoots?: readonly string[];
   accountId?: string | null;
+  sessionKey?: string | null;
   /**
    * Trusted sender id from inbound context. This is server-injected and must
    * never be sourced from tool/model-controlled params.
@@ -384,6 +385,7 @@ export type ChannelPollContext = {
   to: string;
   poll: PollInput;
   accountId?: string | null;
+  sessionKey?: string | null;
   threadId?: string | null;
   silent?: boolean;
   isAnonymous?: boolean;

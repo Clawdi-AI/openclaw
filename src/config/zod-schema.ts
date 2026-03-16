@@ -786,6 +786,16 @@ export const OpenClawSchema = z
                   })
                   .strict()
                   .optional(),
+                mux: z
+                  .object({
+                    enabled: z.boolean().optional(),
+                    baseUrl: z.string().optional(),
+                    registerKey: SecretInputSchema.optional().register(sensitive),
+                    inboundUrl: z.string().optional(),
+                    maxBodyBytes: z.number().int().positive().optional(),
+                  })
+                  .strict()
+                  .optional(),
               })
               .strict()
               .optional(),

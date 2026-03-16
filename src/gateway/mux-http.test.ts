@@ -1,0 +1,3062 @@
+import { generateKeyPairSync } from "node:crypto";
+import fs from "node:fs";
+import { rm, mkdtemp } from "node:fs/promises";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { Readable } from "node:stream";
+import { SignJWT } from "jose";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { OpenClawConfig } from "../config/config.js";
+import { readChannelAllowFromStore } from "../pairing/pairing-store.js";
+import { __resetMuxJwksCacheForTest } from "./mux-jwt.js";
+import { readMuxPairedSenders } from "./mux-paired-senders.js";
+
+const OPENCLAW_ID = "openclaw-rt-1";
+
+const mocks = vi.hoisted(() => ({
+  loadConfig: vi.fn(),
+  dispatchInboundMessage: vi.fn(async (_params?: unknown) => ({
+    queuedFinal: false,
+    counts: { tool: 0, block: 0, final: 0 },
+  })),
+  dispatchReplyWithBufferedBlockDispatcher: vi.fn(async (_params?: unknown) => ({
+    queuedFinal: false,
+    counts: { tool: 0, block: 0, final: 0 },
+  })),
+  resolveTelegramCallbackAction: vi.fn(),
+  sendTypingViaMux: vi.fn(async () => {}),
+  fetchMuxFileStream: vi.fn(async () => new Response("", { status: 200 })),
+  warn: vi.fn(),
+  logVerbose: vi.fn(),
+}));
+
+vi.mock("../config/config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../config/config.js")>();
+  return {
+    ...actual,
+    loadConfig: mocks.loadConfig,
+  };
+});
+
+vi.mock("../auto-reply/dispatch.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../auto-reply/dispatch.js")>();
+  return {
+    ...actual,
+    dispatchInboundMessage: mocks.dispatchInboundMessage,
+  };
+});
+
+vi.mock("../auto-reply/reply/provider-dispatcher.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../auto-reply/reply/provider-dispatcher.js")>();
+  return {
+    ...actual,
+    dispatchReplyWithBufferedBlockDispatcher: mocks.dispatchReplyWithBufferedBlockDispatcher,
+  };
+});
+
+vi.mock("../telegram/callback-actions.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../telegram/callback-actions.js")>();
+  return {
+    ...actual,
+    resolveTelegramCallbackAction: mocks.resolveTelegramCallbackAction,
+  };
+});
+
+vi.mock("../channels/plugins/outbound/mux.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../channels/plugins/outbound/mux.js")>();
+  return {
+    ...actual,
+    sendTypingViaMux: mocks.sendTypingViaMux,
+    fetchMuxFileStream: mocks.fetchMuxFileStream,
+  };
+});
+
+vi.mock("../globals.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../globals.js")>();
+  return {
+    ...actual,
+    warn: mocks.warn,
+    logVerbose: mocks.logVerbose,
+  };
+});
+
+vi.mock("../infra/device-identity.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../infra/device-identity.js")>();
+  return {
+    ...actual,
+    loadOrCreateDeviceIdentity: () => ({
+      deviceId: "openclaw-rt-1",
+      publicKeyPem: "test",
+      privateKeyPem: "test",
+    }),
+  };
+});
+
+const { __resetMuxRuntimeAuthCacheForTest } = await import("../channels/plugins/outbound/mux.js");
+const { handleMuxInboundHttpRequest } = await import("./mux-http.js");
+
+const ONE_PIXEL_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/woAAn8B9FD5fHAAAAAASUVORK5CYII=";
+
+function createRequest(params: {
+  method?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+}): IncomingMessage {
+  const req = new Readable({
+    read() {},
+  }) as IncomingMessage;
+  (req as { method?: string }).method = params.method ?? "POST";
+  (req as { url?: string }).url = params.url ?? "/v1/mux/inbound";
+  (req as { headers?: Record<string, string> }).headers = params.headers ?? {};
+  if (params.body !== undefined) {
+    const raw = typeof params.body === "string" ? params.body : JSON.stringify(params.body);
+    req.push(raw);
+  }
+  req.push(null);
+  return req;
+}
+
+function createResponse(): ServerResponse & { bodyText: string; headersMap: Map<string, string> } {
+  const headersMap = new Map<string, string>();
+  const res = {
+    statusCode: 200,
+    setHeader(name: string, value: unknown) {
+      headersMap.set(name.toLowerCase(), String(value));
+      return this;
+    },
+    end(chunk?: unknown) {
+      if (typeof chunk === "string") {
+        this.bodyText = chunk;
+      } else if (chunk instanceof Uint8Array) {
+        this.bodyText = Buffer.from(chunk).toString("utf8");
+      } else {
+        this.bodyText = "";
+      }
+      return this;
+    },
+    bodyText: "",
+    headersMap,
+  };
+  return res as unknown as ServerResponse & { bodyText: string; headersMap: Map<string, string> };
+}
+
+afterEach(() => {
+  mocks.loadConfig.mockReset();
+  mocks.dispatchInboundMessage.mockClear();
+  mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
+  mocks.resolveTelegramCallbackAction.mockReset();
+  mocks.sendTypingViaMux.mockReset();
+  mocks.fetchMuxFileStream.mockReset();
+  mocks.warn.mockReset();
+  mocks.logVerbose.mockReset();
+  __resetMuxJwksCacheForTest();
+  __resetMuxRuntimeAuthCacheForTest();
+  vi.unstubAllGlobals();
+});
+
+async function waitForAsyncDispatch(): Promise<void> {
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, 80));
+}
+
+function parseJsonRequestBody(init: RequestInit): Record<string, unknown> {
+  if (typeof init.body !== "string") {
+    throw new Error("expected string request body");
+  }
+  return JSON.parse(init.body) as Record<string, unknown>;
+}
+
+function resolveFetchUrl(input: string | URL | Request): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.toString();
+  }
+  return input.url;
+}
+
+function createJwtFixture() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const kid = "kid-test-1";
+  const rawJwk = publicKey.export({ format: "jwk" }) as JsonWebKey & {
+    kty?: string;
+    crv?: string;
+    x?: string;
+  };
+  const jwk = {
+    ...rawJwk,
+    kid,
+    use: "sig",
+    alg: "EdDSA",
+  };
+  const mintToken = async (params: {
+    issuer: string;
+    subject: string;
+    audience: string;
+    scope: string;
+    ttlSec?: number;
+  }) => {
+    const nowSec = Math.trunc(Date.now() / 1000);
+    return await new SignJWT({ scope: params.scope })
+      .setProtectedHeader({ alg: "EdDSA", typ: "JWT", kid })
+      .setIssuer(params.issuer)
+      .setSubject(params.subject)
+      .setAudience(params.audience)
+      .setIssuedAt(nowSec)
+      .setNotBefore(nowSec)
+      .setExpirationTime(nowSec + Math.max(1, params.ttlSec ?? 3600))
+      .sign(privateKey);
+  };
+  return {
+    jwks: { keys: [jwk] },
+    mintToken,
+  };
+}
+
+function createMuxInboundConfig(): OpenClawConfig {
+  return {
+    gateway: {
+      http: {
+        endpoints: {
+          mux: {
+            enabled: true,
+            baseUrl: "http://mux.local",
+            registerKey: "rk-test-1",
+            inboundUrl: "http://openclaw.local/v1/mux/inbound",
+          },
+        },
+      },
+    },
+    channels: {
+      telegram: {
+        dmPolicy: "open",
+        groupPolicy: "open",
+        groups: {
+          "*": {
+            requireMention: false,
+          },
+        },
+        accounts: {
+          default: {},
+          work: {},
+        },
+      },
+      discord: {
+        dmPolicy: "open",
+        groupPolicy: "open",
+        guilds: {
+          "*": {
+            requireMention: false,
+          },
+        },
+        accounts: {
+          default: {},
+          work: {},
+        },
+      },
+      whatsapp: {
+        accounts: {
+          default: {},
+          work: {},
+        },
+      },
+    },
+  } as OpenClawConfig;
+}
+
+async function withTempStateDir<T>(fn: () => Promise<T>) {
+  const previous = process.env.OPENCLAW_STATE_DIR;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "openclaw-mux-http-"));
+  process.env.OPENCLAW_STATE_DIR = dir;
+  try {
+    return await fn();
+  } finally {
+    if (previous == null) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = previous;
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function dispatchAuthorizedMuxInbound(params: {
+  body: Record<string, unknown>;
+  cfg?: OpenClawConfig;
+}): Promise<{
+  res: ReturnType<typeof createResponse>;
+  call:
+    | {
+        ctx?: {
+          AccountId?: string;
+          SessionKey?: string;
+          Surface?: string;
+          OriginatingChannel?: string;
+          OriginatingTo?: string;
+          MessageThreadId?: string | number;
+          CommandAuthorized?: boolean;
+          WasMentioned?: boolean;
+        };
+      }
+    | undefined;
+}> {
+  __resetMuxJwksCacheForTest();
+  const jwtFixture = createJwtFixture();
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const url = resolveFetchUrl(input);
+    if (url === "http://mux.local/.well-known/jwks.json") {
+      return new Response(JSON.stringify(jwtFixture.jwks), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+    throw new Error(`unexpected fetch url ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  const token = await jwtFixture.mintToken({
+    issuer: "http://mux.local",
+    subject: OPENCLAW_ID,
+    audience: "openclaw-mux-inbound",
+    scope: "mux:inbound",
+  });
+
+  mocks.loadConfig.mockReturnValue(params.cfg ?? createMuxInboundConfig());
+
+  const req = createRequest({
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+      "x-openclaw-id": OPENCLAW_ID,
+    },
+    body: {
+      ...params.body,
+      openclawId: OPENCLAW_ID,
+    },
+  });
+  const res = createResponse();
+
+  expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+  expect(res.statusCode, res.bodyText).toBe(202);
+  await waitForAsyncDispatch();
+
+  const channel = params.body.channel;
+  const callSource =
+    channel === "telegram"
+      ? mocks.dispatchReplyWithBufferedBlockDispatcher
+      : mocks.dispatchInboundMessage;
+  const call = callSource.mock.calls.at(-1)?.[0] as
+    | {
+        ctx?: {
+          AccountId?: string;
+          SessionKey?: string;
+          Surface?: string;
+          OriginatingChannel?: string;
+          OriginatingTo?: string;
+          MessageThreadId?: string | number;
+        };
+      }
+    | undefined;
+  return { res, call };
+}
+
+describe("handleMuxInboundHttpRequest", () => {
+  test("authenticates and dispatches inbound payload", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    const noAuthReq = createRequest({
+      headers: { "content-type": "application/json" },
+      body: {},
+    });
+    const noAuthRes = createResponse();
+    expect(await handleMuxInboundHttpRequest(noAuthReq, noAuthRes)).toBe(true);
+    expect(noAuthRes.statusCode).toBe(401);
+    expect(JSON.parse(noAuthRes.bodyText)).toEqual({
+      ok: false,
+      error: "unauthorized",
+      code: "MISSING_BEARER",
+    });
+
+    const missingChannelReq = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        sessionKey: "main",
+        to: "telegram:123",
+        body: "hello",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const missingChannelRes = createResponse();
+    expect(await handleMuxInboundHttpRequest(missingChannelReq, missingChannelRes)).toBe(true);
+    expect(missingChannelRes.statusCode).toBe(400);
+
+    const okReq = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "main",
+        to: "telegram:123",
+        from: "telegram:user",
+        body: "hello mux",
+        messageId: "mux-msg-1",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const okRes = createResponse();
+    expect(await handleMuxInboundHttpRequest(okReq, okRes)).toBe(true);
+    expect(okRes.statusCode).toBe(202);
+    expect(JSON.parse(okRes.bodyText)).toEqual({ ok: true, eventId: "mux-msg-1" });
+
+    await waitForAsyncDispatch();
+    // Telegram now uses dispatchReplyWithBufferedBlockDispatcher for streaming support.
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    const call = mocks.dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0] as
+      | {
+          ctx?: {
+            Provider?: string;
+            Surface?: string;
+            OriginatingChannel?: string;
+            OriginatingTo?: string;
+            SessionKey?: string;
+            MessageSid?: string;
+            CommandAuthorized?: boolean;
+            WasMentioned?: boolean;
+            Body?: string;
+            RawBody?: string;
+            CommandBody?: string;
+            ChannelData?: Record<string, unknown>;
+            MediaPaths?: string[];
+          };
+          replyOptions?: {
+            disableBlockStreaming?: boolean;
+            onPartialReply?: unknown;
+          };
+        }
+      | undefined;
+    expect(call?.ctx).toMatchObject({
+      Provider: "telegram",
+      Surface: "telegram",
+      OriginatingChannel: "telegram",
+      OriginatingTo: "telegram:123",
+      SessionKey: "agent:main:main",
+      MessageSid: "mux-msg-1",
+      Body: "hello mux",
+      RawBody: "hello mux",
+      CommandBody: "hello mux",
+      CommandAuthorized: true,
+    });
+    expect(call?.ctx?.ChannelData).toMatchObject({ inboundTransport: "mux" });
+    expect(call?.ctx?.MediaPaths).toBeUndefined();
+    // Verify streaming is enabled.
+    expect(call?.replyOptions?.disableBlockStreaming).toBe(true);
+    expect(call?.replyOptions?.onPartialReply).toBeTypeOf("function");
+  });
+
+  test("accepts mux inbound jwt auth and reuses cached jwks", async () => {
+    const jwtFixture = createJwtFixture();
+    let jwksFetchCount = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        jwksFetchCount += 1;
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound mux:runtime",
+    });
+
+    const makeRequest = () =>
+      createRequest({
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+          "x-openclaw-id": OPENCLAW_ID,
+        },
+        body: {
+          channel: "telegram",
+          sessionKey: "main",
+          to: "telegram:123",
+          from: "telegram:user",
+          body: "hello jwt",
+          messageId: `mux-msg-${Date.now()}`,
+          openclawId: OPENCLAW_ID,
+        },
+      });
+
+    const firstRes = createResponse();
+    expect(await handleMuxInboundHttpRequest(makeRequest(), firstRes)).toBe(true);
+    expect(firstRes.statusCode).toBe(202);
+
+    const secondRes = createResponse();
+    expect(await handleMuxInboundHttpRequest(makeRequest(), secondRes)).toBe(true);
+    expect(secondRes.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    // Telegram uses dispatchReplyWithBufferedBlockDispatcher.
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
+    expect(jwksFetchCount).toBe(1);
+  });
+
+  test("rejects runtime jwt request when payload openclawId does not match", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify(jwtFixture.jwks), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+    });
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "main",
+        to: "telegram:123",
+        body: "hello",
+        openclawId: "someone-else",
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(401);
+    expect(JSON.parse(res.bodyText)).toEqual({
+      ok: false,
+      error: "unauthorized",
+      code: "PAYLOAD_OPENCLAW_ID_MISMATCH",
+    });
+  });
+
+  test("passes through channelData without transport mutation", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+    });
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "discord",
+        sessionKey: "dc:dm:42",
+        to: "discord:dm:42",
+        from: "discord:user:42",
+        body: "hello from dm",
+        messageId: "dc-msg-1",
+        channelData: {
+          routeKey: "discord:default:dm:user:42",
+          discord: {
+            rawMessage: {
+              id: "1234567890",
+              content: "hello from dm",
+            },
+          },
+        },
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    const call = mocks.dispatchInboundMessage.mock.calls[0]?.[0] as
+      | {
+          ctx?: {
+            Body?: string;
+            RawBody?: string;
+            ChannelData?: Record<string, unknown>;
+          };
+        }
+      | undefined;
+    expect(call?.ctx?.Body).toBe("hello from dm");
+    expect(call?.ctx?.RawBody).toBe("hello from dm");
+    expect(call?.ctx?.ChannelData).toEqual({
+      routeKey: "discord:default:dm:user:42",
+      discord: {
+        rawMessage: {
+          id: "1234567890",
+          content: "hello from dm",
+        },
+      },
+    });
+  });
+
+  test.each(["discord", "whatsapp"] as const)(
+    "sends mux typing action for %s replies",
+    async (channel) => {
+      const jwtFixture = createJwtFixture();
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const url = resolveFetchUrl(input);
+        if (url === "http://mux.local/.well-known/jwks.json") {
+          return new Response(JSON.stringify(jwtFixture.jwks), {
+            status: 200,
+            headers: { "Content-Type": "application/json; charset=utf-8" },
+          });
+        }
+        throw new Error(`unexpected fetch url ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const token = await jwtFixture.mintToken({
+        issuer: "http://mux.local",
+        subject: OPENCLAW_ID,
+        audience: "openclaw-mux-inbound",
+        scope: "mux:inbound",
+      });
+
+      mocks.loadConfig.mockReturnValue({
+        gateway: {
+          http: {
+            endpoints: {
+              mux: {
+                enabled: true,
+                baseUrl: "http://mux.local",
+              },
+            },
+          },
+        },
+      });
+      mocks.dispatchInboundMessage.mockImplementationOnce(async (params?: unknown) => {
+        const typedParams = params as
+          | {
+              replyOptions?: { onReplyStart?: () => Promise<void> | void };
+            }
+          | undefined;
+        await typedParams?.replyOptions?.onReplyStart?.();
+        return {
+          queuedFinal: false,
+          counts: { tool: 0, block: 0, final: 0 },
+        };
+      });
+
+      const req = createRequest({
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+          "x-openclaw-id": OPENCLAW_ID,
+        },
+        body: {
+          channel,
+          sessionKey: `${channel}:session:1`,
+          accountId: "mux",
+          to: `${channel}:123`,
+          from: `${channel}:user:42`,
+          body: "hello",
+          messageId: `${channel}-msg-1`,
+          openclawId: OPENCLAW_ID,
+        },
+      });
+      const res = createResponse();
+
+      expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+      expect(res.statusCode).toBe(202);
+      await waitForAsyncDispatch();
+      expect(mocks.sendTypingViaMux).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cfg: expect.any(Object),
+          channel,
+          accountId: "default",
+          sessionKey: "agent:main:main",
+          to: channel === "discord" ? "user:42" : `${channel}:123`,
+        }),
+      );
+    },
+  );
+
+  test("normalizes mux inbound business account to the default account path", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+            },
+          },
+        },
+      },
+      channels: {
+        discord: {
+          accounts: {
+            default: {},
+            work: {},
+          },
+        },
+      },
+    });
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "discord",
+        sessionKey: "dc:dm:42",
+        accountId: "work",
+        to: "discord:dm:42",
+        from: "discord:user:42",
+        body: "hello from dm",
+        messageId: "dc-msg-1",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    const call = mocks.dispatchInboundMessage.mock.calls[0]?.[0] as
+      | {
+          ctx?: {
+            AccountId?: string;
+            SessionKey?: string;
+          };
+        }
+      | undefined;
+    expect(call?.ctx?.AccountId).toBe("default");
+    expect(call?.ctx?.SessionKey).toBe("agent:main:main");
+  });
+
+  test.each([
+    {
+      name: "telegram dm",
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        to: "telegram:123",
+        from: "telegram:42",
+        body: "hello dm",
+        messageId: "tg-dm-1",
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:main",
+        surface: "telegram",
+        originatingChannel: "telegram",
+        originatingTo: "telegram:123",
+        messageThreadId: undefined,
+      },
+    },
+    {
+      name: "telegram group",
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:group:-100555",
+        to: "telegram:-100555",
+        from: "telegram:42",
+        body: "hello group",
+        messageId: "tg-group-1",
+        chatType: "group",
+        channelData: {
+          chatId: "-100555",
+          telegram: {
+            rawMessage: {
+              chat: {
+                id: -100555,
+                type: "supergroup",
+              },
+            },
+          },
+        },
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:telegram:group:-100555",
+        surface: "telegram",
+        originatingChannel: "telegram",
+        originatingTo: "telegram:-100555",
+        messageThreadId: undefined,
+      },
+    },
+    {
+      name: "telegram forum topic",
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:group:-100555:topic:2",
+        to: "telegram:-100555",
+        from: "telegram:42",
+        body: "hello topic",
+        messageId: "tg-topic-1",
+        chatType: "group",
+        threadId: 2,
+        channelData: {
+          chatId: "-100555",
+          telegram: {
+            rawMessage: {
+              chat: {
+                id: -100555,
+                type: "supergroup",
+                is_forum: true,
+              },
+              message_thread_id: 2,
+            },
+          },
+        },
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:telegram:group:-100555:topic:2",
+        surface: "telegram",
+        originatingChannel: "telegram",
+        originatingTo: "telegram:-100555",
+        messageThreadId: 2,
+      },
+    },
+    {
+      name: "discord dm",
+      body: {
+        channel: "discord",
+        sessionKey: "dc:dm:42",
+        to: "discord:dm:42",
+        from: "discord:user:42",
+        body: "hello discord dm",
+        messageId: "dc-dm-1",
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:main",
+        surface: "mux",
+        originatingChannel: "discord",
+        originatingTo: "user:42",
+        messageThreadId: undefined,
+      },
+    },
+    {
+      name: "discord guild channel",
+      body: {
+        channel: "discord",
+        sessionKey: "dc:guild:777001",
+        to: "discord:channel:777001",
+        from: "discord:user:42",
+        body: "hello guild",
+        messageId: "dc-guild-1",
+        chatType: "group",
+        channelData: {
+          guildId: "guild-1",
+          channelId: "777001",
+        },
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:discord:channel:777001",
+        surface: "mux",
+        originatingChannel: "discord",
+        originatingTo: "channel:777001",
+        messageThreadId: undefined,
+      },
+    },
+    {
+      name: "discord thread",
+      body: {
+        channel: "discord",
+        sessionKey: "dc:guild:777101",
+        to: "discord:channel:777101",
+        from: "discord:user:42",
+        body: "hello thread",
+        messageId: "dc-thread-1",
+        chatType: "group",
+        channelData: {
+          guildId: "guild-1",
+          channelId: "777101",
+        },
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:discord:channel:777101",
+        surface: "mux",
+        originatingChannel: "discord",
+        originatingTo: "channel:777101",
+        messageThreadId: undefined,
+      },
+    },
+    {
+      name: "whatsapp dm",
+      body: {
+        channel: "whatsapp",
+        sessionKey: "wa:dm:15550001111",
+        to: "whatsapp:+15551230000",
+        from: "whatsapp:+15550001111",
+        body: "hello wa dm",
+        messageId: "wa-dm-1",
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:main",
+        surface: "mux",
+        originatingChannel: "whatsapp",
+        originatingTo: "whatsapp:+15551230000",
+        messageThreadId: undefined,
+      },
+    },
+    {
+      name: "whatsapp group",
+      body: {
+        channel: "whatsapp",
+        sessionKey: "wa:group:120363401234567890@g.us",
+        to: "whatsapp:120363401234567890@g.us",
+        from: "whatsapp:+15550001111",
+        body: "hello wa group",
+        messageId: "wa-group-1",
+        chatType: "group",
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+        surface: "mux",
+        originatingChannel: "whatsapp",
+        originatingTo: "whatsapp:120363401234567890@g.us",
+        messageThreadId: undefined,
+      },
+    },
+  ])("normalizes mux ingress for $name", async ({ body, expected }) => {
+    const { call } = await dispatchAuthorizedMuxInbound({ body });
+    expect(call?.ctx).toMatchObject({
+      AccountId: expected.accountId,
+      SessionKey: expected.sessionKey,
+      Surface: expected.surface,
+      OriginatingChannel: expected.originatingChannel,
+      OriginatingTo: expected.originatingTo,
+    });
+    expect(call?.ctx?.MessageThreadId).toBe(expected.messageThreadId);
+  });
+
+  test.each([
+    { label: "omitted", accountId: undefined },
+    { label: "mux", accountId: "mux" },
+    { label: "explicit non-default", accountId: "work" },
+  ])(
+    "normalizes mux ingress account variant $label onto the default business path",
+    async ({ accountId }) => {
+      const variants = [
+        {
+          body: {
+            channel: "telegram",
+            sessionKey: "tg:group:-100777:topic:2",
+            to: "telegram:-100777",
+            from: "telegram:42",
+            body: "hello topic",
+            messageId: `tg-${accountId ?? "omitted"}`,
+            chatType: "group",
+            threadId: 2,
+            ...(accountId ? { accountId } : {}),
+            channelData: {
+              chatId: "-100777",
+              telegram: {
+                rawMessage: {
+                  chat: {
+                    id: -100777,
+                    type: "supergroup",
+                    is_forum: true,
+                  },
+                  message_thread_id: 2,
+                },
+              },
+            },
+          },
+          expectedSessionKey: "agent:main:telegram:group:-100777:topic:2",
+        },
+        {
+          body: {
+            channel: "discord",
+            sessionKey: "dc:guild:777101",
+            to: "discord:channel:777101",
+            from: "discord:user:42",
+            body: "hello thread",
+            messageId: `dc-${accountId ?? "omitted"}`,
+            chatType: "group",
+            ...(accountId ? { accountId } : {}),
+            channelData: {
+              guildId: "guild-1",
+              channelId: "777101",
+            },
+          },
+          expectedSessionKey: "agent:main:discord:channel:777101",
+        },
+        {
+          body: {
+            channel: "whatsapp",
+            sessionKey: "wa:group:120363401234567890@g.us",
+            to: "whatsapp:120363401234567890@g.us",
+            from: "whatsapp:+15550001111",
+            body: "hello group",
+            messageId: `wa-${accountId ?? "omitted"}`,
+            chatType: "group",
+            ...(accountId ? { accountId } : {}),
+          },
+          expectedSessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+        },
+      ] as const;
+
+      for (const variant of variants) {
+        const { call } = await dispatchAuthorizedMuxInbound({ body: variant.body });
+        expect(call?.ctx?.AccountId).toBe("default");
+        expect(call?.ctx?.SessionKey).toBe(variant.expectedSessionKey);
+      }
+    },
+  );
+
+  test("sets ctx.MediaPaths and MediaTypes from base64 content attachment", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+    });
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "main",
+        to: "telegram:123",
+        body: "see image",
+        messageId: "mux-img-1",
+        openclawId: OPENCLAW_ID,
+        attachments: [
+          {
+            type: "image",
+            mimeType: "image/png",
+            fileName: "dot.png",
+            content: `data:image/png;base64,${ONE_PIXEL_PNG_BASE64}`,
+          },
+        ],
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    const call = mocks.dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0] as
+      | {
+          ctx?: {
+            MessageSid?: string;
+            MediaPaths?: string[];
+            MediaTypes?: string[];
+            MediaPath?: string;
+            MediaType?: string;
+          };
+        }
+      | undefined;
+    expect(call?.ctx?.MessageSid).toBe("mux-img-1");
+    expect(call?.ctx?.MediaPaths).toHaveLength(1);
+    expect(call?.ctx?.MediaTypes).toEqual(["image/png"]);
+    expect(call?.ctx?.MediaPath).toBeDefined();
+    expect(call?.ctx?.MediaType).toBe("image/png");
+    // Verify temp file was written with correct content
+    const writtenPath = call?.ctx?.MediaPaths?.[0];
+    expect(writtenPath).toBeDefined();
+    if (writtenPath && fs.existsSync(writtenPath)) {
+      const buffer = fs.readFileSync(writtenPath);
+      expect(buffer.toString("base64")).toBe(ONE_PIXEL_PNG_BASE64);
+    }
+  });
+
+  test("sets ctx.MediaPaths from attachment URL via fetchMuxFileStream", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+    });
+
+    const pdfBytes = Buffer.from("fake-pdf-content");
+    mocks.fetchMuxFileStream.mockResolvedValue(new Response(pdfBytes, { status: 200 }));
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "main",
+        to: "telegram:123",
+        body: "see doc",
+        messageId: "mux-doc-1",
+        openclawId: OPENCLAW_ID,
+        attachments: [
+          {
+            type: "application",
+            mimeType: "application/pdf",
+            fileName: "report.pdf",
+            url: "http://mux.local/v1/mux/files/telegram?fileId=abc123",
+          },
+        ],
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    expect(mocks.fetchMuxFileStream).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchMuxFileStream).toHaveBeenCalledWith({
+      cfg: expect.any(Object),
+      url: "http://mux.local/v1/mux/files/telegram?fileId=abc123",
+    });
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    const call = mocks.dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0] as
+      | {
+          ctx?: {
+            MediaPaths?: string[];
+            MediaTypes?: string[];
+            MediaPath?: string;
+            MediaType?: string;
+          };
+        }
+      | undefined;
+    expect(call?.ctx?.MediaPaths).toHaveLength(1);
+    expect(call?.ctx?.MediaTypes).toEqual(["application/pdf"]);
+    expect(call?.ctx?.MediaPath).toBeDefined();
+    expect(call?.ctx?.MediaType).toBe("application/pdf");
+  });
+
+  test("acks immediately without waiting for slow dispatch completion", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+            },
+          },
+        },
+      },
+    });
+    mocks.dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(async () => {
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 250));
+      return {
+        queuedFinal: false,
+        counts: { tool: 0, block: 0, final: 0 },
+      };
+    });
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "main",
+        to: "telegram:123",
+        body: "slow path",
+        messageId: "mux-slow-1",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+    const startedAt = Date.now();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    const elapsedMs = Date.now() - startedAt;
+    expect(res.statusCode).toBe(202);
+    expect(elapsedMs).toBeLessThan(120);
+
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 300));
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+  });
+
+  test("mux telegram draft stream omits reply_parameters when replyToMode is off", async () => {
+    const jwtFixture = createJwtFixture();
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          replyToMode: "off",
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    mocks.dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(
+      async (params?: unknown) => {
+        const typedParams = params as
+          | {
+              replyOptions?: {
+                onPartialReply?: (payload: { text?: string }) => void | Promise<void>;
+              };
+            }
+          | undefined;
+        await typedParams?.replyOptions?.onPartialReply?.({
+          text: "This draft stream payload is long enough to trigger Telegram preview sending.",
+        });
+        return {
+          queuedFinal: false,
+          counts: { tool: 0, block: 0, final: 0 },
+        };
+      },
+    );
+
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      if (url === "http://mux.local/v1/instances/register") {
+        return new Response(
+          JSON.stringify({
+            runtimeToken: "rt-token-1",
+            expiresAtMs: Date.now() + 86_400_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } },
+        );
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return new Response(JSON.stringify({ messageId: "mx-draft-off-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        to: "telegram:123",
+        from: "telegram:456",
+        body: "hello mux stream",
+        accountId: "default",
+        chatType: "direct",
+        messageId: "789",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    const sendCall = (fetchMock.mock.calls as Array<[string | URL | Request, RequestInit?]>).find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const init = sendCall?.[1];
+    expect(init).toBeDefined();
+    if (!init) {
+      throw new Error("expected fetch init for mux outbound send");
+    }
+    const body = parseJsonRequestBody(init);
+    const raw = body.raw as Record<string, unknown> | undefined;
+    const telegram = raw?.telegram as Record<string, unknown> | undefined;
+    const telegramBody = telegram?.body as Record<string, unknown> | undefined;
+    expect(telegram?.method).toBe("sendMessage");
+    expect(telegramBody?.reply_to_message_id).toBeUndefined();
+    expect(telegramBody?.reply_parameters).toBeUndefined();
+  });
+
+  test("mux telegram draft stream includes reply_parameters when replyToMode is all", async () => {
+    const jwtFixture = createJwtFixture();
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          replyToMode: "all",
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    mocks.dispatchReplyWithBufferedBlockDispatcher.mockImplementationOnce(
+      async (params?: unknown) => {
+        const typedParams = params as
+          | {
+              replyOptions?: {
+                onPartialReply?: (payload: { text?: string }) => void | Promise<void>;
+              };
+            }
+          | undefined;
+        await typedParams?.replyOptions?.onPartialReply?.({
+          text: "This draft stream payload is long enough to trigger Telegram preview sending.",
+        });
+        return {
+          queuedFinal: false,
+          counts: { tool: 0, block: 0, final: 0 },
+        };
+      },
+    );
+
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async (input) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      if (url === "http://mux.local/v1/instances/register") {
+        return new Response(
+          JSON.stringify({
+            runtimeToken: "rt-token-1",
+            expiresAtMs: Date.now() + 86_400_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } },
+        );
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return new Response(JSON.stringify({ messageId: "mx-draft-all-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        to: "telegram:123",
+        from: "telegram:456",
+        body: "hello mux stream",
+        accountId: "default",
+        chatType: "direct",
+        messageId: "789",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    const sendCall = (fetchMock.mock.calls as Array<[string | URL | Request, RequestInit?]>).find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const init = sendCall?.[1];
+    expect(init).toBeDefined();
+    if (!init) {
+      throw new Error("expected fetch init for mux outbound send");
+    }
+    const body = parseJsonRequestBody(init);
+    const raw = body.raw as Record<string, unknown> | undefined;
+    const telegram = raw?.telegram as Record<string, unknown> | undefined;
+    const telegramBody = telegram?.body as Record<string, unknown> | undefined;
+    expect(telegram?.method).toBe("sendMessage");
+    expect(telegramBody?.reply_to_message_id).toBe(789);
+    expect(telegramBody?.reply_parameters).toBeUndefined();
+  });
+
+  test("resolves text alias commands for Telegram argsMenu buttons", async () => {
+    const jwtFixture = createJwtFixture();
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      if (url === "http://mux.local/v1/instances/register") {
+        return new Response(
+          JSON.stringify({
+            runtimeToken: "rt-token-1",
+            expiresAtMs: Date.now() + 86_400_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } },
+        );
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return new Response(JSON.stringify({ messageId: "mx-reason-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      void init;
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "telegram",
+        sessionKey: "tg:dm:123",
+        to: "telegram:123",
+        from: "telegram:456",
+        body: "/reason",
+        accountId: "default",
+        chatType: "direct",
+        messageId: "789",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+    await waitForAsyncDispatch();
+
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    const sendCall = fetchMock.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const [, init] = sendCall as [string | URL | Request, RequestInit];
+    const body = parseJsonRequestBody(init);
+    expect(body).toMatchObject({
+      channel: "telegram",
+      sessionKey: "agent:main:main",
+      accountId: "default",
+      raw: {
+        telegram: {
+          method: "sendMessage",
+          body: {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "on", callback_data: "/reasoning on" },
+                  { text: "off", callback_data: "/reasoning off" },
+                ],
+                [{ text: "stream", callback_data: "/reasoning stream" }],
+              ],
+            },
+          },
+        },
+      },
+    });
+  });
+
+  test("handles telegram callback edit actions via mux raw outbound", async () => {
+    const jwtFixture = createJwtFixture();
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+              registerKey: "rk-test-1",
+              inboundUrl: "http://openclaw.local/v1/mux/inbound",
+            },
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          mux: {
+            enabled: true,
+          },
+        },
+      },
+    });
+    mocks.resolveTelegramCallbackAction.mockResolvedValue({
+      kind: "edit",
+      text: "page two",
+      buttons: [[{ text: "Prev", callback_data: "commands_page_1:main" }]],
+    });
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      if (url === "http://mux.local/v1/instances/register") {
+        return new Response(
+          JSON.stringify({
+            runtimeToken: "rt-token-1",
+            expiresAtMs: Date.now() + 86_400_000,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } },
+        );
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return new Response(JSON.stringify({ messageId: "mx-edit-1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      void init;
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        eventId: "tgcb:470",
+        event: { kind: "callback" },
+        channel: "telegram",
+        sessionKey: "tg:group:-100555",
+        to: "telegram:-100555",
+        from: "telegram:1234",
+        body: "commands_page_2:main",
+        accountId: "default",
+        chatType: "group",
+        messageId: "777",
+        channelData: {
+          chatId: "-100555",
+          telegram: {
+            callbackData: "commands_page_2:main",
+            callbackMessageId: "777",
+          },
+        },
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode, res.bodyText).toBe(202);
+    expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    expect(mocks.resolveTelegramCallbackAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: "commands_page_2:main",
+        chatId: "-100555",
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const sendCall = fetchMock.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const [url, init] = sendCall as [string | URL | Request, RequestInit];
+    expect(resolveFetchUrl(url)).toBe("http://mux.local/v1/mux/outbound/send");
+    const body = parseJsonRequestBody(init);
+    expect(body).toMatchObject({
+      channel: "telegram",
+      sessionKey: "agent:main:telegram:group:-100555",
+      accountId: "default",
+      raw: {
+        telegram: {
+          method: "editMessageText",
+          body: {
+            message_id: 777,
+            text: "page two",
+            reply_markup: {
+              inline_keyboard: [[{ text: "Prev", callback_data: "commands_page_1:main" }]],
+            },
+          },
+        },
+      },
+    });
+  });
+
+  test("forwards telegram callback actions as synthetic command text", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+            },
+          },
+        },
+      },
+    });
+    mocks.resolveTelegramCallbackAction.mockResolvedValue({
+      kind: "forward",
+      text: "/model openai/gpt-5",
+    });
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        eventId: "tgcb:471",
+        event: { kind: "callback" },
+        channel: "telegram",
+        sessionKey: "tg:group:-100555",
+        to: "telegram:-100555",
+        from: "telegram:1234",
+        body: "mdl_sel_openai:gpt-5",
+        accountId: "default",
+        chatType: "group",
+        messageId: "778",
+        channelData: {
+          chatId: "-100555",
+          routeKey: "telegram:default:chat:-100555",
+          telegram: {
+            callbackData: "mdl_sel_openai:gpt-5",
+            callbackMessageId: "778",
+          },
+        },
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+    await waitForAsyncDispatch();
+    // Telegram callback-forward also goes through the streaming dispatcher.
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    const call = mocks.dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0] as
+      | {
+          ctx?: {
+            Body?: string;
+            RawBody?: string;
+            CommandBody?: string;
+          };
+        }
+      | undefined;
+    expect(call?.ctx).toMatchObject({
+      Body: "/model openai/gpt-5",
+      RawBody: "/model openai/gpt-5",
+      CommandBody: "/model openai/gpt-5",
+    });
+  });
+
+  test("non-telegram channels keep Surface=mux and use dispatchInboundMessage", async () => {
+    const jwtFixture = createJwtFixture();
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/.well-known/jwks.json") {
+        return new Response(JSON.stringify(jwtFixture.jwks), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`unexpected fetch url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await jwtFixture.mintToken({
+      issuer: "http://mux.local",
+      subject: OPENCLAW_ID,
+      audience: "openclaw-mux-inbound",
+      scope: "mux:inbound",
+    });
+
+    mocks.loadConfig.mockReturnValue({
+      gateway: {
+        http: {
+          endpoints: {
+            mux: {
+              enabled: true,
+              baseUrl: "http://mux.local",
+            },
+          },
+        },
+      },
+    });
+
+    const req = createRequest({
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "x-openclaw-id": OPENCLAW_ID,
+      },
+      body: {
+        channel: "discord",
+        sessionKey: "dc:dm:42",
+        to: "discord:dm:42",
+        from: "discord:user:42",
+        body: "hello from discord",
+        messageId: "dc-msg-1",
+        openclawId: OPENCLAW_ID,
+      },
+    });
+    const res = createResponse();
+    expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
+    expect(res.statusCode).toBe(202);
+
+    await waitForAsyncDispatch();
+    // Discord uses the non-streaming dispatchInboundMessage path.
+    expect(mocks.dispatchInboundMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    const call = mocks.dispatchInboundMessage.mock.calls[0]?.[0] as
+      | { ctx?: { Surface?: string } }
+      | undefined;
+    expect(call?.ctx?.Surface).toBe("mux");
+  });
+
+  test("treats a mux-paired telegram DM as authorized across DM threads", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        telegram: {
+          ...cfg.channels?.telegram,
+          dmPolicy: "pairing",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:direct:999:thread:2",
+          accountId: "mux",
+          to: "telegram:999",
+          from: "telegram:999",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:dm-1",
+          chatType: "direct",
+          threadId: 2,
+          channelData: {
+            routeKey: "telegram:default:chat:999",
+            pairing: { kind: "post-pair" },
+            telegram: {
+              rawMessage: {
+                from: { id: 999, username: "owner" },
+                chat: { id: 999, type: "private" },
+                message_thread_id: 2,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+
+      expect(await readChannelAllowFromStore("telegram", process.env, "default")).toContain("999");
+
+      mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:direct:999:thread:3",
+          accountId: "mux",
+          to: "telegram:999",
+          from: "telegram:999",
+          body: "hello from another dm thread",
+          messageId: "tg-dm-followup",
+          chatType: "direct",
+          threadId: 3,
+          channelData: {
+            routeKey: "telegram:default:chat:999:topic:3",
+            telegram: {
+              rawMessage: {
+                from: { id: 999, username: "owner" },
+                chat: { id: 999, type: "private" },
+                message_thread_id: 3,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+      expect(call, JSON.stringify(mocks.warn.mock.calls)).toBeDefined();
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+
+      mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:direct:555",
+          accountId: "mux",
+          to: "telegram:555",
+          from: "telegram:555",
+          body: "unauthorized dm",
+          messageId: "tg-dm-blocked",
+          chatType: "direct",
+          channelData: {
+            routeKey: "telegram:default:chat:555",
+            telegram: {
+              rawMessage: {
+                from: { id: 555, username: "stranger" },
+                chat: { id: 555, type: "private" },
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    });
+  });
+
+  test("scopes telegram paired-sender bootstrap to the whole paired forum chat", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        telegram: {
+          ...cfg.channels?.telegram,
+          groupPolicy: "allowlist",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:2",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:42",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:forum-1",
+          chatType: "group",
+          threadId: 2,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555",
+            pairing: { kind: "post-pair" },
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 42, username: "owner" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 2,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+
+      expect(
+        await readMuxPairedSenders({
+          channel: "telegram",
+          accountId: "default",
+          routeKey: "telegram:default:chat:-100555:topic:3",
+        }),
+      ).toEqual(["42"]);
+
+      mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:3",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:42",
+          body: "hello from sibling topic",
+          messageId: "tg-forum-followup",
+          chatType: "group",
+          threadId: 3,
+          wasMentioned: true,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555:topic:3",
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 42, username: "owner" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 3,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+
+      mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:3",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:77",
+          body: "blocked sibling topic sender",
+          messageId: "tg-forum-blocked",
+          chatType: "group",
+          threadId: 3,
+          wasMentioned: true,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555:topic:3",
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 77, username: "stranger" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 3,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    });
+  });
+
+  test("keeps requireMention enforced for paired telegram forum senders", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        telegram: {
+          ...cfg.channels?.telegram,
+          groupPolicy: "allowlist",
+          groups: {
+            "-100555": {
+              requireMention: true,
+            },
+          },
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:2",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:42",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:forum-mention-1",
+          chatType: "group",
+          threadId: 2,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555",
+            pairing: { kind: "post-pair" },
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 42, username: "owner" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 2,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+
+      mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:3",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:42",
+          body: "plain forum message without mention",
+          messageId: "tg-forum-no-mention",
+          chatType: "group",
+          threadId: 3,
+          wasMentioned: false,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555:topic:3",
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 42, username: "owner" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 3,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+
+      mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:3",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:42",
+          body: "forum message with mention",
+          messageId: "tg-forum-with-mention",
+          chatType: "group",
+          threadId: 3,
+          wasMentioned: true,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555:topic:3",
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 42, username: "owner" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 3,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+      expect(call?.ctx?.WasMentioned).toBe(true);
+    });
+  });
+
+  test("preserves narrower topic allowFrom overrides after forum pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        telegram: {
+          ...cfg.channels?.telegram,
+          groupPolicy: "allowlist",
+          groups: {
+            "-100555": {
+              requireMention: false,
+              topics: {
+                "3": {
+                  allowFrom: ["77"],
+                },
+              },
+            },
+          },
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:2",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:42",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:forum-override-1",
+          chatType: "group",
+          threadId: 2,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555",
+            pairing: { kind: "post-pair" },
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 42, username: "owner" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 2,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+
+      mocks.dispatchReplyWithBufferedBlockDispatcher.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:3",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:42",
+          body: "paired sender should still be blocked by topic override",
+          messageId: "tg-forum-topic-override-blocked",
+          chatType: "group",
+          threadId: 3,
+          wasMentioned: true,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555:topic:3",
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 42, username: "owner" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 3,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    });
+  });
+
+  test("anchors legacy topic-scoped telegram route keys to the paired forum chat", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        telegram: {
+          ...cfg.channels?.telegram,
+          groupPolicy: "allowlist",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "telegram",
+          sessionKey: "agent:main:telegram:group:-100555:topic:2",
+          accountId: "mux",
+          to: "telegram:-100555",
+          from: "telegram:42",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:forum-legacy-route-1",
+          chatType: "group",
+          threadId: 2,
+          channelData: {
+            routeKey: "telegram:default:chat:-100555:topic:2",
+            pairing: { kind: "post-pair" },
+            chatId: "-100555",
+            telegram: {
+              rawMessage: {
+                from: { id: 42, username: "owner" },
+                chat: { id: -100555, type: "supergroup", is_forum: true },
+                message_thread_id: 2,
+              },
+              rawUpdate: {},
+            },
+          },
+        },
+      });
+
+      expect(
+        await readMuxPairedSenders({
+          channel: "telegram",
+          accountId: "default",
+          routeKey: "telegram:default:chat:-100555:topic:3",
+        }),
+      ).toEqual(["42"]);
+    });
+  });
+
+  test("treats a mux-paired discord DM as authorized without re-pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        discord: {
+          ...cfg.channels?.discord,
+          dmPolicy: "pairing",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:direct:4242",
+          accountId: "mux",
+          to: "discord:dm:4242",
+          from: "discord:4242",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:discord-dm-1",
+          chatType: "direct",
+          channelData: {
+            routeKey: "discord:default:dm:user:4242",
+            pairing: { kind: "post-pair" },
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+
+      expect(await readChannelAllowFromStore("discord", process.env, "default")).toContain("4242");
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:direct:4242",
+          accountId: "mux",
+          to: "discord:dm:4242",
+          from: "discord:4242",
+          body: "hello from paired discord dm",
+          messageId: "dc-dm-followup",
+          chatType: "direct",
+          channelData: {
+            routeKey: "discord:default:dm:user:4242",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:direct:9999",
+          accountId: "mux",
+          to: "discord:dm:9999",
+          from: "discord:9999",
+          body: "unauthorized discord dm",
+          messageId: "dc-dm-blocked",
+          chatType: "direct",
+          channelData: {
+            routeKey: "discord:default:dm:user:9999",
+            discord: {
+              rawMessage: {
+                author: { id: "9999", username: "stranger", discriminator: "0002" },
+              },
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("treats a mux-paired discord guild as allowlisted while keeping mention gating", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        discord: {
+          ...cfg.channels?.discord,
+          groupPolicy: "allowlist",
+          guilds: {
+            "guild-1": {
+              requireMention: true,
+            },
+          },
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:discord-guild-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "discord:default:guild:guild-1",
+            pairing: { kind: "post-pair" },
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "guild message without mention",
+          messageId: "dc-guild-no-mention",
+          chatType: "group",
+          wasMentioned: false,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777101",
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "guild message with mention",
+          messageId: "dc-guild-with-mention",
+          chatType: "group",
+          wasMentioned: true,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777101",
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+      expect(call, JSON.stringify(mocks.warn.mock.calls)).toBeDefined();
+      expect(call?.ctx?.CommandAuthorized).toBe(false);
+      expect(call?.ctx?.WasMentioned).toBe(true);
+    });
+  });
+
+  test("scopes discord paired-sender bootstrap to the whole paired guild for control commands", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        discord: {
+          ...cfg.channels?.discord,
+          groupPolicy: "allowlist",
+          guilds: {
+            "guild-1": {
+              requireMention: true,
+            },
+          },
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:discord-cmd-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777101",
+            pairing: { kind: "post-pair" },
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+
+      expect(
+        await readMuxPairedSenders({
+          channel: "discord",
+          accountId: "default",
+          routeKey: "discord:default:guild:guild-1:channel:777001:thread:777102",
+        }),
+      ).toEqual(["4242"]);
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777102",
+          accountId: "mux",
+          to: "discord:channel:777102",
+          from: "discord:4242",
+          body: "/model openai/gpt-5",
+          messageId: "dc-guild-command",
+          chatType: "group",
+          wasMentioned: false,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777102",
+            guildId: "guild-1",
+            channelId: "777102",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+              },
+            },
+          },
+        },
+      });
+      expect(call, JSON.stringify(mocks.warn.mock.calls)).toBeDefined();
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+      expect(call?.ctx?.WasMentioned).toBe(true);
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777102",
+          accountId: "mux",
+          to: "discord:channel:777102",
+          from: "discord:5555",
+          body: "/model openai/gpt-5",
+          messageId: "dc-guild-command-blocked",
+          chatType: "group",
+          wasMentioned: false,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777102",
+            guildId: "guild-1",
+            channelId: "777102",
+            discord: {
+              rawMessage: {
+                author: { id: "5555", username: "stranger", discriminator: "0002" },
+              },
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("preserves narrower discord channel user restrictions after guild pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        discord: {
+          ...cfg.channels?.discord,
+          groupPolicy: "allowlist",
+          guilds: {
+            "guild-1": {
+              requireMention: false,
+              channels: {
+                "777001": {
+                  users: ["77"],
+                },
+              },
+            },
+          },
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777101",
+          accountId: "mux",
+          to: "discord:channel:777101",
+          from: "discord:4242",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:discord-restrict-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777101",
+            pairing: { kind: "post-pair" },
+            guildId: "guild-1",
+            channelId: "777101",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+                member: { roles: [] },
+              },
+            },
+          },
+        },
+      });
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "discord",
+          sessionKey: "agent:main:discord:channel:777102",
+          accountId: "mux",
+          to: "discord:channel:777102",
+          from: "discord:4242",
+          body: "paired sender should still be blocked by channel users",
+          messageId: "dc-guild-users-blocked",
+          chatType: "group",
+          wasMentioned: true,
+          channelData: {
+            routeKey: "discord:default:guild:guild-1:channel:777001:thread:777102",
+            guildId: "guild-1",
+            channelId: "777102",
+            discord: {
+              rawMessage: {
+                author: { id: "4242", username: "owner", discriminator: "0001" },
+                member: { roles: [] },
+              },
+            },
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("treats a mux-paired whatsapp DM as authorized without re-pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        whatsapp: {
+          ...cfg.channels?.whatsapp,
+          dmPolicy: "pairing",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:direct:+15550001111",
+          accountId: "mux",
+          to: "whatsapp:+15551230000",
+          from: "whatsapp:+15550001111",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:wa-dm-1",
+          chatType: "direct",
+          channelData: {
+            routeKey: "whatsapp:default:chat:+15550001111",
+            pairing: { kind: "post-pair" },
+          },
+        },
+      });
+
+      expect(await readChannelAllowFromStore("whatsapp", process.env, "default")).toContain(
+        "+15550001111",
+      );
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:main",
+          accountId: "mux",
+          to: "whatsapp:+15551230000",
+          from: "whatsapp:+15550001111",
+          body: "hello from paired whatsapp dm",
+          messageId: "wa-dm-followup",
+          chatType: "direct",
+          channelData: {
+            routeKey: "whatsapp:default:chat:+15550001111",
+          },
+        },
+      });
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:main",
+          accountId: "mux",
+          to: "whatsapp:+15551230000",
+          from: "whatsapp:+15559990000",
+          body: "unauthorized whatsapp dm",
+          messageId: "wa-dm-blocked",
+          chatType: "direct",
+          channelData: {
+            routeKey: "whatsapp:default:chat:+15559990000",
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("treats a mux-paired whatsapp group as allowlisted while keeping sender gating", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        whatsapp: {
+          ...cfg.channels?.whatsapp,
+          groupPolicy: "allowlist",
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15550001111",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:wa-group-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+            pairing: { kind: "post-pair" },
+          },
+        },
+      });
+
+      expect(
+        await readMuxPairedSenders({
+          channel: "whatsapp",
+          accountId: "default",
+          routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+        }),
+      ).toEqual(["+15550001111"]);
+
+      mocks.dispatchInboundMessage.mockClear();
+      const { call } = await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15550001111",
+          body: "/model openai/gpt-5",
+          messageId: "wa-group-followup",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+          },
+        },
+      });
+      expect(call, JSON.stringify(mocks.warn.mock.calls)).toBeDefined();
+      expect(call?.ctx?.CommandAuthorized).toBe(true);
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15559990000",
+          body: "blocked whatsapp group sender",
+          messageId: "wa-group-blocked",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test("preserves explicit whatsapp groupAllowFrom after group pairing", async () => {
+    await withTempStateDir(async () => {
+      const cfg = createMuxInboundConfig();
+      cfg.channels = {
+        ...cfg.channels,
+        whatsapp: {
+          ...cfg.channels?.whatsapp,
+          groupPolicy: "allowlist",
+          groupAllowFrom: ["+15550002222"],
+        },
+      };
+
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15550001111",
+          body: "synthetic pair bootstrap",
+          messageId: "synth:pair:wa-group-override-1",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+            pairing: { kind: "post-pair" },
+          },
+        },
+      });
+
+      mocks.dispatchInboundMessage.mockClear();
+      await dispatchAuthorizedMuxInbound({
+        cfg,
+        body: {
+          channel: "whatsapp",
+          sessionKey: "agent:main:whatsapp:group:120363401234567890@g.us",
+          accountId: "mux",
+          to: "whatsapp:120363401234567890@g.us",
+          from: "whatsapp:+15550001111",
+          body: "/model openai/gpt-5",
+          messageId: "wa-group-override-blocked",
+          chatType: "group",
+          channelData: {
+            routeKey: "whatsapp:default:chat:120363401234567890@g.us",
+          },
+        },
+      });
+      expect(mocks.dispatchInboundMessage).not.toHaveBeenCalled();
+    });
+  });
+});

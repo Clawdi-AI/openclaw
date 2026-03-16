@@ -6,31 +6,60 @@ import {
   parseTelegramReplyToMessageId,
   parseTelegramThreadId,
 } from "../../../telegram/outbound-params.js";
-import { sendMessageTelegram } from "../../../telegram/send.js";
+import { sendMessageTelegram, type MuxTransportOpts } from "../../../telegram/send.js";
 import type { ChannelOutboundAdapter } from "../types.js";
 import { resolvePayloadMediaUrls, sendPayloadMediaSequence } from "./direct-text-media.js";
+import { isMuxEnabled } from "./mux.js";
 
 type TelegramSendFn = typeof sendMessageTelegram;
-type TelegramSendOpts = Parameters<TelegramSendFn>[2];
+type TelegramSendOpts = NonNullable<Parameters<TelegramSendFn>[2]>;
+
+function resolveMuxOpts(params: {
+  cfg: NonNullable<TelegramSendOpts["cfg"]>;
+  accountId?: string | null;
+  sessionKey?: string | null;
+}): MuxTransportOpts | undefined {
+  if (
+    !isMuxEnabled({
+      cfg: params.cfg,
+      channel: "telegram",
+      accountId: params.accountId ?? undefined,
+    })
+  ) {
+    return undefined;
+  }
+  return {
+    cfg: params.cfg,
+    sessionKey: params.sessionKey ?? "",
+    accountId: params.accountId ?? undefined,
+  };
+}
 
 function resolveTelegramSendContext(params: {
-  cfg: NonNullable<TelegramSendOpts>["cfg"];
+  cfg: NonNullable<TelegramSendOpts["cfg"]>;
   deps?: OutboundSendDeps;
   accountId?: string | null;
   replyToId?: string | null;
   threadId?: string | number | null;
+  sessionKey?: string | null;
 }): {
   send: TelegramSendFn;
   baseOpts: {
-    cfg: NonNullable<TelegramSendOpts>["cfg"];
+    cfg: NonNullable<TelegramSendOpts["cfg"]>;
     verbose: false;
     textMode: "html";
     messageThreadId?: number;
     replyToMessageId?: number;
     accountId?: string;
+    mux?: MuxTransportOpts;
   };
 } {
   const send = params.deps?.sendTelegram ?? sendMessageTelegram;
+  const mux = resolveMuxOpts({
+    cfg: params.cfg,
+    accountId: params.accountId,
+    sessionKey: params.sessionKey,
+  });
   return {
     send,
     baseOpts: {
@@ -40,6 +69,7 @@ function resolveTelegramSendContext(params: {
       messageThreadId: parseTelegramThreadId(params.threadId),
       replyToMessageId: parseTelegramReplyToMessageId(params.replyToId),
       accountId: params.accountId ?? undefined,
+      mux,
     },
   };
 }
@@ -88,13 +118,14 @@ export const telegramOutbound: ChannelOutboundAdapter = {
   chunker: markdownToTelegramHtmlChunks,
   chunkerMode: "markdown",
   textChunkLimit: 4000,
-  sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId }) => {
+  sendText: async ({ cfg, to, text, accountId, deps, replyToId, threadId, sessionKey }) => {
     const { send, baseOpts } = resolveTelegramSendContext({
       cfg,
       deps,
       accountId,
       replyToId,
       threadId,
+      sessionKey,
     });
     const result = await send(to, text, {
       ...baseOpts,
@@ -111,6 +142,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     deps,
     replyToId,
     threadId,
+    sessionKey,
   }) => {
     const { send, baseOpts } = resolveTelegramSendContext({
       cfg,
@@ -118,6 +150,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
       accountId,
       replyToId,
       threadId,
+      sessionKey,
     });
     const result = await send(to, text, {
       ...baseOpts,
@@ -135,6 +168,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
     deps,
     replyToId,
     threadId,
+    sessionKey,
   }) => {
     const { send, baseOpts } = resolveTelegramSendContext({
       cfg,
@@ -142,6 +176,7 @@ export const telegramOutbound: ChannelOutboundAdapter = {
       accountId,
       replyToId,
       threadId,
+      sessionKey,
     });
     const result = await sendTelegramPayloadMessages({
       send,

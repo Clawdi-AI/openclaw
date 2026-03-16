@@ -10,6 +10,7 @@
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolveEffectiveMessagesConfig } from "../../agents/identity.js";
 import { normalizeChannelId } from "../../channels/plugins/index.js";
+import { normalizeChatChannelId } from "../../channels/registry.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { buildOutboundSessionContext } from "../../infra/outbound/session-context.js";
 import { parseSlackBlocksInput } from "../../slack/blocks-input.js";
@@ -27,6 +28,10 @@ let deliverRuntimePromise: Promise<
 function loadDeliverRuntime() {
   deliverRuntimePromise ??= import("../../infra/outbound/deliver-runtime.js");
   return deliverRuntimePromise;
+}
+
+function resolveRouteReplyChannelId(channel: OriginatingChannelType): string | null {
+  return normalizeChannelId(channel) ?? normalizeChatChannelId(channel);
 }
 
 export type RouteReplyParams = {
@@ -139,7 +144,7 @@ export async function routeReply(params: RouteReplyParams): Promise<RouteReplyRe
     };
   }
 
-  const channelId = normalizeChannelId(channel) ?? null;
+  const channelId = resolveRouteReplyChannelId(channel);
   if (!channelId) {
     return { ok: false, error: `Unknown channel: ${String(channel)}` };
   }
@@ -207,5 +212,5 @@ export function isRoutableChannel(
   if (!channel || channel === INTERNAL_MESSAGE_CHANNEL) {
     return false;
   }
-  return normalizeChannelId(channel) !== null;
+  return resolveRouteReplyChannelId(channel) !== null;
 }

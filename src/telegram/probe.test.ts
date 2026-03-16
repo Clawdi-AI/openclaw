@@ -193,6 +193,26 @@ describe("probeTelegram retry logic", () => {
     });
   });
 
+  it("uses TELEGRAM_BOT_API_BASE_URL for probe requests", async () => {
+    const fetchMock = installFetchMock();
+    vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "https://tg.example.com/custom/");
+    mockGetMeSuccess(fetchMock);
+    mockGetWebhookInfoSuccess(fetchMock);
+
+    await probeTelegram(token, timeoutMs);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "https://tg.example.com/custom/bottest-token/getMe",
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://tg.example.com/custom/bottest-token/getWebhookInfo",
+      expect.any(Object),
+    );
+  });
+
   it("reuses probe fetcher across repeated probes for the same account transport settings", async () => {
     const fetchMock = installFetchMock();
     vi.stubEnv("VITEST", "");

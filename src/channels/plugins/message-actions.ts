@@ -1,7 +1,15 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { OpenClawConfig } from "../../config/config.js";
+import { discordMessageActions } from "./actions/discord.js";
+import { signalMessageActions } from "./actions/signal.js";
+import { telegramMessageActions } from "./actions/telegram.js";
 import { getChannelPlugin, listChannelPlugins } from "./index.js";
-import type { ChannelMessageActionContext, ChannelMessageActionName } from "./types.js";
+import { createSlackActions } from "./slack.actions.js";
+import type {
+  ChannelMessageActionAdapter,
+  ChannelMessageActionContext,
+  ChannelMessageActionName,
+} from "./types.js";
 
 const trustedRequesterRequiredByChannel: Readonly<
   Partial<Record<string, ReadonlySet<ChannelMessageActionName>>>
@@ -11,6 +19,37 @@ const trustedRequesterRequiredByChannel: Readonly<
 
 type ChannelActions = NonNullable<NonNullable<ReturnType<typeof getChannelPlugin>>["actions"]>;
 
+const BUILTIN_MESSAGE_ACTION_ADAPTERS: ReadonlyArray<
+  readonly [string, ChannelMessageActionAdapter]
+> = [
+  ["discord", discordMessageActions],
+  ["telegram", telegramMessageActions],
+  ["signal", signalMessageActions],
+  ["slack", createSlackActions("slack")],
+];
+
+function resolveChannelMessageActionAdapters(): Map<string, ChannelActions> {
+  const fromRegistry = listChannelPlugins()
+    .map((plugin) => (plugin.actions ? ([plugin.id, plugin.actions] as const) : null))
+    .filter((entry): entry is readonly [string, ChannelActions] => Boolean(entry));
+
+  // Fall back to built-in action adapters to keep message tool discovery and dispatch working
+  // when the runtime plugin registry is not populated yet.
+  return new Map<string, ChannelActions>([...BUILTIN_MESSAGE_ACTION_ADAPTERS, ...fromRegistry]);
+}
+
+export function getChannelMessageActionsAdapter(channel?: string): ChannelActions | undefined {
+  const trimmed = channel?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return resolveChannelMessageActionAdapters().get(trimmed);
+}
+
+export function listChannelMessageActionAdapters(): Array<readonly [string, ChannelActions]> {
+  return Array.from(resolveChannelMessageActionAdapters().entries());
+}
+
 function requiresTrustedRequesterSender(ctx: ChannelMessageActionContext): boolean {
   const actions = trustedRequesterRequiredByChannel[ctx.channel];
   return Boolean(actions?.has(ctx.action) && ctx.toolContext);
@@ -18,8 +57,8 @@ function requiresTrustedRequesterSender(ctx: ChannelMessageActionContext): boole
 
 export function listChannelMessageActions(cfg: OpenClawConfig): ChannelMessageActionName[] {
   const actions = new Set<ChannelMessageActionName>(["send", "broadcast"]);
-  for (const plugin of listChannelPlugins()) {
-    const list = plugin.actions?.listActions?.({ cfg });
+  for (const [, adapter] of listChannelMessageActionAdapters()) {
+    const list = adapter.listActions?.({ cfg });
     if (!list) {
       continue;
     }
@@ -62,8 +101,8 @@ function supportsMessageFeature(
   cfg: OpenClawConfig,
   check: (actions: ChannelActions) => boolean,
 ): boolean {
-  for (const plugin of listChannelPlugins()) {
-    if (plugin.actions && check(plugin.actions)) {
+  for (const [, adapter] of listChannelMessageActionAdapters()) {
+    if (check(adapter)) {
       return true;
     }
   }
@@ -77,11 +116,8 @@ function supportsMessageFeatureForChannel(
   },
   check: (actions: ChannelActions) => boolean,
 ): boolean {
-  if (!params.channel) {
-    return false;
-  }
-  const plugin = getChannelPlugin(params.channel as Parameters<typeof getChannelPlugin>[0]);
-  return plugin?.actions ? check(plugin.actions) : false;
+  const adapter = getChannelMessageActionsAdapter(params.channel);
+  return adapter ? check(adapter) : false;
 }
 
 export async function dispatchChannelMessageAction(
@@ -92,12 +128,12 @@ export async function dispatchChannelMessageAction(
       `Trusted sender identity is required for ${ctx.channel}:${ctx.action} in tool-driven contexts.`,
     );
   }
-  const plugin = getChannelPlugin(ctx.channel);
-  if (!plugin?.actions?.handleAction) {
+  const adapter = getChannelMessageActionsAdapter(ctx.channel);
+  if (!adapter?.handleAction) {
     return null;
   }
-  if (plugin.actions.supportsAction && !plugin.actions.supportsAction({ action: ctx.action })) {
+  if (adapter.supportsAction && !adapter.supportsAction({ action: ctx.action })) {
     return null;
   }
-  return await plugin.actions.handleAction(ctx);
+  return await adapter.handleAction(ctx);
 }

@@ -1,10 +1,9 @@
 import type { BaseProbeResult } from "../channels/plugins/types.js";
 import type { TelegramNetworkConfig } from "../config/types.telegram.js";
 import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+import { resolveTelegramBotApiBaseUrl } from "./api-base-url.js";
 import { resolveTelegramFetch } from "./fetch.js";
 import { makeProxyFetch } from "./proxy.js";
-
-const TELEGRAM_API_BASE = "https://api.telegram.org";
 
 export type TelegramProbe = BaseProbeResult & {
   status?: number | null;
@@ -100,7 +99,7 @@ export async function probeTelegram(
   const deadlineMs = started + timeoutBudgetMs;
   const options = resolveProbeOptions(proxyOrOptions);
   const fetcher = resolveProbeFetcher(token, options);
-  const base = `${TELEGRAM_API_BASE}/bot${token}`;
+  const base = `${resolveTelegramBotApiBaseUrl()}/bot${token}`;
   const retryDelayMs = Math.max(50, Math.min(1000, Math.floor(timeoutBudgetMs / 5)));
   const resolveRemainingBudgetMs = () => Math.max(0, deadlineMs - Date.now());
 

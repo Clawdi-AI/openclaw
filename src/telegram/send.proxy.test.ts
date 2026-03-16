@@ -141,4 +141,21 @@ describe("telegram proxy client", () => {
 
     expectProxyClient(fetchImpl);
   });
+
+  it("passes TELEGRAM_BOT_API_BASE_URL through to the Bot client", async () => {
+    const { fetchImpl } = prepareProxyFetch();
+    vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "https://tg.example.com/custom/");
+
+    await sendMessageTelegram("123", "hi", { token: "tok", accountId: "foo" });
+
+    expect(botCtorSpy).toHaveBeenCalledWith(
+      "tok",
+      expect.objectContaining({
+        client: expect.objectContaining({
+          fetch: fetchImpl,
+          apiRoot: "https://tg.example.com/custom",
+        }),
+      }),
+    );
+  });
 });

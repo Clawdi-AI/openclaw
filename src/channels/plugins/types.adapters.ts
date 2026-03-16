@@ -96,6 +96,7 @@ export type ChannelOutboundContext = {
   replyToId?: string | null;
   threadId?: string | number | null;
   accountId?: string | null;
+  sessionKey?: string | null;
   identity?: OutboundIdentity;
   deps?: OutboundSendDeps;
   silent?: boolean;

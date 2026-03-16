@@ -135,6 +135,8 @@ type ChannelHandlerParams = {
   gifPlayback?: boolean;
   silent?: boolean;
   mediaLocalRoots?: readonly string[];
+  session?: OutboundSessionContext;
+  mirror?: DeliveryMirror;
 };
 
 // Channel docking: outbound delivery delegates to plugin.outbound adapters.
@@ -209,6 +211,7 @@ function createChannelOutboundContextBase(
     cfg: params.cfg,
     to: params.to,
     accountId: params.accountId,
+    sessionKey: params.session?.key ?? params.mirror?.sessionKey,
     replyToId: params.replyToId,
     threadId: params.threadId,
     identity: params.identity,
@@ -545,6 +548,8 @@ async function deliverOutboundPayloadsCore(
     gifPlayback: params.gifPlayback,
     silent: params.silent,
     mediaLocalRoots,
+    session: params.session,
+    mirror: params.mirror,
   });
   const configuredTextLimit = handler.chunker
     ? resolveTextChunkLimit(cfg, channel, accountId, {

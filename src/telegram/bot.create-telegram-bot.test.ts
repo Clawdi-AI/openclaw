@@ -110,6 +110,20 @@ describe("createTelegramBot", () => {
       }),
     );
   });
+  it("passes TELEGRAM_BOT_API_BASE_URL through to the Bot client", () => {
+    vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "https://tg.example.com/custom/");
+    try {
+      createTelegramBot({ token: "tok" });
+      expect(botCtorSpy).toHaveBeenCalledWith(
+        "tok",
+        expect.objectContaining({
+          client: expect.objectContaining({ apiRoot: "https://tg.example.com/custom" }),
+        }),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it("sequentializes updates by chat and thread", () => {
     createTelegramBot({ token: "tok" });
     expect(sequentializeSpy).toHaveBeenCalledTimes(1);

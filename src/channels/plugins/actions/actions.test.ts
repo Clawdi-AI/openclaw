@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
+import { setActivePluginRegistry } from "../../../plugins/runtime.js";
+import { createTestRegistry } from "../../../test-utils/channel-plugins.js";
 
 const handleDiscordAction = vi.fn(async (..._args: unknown[]) => ({ details: { ok: true } }));
 const handleTelegramAction = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
@@ -25,6 +27,7 @@ vi.mock("../../../agents/tools/slack-actions.js", () => ({
 }));
 
 const { discordMessageActions } = await import("./discord.js");
+const { dispatchChannelMessageAction } = await import("../message-actions.js");
 const { handleDiscordMessageAction } = await import("./discord/handle-action.js");
 const { telegramMessageActions } = await import("./telegram.js");
 const { signalMessageActions } = await import("./signal.js");
@@ -193,6 +196,7 @@ async function expectSlackSendRejected(params: Record<string, unknown>, error: R
 
 beforeEach(() => {
   vi.clearAllMocks();
+  setActivePluginRegistry(createTestRegistry([]));
 });
 
 describe("discord message actions", () => {
@@ -534,6 +538,47 @@ describe("handleDiscordMessageAction", () => {
 });
 
 describe("telegramMessageActions", () => {
+  it("dispatches via built-in telegram actions when the registry is empty", async () => {
+    const result = await dispatchChannelMessageAction({
+      channel: "telegram",
+      action: "react",
+      cfg: {
+        channels: {
+          telegram: {
+            accounts: {
+              mux: {
+                mux: {
+                  enabled: true,
+                  baseUrl: "http://127.0.0.1:18788",
+                  authToken: "test-token",
+                },
+              },
+            },
+          },
+        },
+      } as OpenClawConfig,
+      params: {
+        chatId: "123",
+        messageId: 456,
+        emoji: "✅",
+      },
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(handleTelegramAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "react",
+        chatId: "123",
+        messageId: "456",
+        emoji: "✅",
+      }),
+      expect.objectContaining({
+        channels: expect.any(Object),
+      }),
+      { mediaLocalRoots: undefined },
+    );
+  });
+
   it("lists poll when telegram is configured", () => {
     const actions = telegramMessageActions.listActions?.({ cfg: telegramCfg() }) ?? [];
 
@@ -681,6 +726,36 @@ describe("telegramMessageActions", () => {
         }),
       },
       {
+        name: "send forwards __sessionKey for mux-aware actions",
+        action: "send" as const,
+        params: {
+          to: "789",
+          message: "Mux aware send",
+          __sessionKey: "agent:main:main",
+        },
+        expectedPayload: expect.objectContaining({
+          action: "sendMessage",
+          to: "789",
+          content: "Mux aware send",
+          sessionKey: "agent:main:main",
+        }),
+      },
+      {
+        name: "send falls back to context sessionKey for mux-aware actions",
+        action: "send" as const,
+        params: {
+          to: "790",
+          message: "Mux context send",
+        },
+        contextSessionKey: "agent:main:main",
+        expectedPayload: expect.objectContaining({
+          action: "sendMessage",
+          to: "790",
+          content: "Mux context send",
+          sessionKey: "agent:main:main",
+        }),
+      },
+      {
         name: "edit maps to editMessage",
         action: "edit" as const,
         params: {
@@ -797,6 +872,22 @@ describe("telegramMessageActions", () => {
 
     for (const testCase of cases) {
       handleTelegramAction.mockClear();
+      if (testCase.contextSessionKey) {
+        const cfg = telegramCfg();
+        await telegramMessageActions.handleAction?.({
+          channel: "telegram",
+          action: testCase.action,
+          params: testCase.params,
+          cfg,
+          sessionKey: testCase.contextSessionKey,
+        });
+        expect(handleTelegramAction, testCase.name).toHaveBeenCalledWith(
+          testCase.expectedPayload,
+          cfg,
+          expect.objectContaining({ mediaLocalRoots: undefined }),
+        );
+        continue;
+      }
       const { cfg } = await runTelegramAction(testCase.action, testCase.params);
       expect(handleTelegramAction, testCase.name).toHaveBeenCalledWith(
         testCase.expectedPayload,

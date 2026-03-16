@@ -54,4 +54,19 @@ describe("fetchTelegramChatId", () => {
       undefined,
     );
   });
+
+  it("uses TELEGRAM_BOT_API_BASE_URL for getChat lookups", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, result: { id: 12345 } }),
+    }));
+    vi.stubEnv("TELEGRAM_BOT_API_BASE_URL", "https://tg.example.com/custom/");
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchTelegramChatId({ token: "abc", chatId: "@user" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://tg.example.com/custom/botabc/getChat?chat_id=%40user",
+      undefined,
+    );
+  });
 });
