@@ -33,25 +33,10 @@ for envfile in "${STACK_DIR}/.env.local" "${REPO_ROOT}/.env.local"; do
   fi
 done
 
-# Resolve TELEGRAM_BOT_TOKEN from mux-server container if not in env.
-if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  TELEGRAM_BOT_TOKEN="$(docker exec mux-server-local-e2e printenv TELEGRAM_BOT_TOKEN 2>/dev/null)" || true
-fi
-if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  echo "[e2e] FATAL: TELEGRAM_BOT_TOKEN not set and not found in mux-server container" >&2
-  exit 1
-fi
-
-# Derive bot chat ID from token (the part before ':' is the bot user ID,
-# which is also the private chat ID for DMs with the bot).
-: "${TELEGRAM_E2E_BOT_CHAT_ID:=${TELEGRAM_BOT_TOKEN%%:*}}"
-
 if [[ -z "${MODEL_PRIMARY:-}" ]]; then
   echo "[e2e] FATAL: MODEL_PRIMARY not set — LLM is required for full round-trip tests" >&2
   exit 1
 fi
-
-BOT_CHAT_ID="${TELEGRAM_E2E_BOT_CHAT_ID}"
 
 # Ensure tgcli knows about the bot chat (first-run requires sync).
 echo "[e2e] syncing tgcli chat list..."
@@ -67,19 +52,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---------- ensure stack is running ----------
+# ---------- refresh stack ----------
 
-if ! docker ps --format '{{.Names}}' | grep -q 'openclaw-local-e2e'; then
-  echo "[e2e] openclaw-local-e2e not running — calling up.sh" >&2
-  "${SCRIPT_DIR}/up.sh"
-fi
-
-if ! docker ps --format '{{.Names}}' | grep -q 'mux-server-local-e2e'; then
-  echo "[e2e] mux-server-local-e2e not running — calling up.sh" >&2
-  "${SCRIPT_DIR}/up.sh"
-fi
+# Always refresh the bind-mounted dev stack before a live run. Reusing an old
+# process after rebuilding dist can leave hashed chunk references stale in
+# memory, which produces false tool-runtime failures.
+echo "[e2e] refreshing local stack via up.sh..."
+"${SCRIPT_DIR}/up.sh"
 
 echo "[e2e] stack is running"
+
+# Resolve TELEGRAM_BOT_TOKEN from mux-server container if not in env.
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  TELEGRAM_BOT_TOKEN="$(docker exec mux-server-local-e2e printenv TELEGRAM_BOT_TOKEN 2>/dev/null)" || true
+fi
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  echo "[e2e] FATAL: TELEGRAM_BOT_TOKEN not set and not found in mux-server container" >&2
+  exit 1
+fi
+
+# Derive bot chat ID from token (the part before ':' is the bot user ID,
+# which is also the private chat ID for DMs with the bot).
+: "${TELEGRAM_E2E_BOT_CHAT_ID:=${TELEGRAM_BOT_TOKEN%%:*}}"
+
+BOT_CHAT_ID="${TELEGRAM_E2E_BOT_CHAT_ID}"
 
 # ---------- mux-server health check ----------
 
@@ -339,8 +335,12 @@ fi
 
 if elapsed="$(wait_for_outbound_method "sendMessage" "${LLM_TIMEOUT}")"; then
   pass "multi-action outbound sendMessage — AI text reply in ${elapsed}s"
+elif elapsed="$(wait_for_outbound_fields "${LLM_TIMEOUT}" '"method":"sendDocument"' 'CONFIRMED')"; then
+  pass "multi-action outbound confirmation via sendDocument caption in ${elapsed}s"
+elif elapsed="$(wait_for_outbound_fields "${LLM_TIMEOUT}" '"method":"sendPhoto"' 'CONFIRMED')"; then
+  pass "multi-action outbound confirmation via sendPhoto caption in ${elapsed}s"
 else
-  fail "multi-action outbound sendMessage — no sendMessage within ${LLM_TIMEOUT}s"
+  fail "multi-action outbound confirmation — no sendMessage or CONFIRMED media caption within ${LLM_TIMEOUT}s"
 fi
 
 # The AI sends a document via mediaUrl — this goes through sendDocument or sendPhoto.
