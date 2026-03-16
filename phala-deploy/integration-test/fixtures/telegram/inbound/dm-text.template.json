@@ -1,0 +1,23 @@
+{
+  "update_id": 700001,
+  "message": {
+    "message_id": 900001,
+    "date": 1700000000,
+    "text": "hello from telegram fixture",
+    "from": {
+      "id": 424242,
+      "is_bot": false,
+      "first_name": "Mux",
+      "last_name": "User",
+      "username": "mux_user",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": 424242,
+      "first_name": "Mux",
+      "last_name": "User",
+      "username": "mux_user",
+      "type": "private"
+    }
+  }
+}
