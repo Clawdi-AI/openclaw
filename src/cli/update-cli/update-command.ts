@@ -13,6 +13,11 @@ import {
 import { formatConfigIssueLines } from "../../config/issue-format.js";
 import { resolveGatewayService } from "../../daemon/service.js";
 import {
+  isSelfUpdateDisabled,
+  resolveSelfUpdateDisabledReason,
+  type SelfUpdatePolicy,
+} from "../../infra/self-update-policy.js";
+import {
   channelToNpmTag,
   DEFAULT_GIT_CHANNEL,
   DEFAULT_PACKAGE_CHANNEL,
@@ -306,7 +311,19 @@ async function runPackageInstallUpdate(params: {
   timeoutMs: number;
   startedAt: number;
   progress: ReturnType<typeof createUpdateProgress>["progress"];
+  selfUpdatePolicy?: SelfUpdatePolicy;
 }): Promise<UpdateRunResult> {
+  if (isSelfUpdateDisabled(params.selfUpdatePolicy)) {
+    return {
+      status: "skipped",
+      mode: "unknown",
+      root: params.root,
+      reason: resolveSelfUpdateDisabledReason(params.selfUpdatePolicy),
+      steps: [],
+      durationMs: Date.now() - params.startedAt,
+    };
+  }
+
   const manager = await resolveGlobalManager({
     root: params.root,
     installKind: params.installKind,
@@ -383,7 +400,19 @@ async function runGitUpdate(params: {
   showProgress: boolean;
   opts: UpdateCommandOptions;
   stop: () => void;
+  selfUpdatePolicy?: SelfUpdatePolicy;
 }): Promise<UpdateRunResult> {
+  if (params.switchToGit && isSelfUpdateDisabled(params.selfUpdatePolicy)) {
+    return {
+      status: "skipped",
+      mode: "unknown",
+      root: params.root,
+      reason: resolveSelfUpdateDisabledReason(params.selfUpdatePolicy),
+      steps: [],
+      durationMs: Date.now() - params.startedAt,
+    };
+  }
+
   const updateRoot = params.switchToGit ? resolveGitInstallDir() : params.root;
   const effectiveTimeout = params.timeoutMs ?? 20 * 60_000;
 
@@ -417,6 +446,7 @@ async function runGitUpdate(params: {
     progress: params.progress,
     channel: params.channel,
     tag: params.tag,
+    selfUpdatePolicy: params.selfUpdatePolicy,
   });
   const steps = [...(cloneStep ? [cloneStep] : []), ...updateResult.steps];
 
@@ -898,6 +928,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
           timeoutMs: timeoutMs ?? 20 * 60_000,
           startedAt,
           progress,
+          selfUpdatePolicy: configSnapshot.valid
+            ? configSnapshot.config.update?.selfUpdate
+            : undefined,
         })
       : await runGitUpdate({
           root,
@@ -911,6 +944,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
           showProgress,
           opts,
           stop,
+          selfUpdatePolicy: configSnapshot.valid
+            ? configSnapshot.config.update?.selfUpdate
+            : undefined,
         });
 
   stop();

@@ -160,12 +160,18 @@ describe("runGatewayUpdate", () => {
       argv: string[],
       options?: { env?: NodeJS.ProcessEnv; cwd?: string; timeoutMs?: number },
     ) => Promise<CommandResult>,
-    options?: { channel?: "stable" | "beta"; tag?: string; cwd?: string },
+    options?: {
+      channel?: "stable" | "beta";
+      tag?: string;
+      cwd?: string;
+      selfUpdatePolicy?: { enabled?: boolean; reason?: string };
+    },
   ) {
     return runGatewayUpdate({
       cwd: options?.cwd ?? tempDir,
       runCommand: async (argv, runOptions) => runCommand(argv, runOptions),
       timeoutMs: 5000,
+      ...(options?.selfUpdatePolicy ? { selfUpdatePolicy: options.selfUpdatePolicy } : {}),
       ...(options?.channel ? { channel: options.channel } : {}),
       ...(options?.tag ? { tag: options.tag } : {}),
     });
@@ -439,6 +445,28 @@ describe("runGatewayUpdate", () => {
     expect(result.before?.version).toBe("1.0.0");
     expect(result.after?.version).toBe("2.0.0");
     expect(calls.some((call) => call === expectedInstallCommand)).toBe(true);
+  });
+
+  it("skips package-manager self-update when disabled by config policy", async () => {
+    const { nodeModules, pkgRoot } = await createGlobalPackageFixture(tempDir);
+    const { calls, runCommand } = createGlobalInstallHarness({
+      pkgRoot,
+      npmRootOutput: nodeModules,
+      installCommand: "npm i -g openclaw@latest --no-fund --no-audit --loglevel=error",
+      onInstall: async () => writeGlobalPackageVersion(pkgRoot),
+    });
+
+    const result = await runWithCommand(runCommand, {
+      cwd: pkgRoot,
+      selfUpdatePolicy: {
+        enabled: false,
+        reason: "Managed by Clawdi rollout.",
+      },
+    });
+
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("Self-update is disabled: Managed by Clawdi rollout.");
+    expect(calls.some((call) => call.startsWith("npm i -g"))).toBe(false);
   });
 
   it("falls back to global npm update when git is missing from PATH", async () => {
