@@ -39,7 +39,11 @@
     }
   },
   "update": {
-    "checkOnStart": false
+    "checkOnStart": false,
+    "selfUpdate": {
+      "enabled": false,
+      "reason": "This Clawdi deployment is managed by the Clawdi dashboard. Please use the Clawdi dashboard to update this deployment."
+    }
   },
   "commands": {
     "native": "auto",

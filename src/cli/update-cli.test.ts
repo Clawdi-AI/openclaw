@@ -470,6 +470,74 @@ describe("update-cli", () => {
     );
   });
 
+  it("skips package-manager self-update when disabled by config", async () => {
+    const tempDir = createCaseDir("openclaw-update");
+    mockPackageInstallStatus(tempDir);
+    vi.mocked(readConfigFileSnapshot).mockResolvedValue({
+      ...baseSnapshot,
+      config: {
+        update: {
+          selfUpdate: {
+            enabled: false,
+            reason: "Managed by Clawdi rollout.",
+          },
+        },
+      } as OpenClawConfig,
+    });
+    vi.mocked(defaultRuntime.log).mockClear();
+    vi.mocked(runCommandWithTimeout).mockClear();
+
+    await updateCommand({ yes: true });
+
+    expect(runGatewayUpdate).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(runCommandWithTimeout)
+        .mock.calls.some(
+          (call) =>
+            Array.isArray(call[0]) &&
+            call[0][0] === "npm" &&
+            call[0][1] === "i" &&
+            call[0][2] === "-g",
+        ),
+    ).toBe(false);
+    expect(
+      vi
+        .mocked(defaultRuntime.log)
+        .mock.calls.map((call) => String(call[0]))
+        .join("\n"),
+    ).toContain("Self-update is disabled: Managed by Clawdi rollout.");
+  });
+
+  it("skips package-to-dev self-update when disabled by config", async () => {
+    const tempDir = createCaseDir("openclaw-update");
+    mockPackageInstallStatus(tempDir);
+    vi.mocked(readConfigFileSnapshot).mockResolvedValue({
+      ...baseSnapshot,
+      config: {
+        update: {
+          selfUpdate: {
+            enabled: false,
+            reason: "Managed by Clawdi rollout.",
+          },
+        },
+      } as OpenClawConfig,
+    });
+    vi.mocked(defaultRuntime.log).mockClear();
+    vi.mocked(runCommandWithTimeout).mockClear();
+
+    await updateCommand({ yes: true, channel: "dev" });
+
+    expect(runGatewayUpdate).not.toHaveBeenCalled();
+    expect(vi.mocked(runCommandWithTimeout)).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(defaultRuntime.log)
+        .mock.calls.map((call) => String(call[0]))
+        .join("\n"),
+    ).toContain("Self-update is disabled: Managed by Clawdi rollout.");
+  });
+
   it("prepends portable Git PATH for package updates on Windows", async () => {
     const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     const tempDir = createCaseDir("openclaw-update");

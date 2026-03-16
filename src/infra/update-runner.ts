@@ -10,6 +10,11 @@ import { detectPackageManager as detectPackageManagerImpl } from "./detect-packa
 import { readPackageName, readPackageVersion } from "./package-json.js";
 import { normalizePackageTagInput } from "./package-tag.js";
 import { trimLogTail } from "./restart-sentinel.js";
+import {
+  isSelfUpdateDisabled,
+  resolveSelfUpdateDisabledReason,
+  type SelfUpdatePolicy,
+} from "./self-update-policy.js";
 import { resolveStableNodePath } from "./stable-node-path.js";
 import {
   channelToNpmTag,
@@ -79,6 +84,7 @@ type UpdateRunnerOptions = {
   tag?: string;
   channel?: UpdateChannel;
   timeoutMs?: number;
+  selfUpdatePolicy?: SelfUpdatePolicy;
   runCommand?: CommandRunner;
   progress?: UpdateStepProgress;
 };
@@ -864,6 +870,17 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
   }
 
   const beforeVersion = await readPackageVersion(pkgRoot);
+  if (isSelfUpdateDisabled(opts.selfUpdatePolicy)) {
+    return {
+      status: "skipped",
+      mode: "unknown",
+      root: pkgRoot,
+      reason: resolveSelfUpdateDisabledReason(opts.selfUpdatePolicy),
+      before: { version: beforeVersion },
+      steps: [],
+      durationMs: Date.now() - startedAt,
+    };
+  }
   const globalManager = await detectGlobalInstallManagerForRoot(runCommand, pkgRoot, timeoutMs);
   if (globalManager) {
     const packageName = (await readPackageName(pkgRoot)) ?? DEFAULT_PACKAGE_NAME;
