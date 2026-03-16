@@ -3,8 +3,8 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "vitest";
-import { callGateway } from "../../src/gateway/call.js";
 import {
   loadPendingDeliveries,
   type QueuedDelivery,
@@ -33,6 +33,20 @@ function resolveLegacyRepoPath(): string | null {
 const legacyRepoPath = resolveLegacyRepoPath();
 const shouldRunLegacyCompat =
   process.env.OPENCLAW_RUN_LEGACY_COMPAT === "1" && Boolean(legacyRepoPath);
+
+type GatewayCaller = typeof import("../../src/gateway/call.js").callGateway;
+
+let cachedLegacyCallGateway: Promise<GatewayCaller> | null = null;
+
+async function resolveLegacyCallGateway(): Promise<GatewayCaller> {
+  if (!legacyRepoPath) {
+    throw new Error("legacy repo path is required");
+  }
+  cachedLegacyCallGateway ??= import(
+    pathToFileURL(path.join(legacyRepoPath, "src", "gateway", "call.ts")).href
+  ).then((mod) => mod.callGateway as GatewayCaller);
+  return await cachedLegacyCallGateway;
+}
 
 async function waitForPendingDeliveries(
   stateDir: string,
@@ -213,6 +227,7 @@ describe("mux Telegram real legacy OpenClaw compatibility", () => {
   legacyTest("replays queued legacy gateway send after restart", { timeout: 180_000 }, async () => {
     const scenario = requireScenario("dm-text-legacy-binding");
     const message = "LEGACY_RESTART_GATEWAY_SEND";
+    const callLegacyGateway = await resolveLegacyCallGateway();
 
     await withMuxOpenClawHarness(
       {
@@ -230,7 +245,7 @@ describe("mux Telegram real legacy OpenClaw compatibility", () => {
           harness.telegram.setMethodFailure("sendMessage", { status: 500 });
 
           await expect(
-            callGateway({
+            callLegacyGateway({
               url: harness.gatewayUrl,
               token: harness.gatewayToken,
               method: "send",
