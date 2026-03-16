@@ -315,7 +315,7 @@ export function createBrowserTool(opts?: {
       'Use profile="chrome-relay" only for the Chrome extension / Browser Relay / toolbar-button attach-tab flow, or when the user explicitly asks for the extension relay.',
       'If the user mentions the Chrome extension / Browser Relay / toolbar button / “attach tab”, ALWAYS prefer profile="chrome-relay". Otherwise prefer profile="user" over the extension relay for user-browser work.',
       'When a node-hosted browser proxy is available, the tool may auto-route to it. Pin a node with node=<id|name> or target="node".',
-      'User-browser flows need user interaction: profile="user" may require approving a browser attach prompt; profile="chrome-relay" needs the user to click the OpenClaw Browser Relay toolbar icon on the tab (badge ON). If user presence is unclear, ask first.',
+      'User-browser flows need user interaction: profile="user" may require approving a browser attach prompt; profile="chrome-relay" needs the user to open the Clawdi Browser popup and click "Connect Your Clawdi". If user presence is unclear, ask first.',
       "When using refs from snapshot (e.g. e12), keep the same tab: prefer passing targetId from the snapshot response into subsequent actions (act/click/type/etc).",
       'For stable, self-resolving refs across calls, use snapshot with refs="aria" (Playwright aria-ref ids). Default refs="role" are role+name-based.',
       "Use snapshot+act for UI automation. Avoid act:wait by default; use only in exceptional cases when no reliable UI state exists.",

@@ -150,6 +150,25 @@ describe("buildInlineProviderModels", () => {
     });
   });
 
+  it("defaults openai-codex inline models to openai-codex-responses", () => {
+    const providers: Parameters<typeof buildInlineProviderModels>[0] = {
+      "openai-codex": {
+        baseUrl: "https://proxy.example.com/v1",
+        models: [makeModel("gpt-5.3-codex")],
+      },
+    };
+
+    const result = buildInlineProviderModels(providers);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      provider: "openai-codex",
+      id: "gpt-5.3-codex",
+      api: "openai-codex-responses",
+      baseUrl: "https://proxy.example.com/v1",
+    });
+  });
+
   it("merges provider-level headers into inline models", () => {
     const providers: Parameters<typeof buildInlineProviderModels>[0] = {
       proxy: {
@@ -821,6 +840,29 @@ describe("resolveModel", () => {
         id: "gpt-5.3-codex",
         provider: "openai-codex",
       },
+    });
+  });
+
+  it("uses openai-codex-responses for generic openai-codex provider fallback", () => {
+    const cfg: OpenClawConfig = {
+      models: {
+        providers: {
+          "openai-codex": {
+            baseUrl: "https://proxy.example.com/v1",
+            models: [],
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    const result = resolveModel("openai-codex", "gpt-5.2-codex", "/tmp/agent", cfg);
+
+    expect(result.error).toBeUndefined();
+    expect(result.model).toMatchObject({
+      provider: "openai-codex",
+      id: "gpt-5.2-codex",
+      api: "openai-codex-responses",
+      baseUrl: "https://proxy.example.com/v1",
     });
   });
 

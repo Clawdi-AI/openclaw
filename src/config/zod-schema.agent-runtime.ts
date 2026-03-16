@@ -272,14 +272,16 @@ export const ToolsWebSearchSchema = z
       ])
       .optional(),
     apiKey: SecretInputSchema.optional().register(sensitive),
+    baseUrl: z.string().optional(),
     maxResults: z.number().int().positive().optional(),
     timeoutSeconds: z.number().int().positive().optional(),
     cacheTtlMinutes: z.number().nonnegative().optional(),
     perplexity: z
       .object({
         apiKey: SecretInputSchema.optional().register(sensitive),
-        // Legacy Sonar/OpenRouter compatibility fields.
-        // Setting either opts Perplexity back into the chat-completions path.
+        // Search API proxy and Sonar/OpenRouter compatibility fields.
+        // baseUrl alone keeps structured Search API behavior for direct/custom proxy endpoints.
+        // Setting model, or pointing baseUrl at OpenRouter, opts back into the chat-completions path.
         baseUrl: z.string().optional(),
         model: z.string().optional(),
       })

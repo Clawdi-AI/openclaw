@@ -35,7 +35,7 @@ function createPerplexitySearchTool(perplexityConfig?: {
   });
 }
 
-function createBraveSearchTool(braveConfig?: { mode?: "web" | "llm-context" }) {
+function createBraveSearchTool(options?: { mode?: "web" | "llm-context"; baseUrl?: string }) {
   return createWebSearchTool({
     config: {
       tools: {
@@ -43,7 +43,8 @@ function createBraveSearchTool(braveConfig?: { mode?: "web" | "llm-context" }) {
           search: {
             provider: "brave",
             apiKey: "brave-config-test", // pragma: allowlist secret
-            ...(braveConfig ? { brave: braveConfig } : {}),
+            ...(options?.baseUrl ? { baseUrl: options.baseUrl } : {}),
+            ...(options?.mode ? { brave: { mode: options.mode } } : {}),
           },
         },
       },
@@ -379,6 +380,19 @@ describe("web_search perplexity Search API", () => {
     expect(headers?.Authorization).toBe("Bearer pplx-config");
   });
 
+  it("uses custom Perplexity Search proxy baseUrl with the /search endpoint", async () => {
+    const mockFetch = installPerplexitySearchApiFetch([]);
+    const tool = createPerplexitySearchTool({
+      apiKey: "pplx-config",
+      baseUrl: "https://api.perplexity.ai/proxy",
+    });
+    await tool?.execute?.("call-1", { query: "test" });
+
+    expect(mockFetch).toHaveBeenCalled();
+    expect(mockFetch.mock.calls[0]?.[0]).toBe("https://api.perplexity.ai/proxy/search");
+    expect((mockFetch.mock.calls[0]?.[1] as RequestInit | undefined)?.method).toBe("POST");
+  });
+
   it("passes freshness filter to Perplexity Search API", async () => {
     vi.stubEnv("PERPLEXITY_API_KEY", "pplx-test");
     const mockFetch = installPerplexitySearchApiFetch([]);
@@ -498,6 +512,18 @@ describe("web_search perplexity OpenRouter compatibility", () => {
       | Record<string, string>
       | undefined;
     expect(headers?.Authorization).toBe("Bearer sk-or-v1-test");
+  });
+
+  it("keeps OpenRouter baseUrl on the chat-completions compatibility path", async () => {
+    const mockFetch = installPerplexityChatFetch();
+    const tool = createPerplexitySearchTool({
+      apiKey: "sk-or-v1-test", // pragma: allowlist secret
+      baseUrl: "https://openrouter.ai/api/v1",
+    });
+    await tool?.execute?.("call-1", { query: "test" });
+
+    expect(mockFetch).toHaveBeenCalled();
+    expect(mockFetch.mock.calls[0]?.[0]).toBe("https://openrouter.ai/api/v1/chat/completions");
   });
 
   it("keeps freshness support on the compatibility path", async () => {
@@ -903,6 +929,39 @@ describe("web_search external content wrapping", () => {
     expect(details.results?.[0]?.snippets?.[0]).toContain("Context chunk one");
     expect(details.results?.[0]?.siteName).toBe("example.com");
     expect(details.sources?.[0]?.hostname).toBe("example.com");
+  });
+
+  it("uses configured Brave baseUrl for standard search", async () => {
+    vi.stubEnv("BRAVE_API_KEY", "test-key");
+    const mockFetch = installBraveResultsFetch({
+      title: "Example",
+      url: "https://example.com",
+      description: "Normal description",
+    });
+    const tool = createBraveSearchTool({ baseUrl: "https://api.search.brave.com/custom" });
+    await tool?.execute?.("call-1", { query: "proxy test" });
+
+    const requestUrl = new URL(mockFetch.mock.calls[0]?.[0] as string);
+    expect(requestUrl.origin).toBe("https://api.search.brave.com");
+    expect(requestUrl.pathname).toBe("/custom/res/v1/web/search");
+  });
+
+  it("uses configured Brave baseUrl for llm-context search", async () => {
+    vi.stubEnv("BRAVE_API_KEY", "test-key");
+    const mockFetch = installBraveLlmContextFetch({
+      title: "Context title",
+      url: "https://example.com/ctx",
+      snippets: ["Context chunk one"],
+    });
+    const tool = createBraveSearchTool({
+      mode: "llm-context",
+      baseUrl: "https://api.search.brave.com/custom",
+    });
+    await tool?.execute?.("call-1", { query: "llm proxy test" });
+
+    const requestUrl = new URL(mockFetch.mock.calls[0]?.[0] as string);
+    expect(requestUrl.origin).toBe("https://api.search.brave.com");
+    expect(requestUrl.pathname).toBe("/custom/res/v1/llm/context");
   });
 
   it("rejects freshness in Brave llm-context mode", async () => {
