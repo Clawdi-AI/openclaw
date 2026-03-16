@@ -3,6 +3,7 @@ packages:
   - ui
   - packages/*
   - extensions/*
+  - mux-server
 
 onlyBuiltDependencies:
   - "@lydell/node-pty"
