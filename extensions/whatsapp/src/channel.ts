@@ -1,4 +1,3 @@
-import { isMuxEnabled, sendViaMux } from "openclaw/plugin-sdk";
 import {
   buildAccountScopedDmSecurityPolicy,
   collectAllowlistProviderGroupPolicyWarnings,
@@ -34,6 +33,8 @@ import {
   resolveWhatsAppMentionStripPatterns,
   whatsappOnboardingAdapter,
   WhatsAppConfigSchema,
+  isMuxEnabled,
+  sendViaMux,
   type ChannelMessageActionName,
   type ChannelPlugin,
   type ResolvedWhatsAppAccount,

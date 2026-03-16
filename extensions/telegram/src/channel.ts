@@ -1,4 +1,3 @@
-import { isMuxEnabled } from "openclaw/plugin-sdk";
 import { createScopedChannelConfigBase } from "openclaw/plugin-sdk/compat";
 import {
   collectAllowlistProviderGroupPolicyWarnings,
@@ -35,6 +34,7 @@ import {
   sendTelegramPayloadMessages,
   telegramOnboardingAdapter,
   TelegramConfigSchema,
+  isMuxEnabled,
   type ChannelMessageActionAdapter,
   type ChannelPlugin,
   type OpenClawConfig,

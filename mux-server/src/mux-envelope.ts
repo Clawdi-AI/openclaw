@@ -446,12 +446,14 @@ export function buildDiscordRawSend(params: {
 export function buildWhatsAppRawSend(params: {
   text: string;
   mediaUrl?: string;
+  mediaUrls?: string[];
   gifPlayback?: boolean;
 }) {
   return {
     send: {
       text: params.text,
       ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
+      ...(params.mediaUrls?.length ? { mediaUrls: params.mediaUrls } : {}),
       ...(params.gifPlayback ? { gifPlayback: true } : {}),
     },
   };

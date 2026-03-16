@@ -1,9 +1,9 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/discord";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { discordPlugin } from "./channel.js";
 
-vi.mock("openclaw/plugin-sdk", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("openclaw/plugin-sdk")>();
+vi.mock("openclaw/plugin-sdk/discord", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/discord")>();
   return {
     ...actual,
     loadOrCreateDeviceIdentity: () => ({

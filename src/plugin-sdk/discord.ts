@@ -47,3 +47,4 @@ export {
   buildComputedAccountStatusSnapshot,
   buildTokenChannelStatusSummary,
 } from "./status-helpers.js";
+export { isMuxEnabled, sendViaMux } from "../channels/plugins/outbound/mux.js";

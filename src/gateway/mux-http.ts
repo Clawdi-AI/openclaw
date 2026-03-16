@@ -840,10 +840,16 @@ async function resolveTelegramMuxAccess(params: {
     return { allowed: false };
   }
 
+  const groupRequireMention =
+    groupAllowContext.groupConfig &&
+    "requireMention" in groupAllowContext.groupConfig &&
+    typeof groupAllowContext.groupConfig.requireMention === "boolean"
+      ? groupAllowContext.groupConfig.requireMention
+      : undefined;
   const requireMention =
     firstDefined(
       groupAllowContext.topicConfig?.requireMention,
-      groupAllowContext.groupConfig?.requireMention,
+      groupRequireMention,
       resolveChannelGroupRequireMention({
         cfg: params.cfg,
         channel: "telegram",
@@ -1612,7 +1618,7 @@ async function dispatchMuxTelegram(params: {
   const draftReplyToMessageId = replyToMode !== "off" ? readMuxPositiveInt(messageId) : undefined;
   const threadReplyParams = buildTelegramThreadReplyParams({
     messageThreadId,
-    chatType: ctx.ChatType,
+    chatType: ctx.ChatType === "direct" || ctx.ChatType === "group" ? ctx.ChatType : "unknown",
     replyToMessageId: draftReplyToMessageId,
   });
 

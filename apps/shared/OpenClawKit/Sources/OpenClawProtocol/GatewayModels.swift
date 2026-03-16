@@ -466,6 +466,7 @@ public struct PollParams: Codable, Sendable {
     public let threadid: String?
     public let channel: String?
     public let accountid: String?
+    public let sessionkey: String?
     public let idempotencykey: String
 
     public init(
@@ -480,6 +481,7 @@ public struct PollParams: Codable, Sendable {
         threadid: String?,
         channel: String?,
         accountid: String?,
+        sessionkey: String?,
         idempotencykey: String)
     {
         self.to = to
@@ -493,6 +495,7 @@ public struct PollParams: Codable, Sendable {
         self.threadid = threadid
         self.channel = channel
         self.accountid = accountid
+        self.sessionkey = sessionkey
         self.idempotencykey = idempotencykey
     }
 
@@ -508,6 +511,7 @@ public struct PollParams: Codable, Sendable {
         case threadid = "threadId"
         case channel
         case accountid = "accountId"
+        case sessionkey = "sessionKey"
         case idempotencykey = "idempotencyKey"
     }
 }

@@ -110,6 +110,7 @@ export type MsgContext = {
   ChatType?: string;
   /** Human label for envelope headers (conversation label, not sender). */
   ConversationLabel?: string;
+  ChannelData?: Record<string, unknown>;
   GroupSubject?: string;
   /** Human label for channel-like group conversations (e.g. #general, #support). */
   GroupChannel?: string;

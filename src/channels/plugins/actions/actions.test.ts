@@ -693,7 +693,15 @@ describe("telegramMessageActions", () => {
   });
 
   it("maps action params into telegram actions", async () => {
-    const cases = [
+    type TelegramActionCase = {
+      name: string;
+      action: "send" | "edit" | "poll" | "topic-create";
+      params: Record<string, unknown>;
+      expectedPayload: unknown;
+      contextSessionKey?: string;
+    };
+
+    const cases: readonly TelegramActionCase[] = [
       {
         name: "media-only send preserves asVoice",
         action: "send" as const,

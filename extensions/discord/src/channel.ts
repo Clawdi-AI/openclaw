@@ -1,4 +1,3 @@
-import { isMuxEnabled, sendViaMux } from "openclaw/plugin-sdk";
 import { createScopedChannelConfigBase } from "openclaw/plugin-sdk/compat";
 import {
   buildAccountScopedDmSecurityPolicy,
@@ -34,6 +33,8 @@ import {
   resolveDefaultDiscordAccountId,
   resolveDiscordGroupRequireMention,
   resolveDiscordGroupToolPolicy,
+  isMuxEnabled,
+  sendViaMux,
   type ChannelMessageActionAdapter,
   type ChannelPlugin,
   type ResolvedDiscordAccount,
