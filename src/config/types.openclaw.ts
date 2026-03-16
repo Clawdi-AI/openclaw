@@ -68,6 +68,13 @@ export type OpenClawConfig = {
     channel?: "stable" | "beta" | "dev";
     /** Check for updates on gateway start (npm installs only). */
     checkOnStart?: boolean;
+    /** Policy controlling whether OpenClaw may update itself in-place. */
+    selfUpdate?: {
+      /** Allow in-place self-updates (CLI update / update.run / auto-update). Default: true. */
+      enabled?: boolean;
+      /** Optional operator-facing explanation shown when self-update is blocked. */
+      reason?: string;
+    };
     /** Core auto-update policy for package installs. */
     auto?: {
       /** Enable background auto-update checks and apply logic. Default: false. */

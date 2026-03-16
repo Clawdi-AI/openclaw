@@ -39,7 +39,11 @@
     }
   },
   "update": {
-    "checkOnStart": false
+    "checkOnStart": false,
+    "selfUpdate": {
+      "enabled": false,
+      "reason": "This Clawdi deployment is managed by the Phala image rollout workflow. In-place OpenClaw self-update would replace it with an incompatible upstream package and can brick the deployment."
+    }
   },
   "commands": {
     "native": "auto",
