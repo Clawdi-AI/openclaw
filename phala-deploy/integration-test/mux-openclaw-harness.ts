@@ -98,7 +98,7 @@ function buildHarnessEnv(
     channel?: "telegram" | "discord" | "whatsapp";
     minimalGateway?: boolean;
   },
-): Record<string, string> {
+): Record<string, string | undefined> {
   const isMinimalGateway = params?.minimalGateway !== false;
   const integrationChannels =
     params?.channel === "discord"
@@ -119,11 +119,9 @@ function buildHarnessEnv(
     OPENCLAW_SKIP_CRON: "1",
     OPENCLAW_GATEWAY_TOKEN: GATEWAY_TOKEN,
     OPENCLAW_INTEGRATION_CHANNELS: integrationChannels,
-    ...(isMinimalGateway
-      ? {
-          OPENCLAW_SKIP_CHANNELS: "1",
-        }
-      : {}),
+    OPENCLAW_SKIP_CHANNELS: isMinimalGateway ? "1" : undefined,
+    OPENCLAW_SKIP_PROVIDERS: isMinimalGateway ? "1" : undefined,
+    OPENCLAW_TEST_MINIMAL_GATEWAY: isMinimalGateway ? "1" : undefined,
   };
 }
 
@@ -310,6 +308,7 @@ async function startGatewayProcess(params: {
   env: Record<string, string>;
   runtime?: "current" | "legacy";
   legacyRepoPath?: string;
+  skipHealthzCheck?: boolean;
 }): Promise<StartedNodeProcess> {
   const integrationRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
   const started =
@@ -326,16 +325,31 @@ async function startGatewayProcess(params: {
           args: [String(params.port)],
           env: params.env,
         });
+
+  const ensureProcessAlive = () => {
+    if (started.process.exitCode !== null) {
+      throw new Error(
+        `gateway process exited early (${started.process.exitCode})\n${started.logs.join("").slice(-8_000)}`,
+      );
+    }
+  };
+
+  if (params.skipHealthzCheck) {
+    await waitForCondition(
+      () => {
+        ensureProcessAlive();
+        return started.logs.join("").includes(`__INTEGRATION_GATEWAY_READY__:${params.port}`);
+      },
+      20_000,
+      `gateway process did not become ready\n${started.logs.join("").slice(-8_000)}`,
+    );
+    return started;
+  }
+
   await waitForHttpOk({
     url: `http://127.0.0.1:${params.port}/healthz`,
     timeoutMs: 20_000,
-    onTick: () => {
-      if (started.process.exitCode !== null) {
-        throw new Error(
-          `gateway process exited early (${started.process.exitCode})\n${started.logs.join("").slice(-8_000)}`,
-        );
-      }
-    },
+    onTick: ensureProcessAlive,
     errorMessage: () =>
       `gateway process did not become ready\n${started.logs.join("").slice(-8_000)}`,
   });
@@ -416,7 +430,13 @@ export async function startMuxOpenClawHarness(
       channel,
       minimalGateway: params.minimalGateway,
     });
-    Object.assign(process.env, harnessEnv);
+    for (const [key, value] of Object.entries(harnessEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
     await mkdir(paths.workspaceDir, { recursive: true });
     if (params.workspaceFiles) {
       for (const [relativePath, content] of Object.entries(params.workspaceFiles)) {
@@ -466,6 +486,7 @@ export async function startMuxOpenClawHarness(
       env: harnessEnv,
       runtime,
       legacyRepoPath: params.legacyRepoPath,
+      skipHealthzCheck: runtime === "legacy",
     });
     cleanup.defer(async () => {
       await stopChildProcess(gateway.process);
@@ -552,6 +573,7 @@ export async function startMuxOpenClawHarness(
           env: harnessEnv,
           runtime,
           legacyRepoPath: params.legacyRepoPath,
+          skipHealthzCheck: runtime === "legacy",
         });
       },
       close: async () => {
