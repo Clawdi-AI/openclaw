@@ -16,6 +16,7 @@ type OnboardProviderAuthOptionKey = keyof Pick<
   | "xiaomiApiKey"
   | "minimaxApiKey"
   | "syntheticApiKey"
+  | "redpillApiKey"
   | "veniceApiKey"
   | "togetherApiKey"
   | "huggingfaceApiKey"
@@ -137,6 +138,13 @@ export const ONBOARD_PROVIDER_AUTH_FLAGS: ReadonlyArray<OnboardProviderAuthFlag>
     cliFlag: "--synthetic-api-key",
     cliOption: "--synthetic-api-key <key>",
     description: "Synthetic API key",
+  },
+  {
+    optionKey: "redpillApiKey",
+    authChoice: "redpill-api-key",
+    cliFlag: "--redpill-api-key",
+    cliOption: "--redpill-api-key <key>",
+    description: "Redpill AI API key",
   },
   {
     optionKey: "veniceApiKey",

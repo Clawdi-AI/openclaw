@@ -12,6 +12,11 @@ import {
   XIAOMI_DEFAULT_MODEL_ID,
 } from "../agents/models-config.providers.js";
 import {
+  discoverRedpillModels,
+  REDPILL_BASE_URL,
+  REDPILL_DEFAULT_MODEL_REF,
+} from "../agents/redpill-models.js";
+import {
   buildSyntheticModelDefinition,
   SYNTHETIC_BASE_URL,
   SYNTHETIC_DEFAULT_MODEL_REF,
@@ -289,6 +294,30 @@ export function applySyntheticProviderConfig(cfg: OpenClawConfig): OpenClawConfi
 export function applySyntheticConfig(cfg: OpenClawConfig): OpenClawConfig {
   const next = applySyntheticProviderConfig(cfg);
   return applyAgentDefaultModelPrimary(next, SYNTHETIC_DEFAULT_MODEL_REF);
+}
+
+export function applyRedpillProviderConfig(cfg: OpenClawConfig): OpenClawConfig {
+  const models = { ...cfg.agents?.defaults?.models };
+  for (const model of discoverRedpillModels()) {
+    const modelRef = `redpill/${model.id}`;
+    models[modelRef] = {
+      ...models[modelRef],
+      alias: models[modelRef]?.alias ?? model.name.replace(" (GPU TEE)", ""),
+    };
+  }
+
+  return applyProviderConfigWithModelCatalog(cfg, {
+    agentModels: models,
+    providerId: "redpill",
+    api: "openai-completions",
+    baseUrl: REDPILL_BASE_URL,
+    catalogModels: discoverRedpillModels(),
+  });
+}
+
+export function applyRedpillConfig(cfg: OpenClawConfig): OpenClawConfig {
+  const next = applyRedpillProviderConfig(cfg);
+  return applyAgentDefaultModelPrimary(next, REDPILL_DEFAULT_MODEL_REF);
 }
 
 export function applyXiaomiProviderConfig(cfg: OpenClawConfig): OpenClawConfig {

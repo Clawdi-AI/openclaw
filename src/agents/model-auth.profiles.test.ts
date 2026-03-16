@@ -218,6 +218,18 @@ describe("getApiKeyForModel", () => {
     });
   });
 
+  it("resolves Redpill API key from env", async () => {
+    await withEnvAsync({ [envVar("REDPILL", "API", "KEY")]: "redpill-test-key" }, async () => {
+      // pragma: allowlist secret
+      const resolved = await resolveApiKeyForProvider({
+        provider: "redpill",
+        store: { version: 1, profiles: {} },
+      });
+      expect(resolved.apiKey).toBe("redpill-test-key");
+      expect(resolved.source).toContain("REDPILL_API_KEY");
+    });
+  });
+
   it("resolves Qianfan API key from env", async () => {
     await withEnvAsync({ [envVar("QIANFAN", "API", "KEY")]: "qianfan-test-key" }, async () => {
       // pragma: allowlist secret

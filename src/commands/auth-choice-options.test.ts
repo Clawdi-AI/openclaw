@@ -65,6 +65,7 @@ describe("buildAuthChoiceOptions", () => {
       "ai-gateway-api-key",
       "cloudflare-ai-gateway-api-key",
       "synthetic-api-key",
+      "redpill-api-key",
       "chutes",
       "qwen-portal",
       "xai-api-key",

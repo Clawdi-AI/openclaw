@@ -3,6 +3,8 @@ import type { SimpleStreamOptions } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { isSecretRefHeaderValueMarker } from "../model-auth-markers.js";
+import { findNormalizedProviderValue } from "../model-selection.js";
 import {
   createAnthropicBetaHeadersWrapper,
   createAnthropicFastModeWrapper,
@@ -321,6 +323,43 @@ function createParallelToolCallsWrapper(
   };
 }
 
+function resolveProviderHeaders(
+  cfg: OpenClawConfig | undefined,
+  provider: string,
+): Record<string, string> | undefined {
+  const providerConfig =
+    cfg?.models?.providers?.[provider] ??
+    findNormalizedProviderValue(cfg?.models?.providers, provider);
+  const rawHeaders = providerConfig?.headers;
+  if (!rawHeaders || typeof rawHeaders !== "object" || Array.isArray(rawHeaders)) {
+    return undefined;
+  }
+
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(rawHeaders)) {
+    if (typeof value !== "string" || isSecretRefHeaderValueMarker(value)) {
+      continue;
+    }
+    resolved[key] = value;
+  }
+  return Object.keys(resolved).length > 0 ? resolved : undefined;
+}
+
+function createCustomHeadersWrapper(
+  baseStreamFn: StreamFn | undefined,
+  customHeaders: Record<string, string>,
+): StreamFn {
+  const underlying = baseStreamFn ?? streamSimple;
+  return (model, context, options) =>
+    underlying(model, context, {
+      ...options,
+      headers: {
+        ...customHeaders,
+        ...options?.headers,
+      },
+    });
+}
+
 /**
  * Apply extra params (like temperature) to an agent's streamFn.
  * Also adds OpenRouter app attribution headers when using the OpenRouter provider.
@@ -361,6 +400,12 @@ export function applyExtraParamsToAgent(
   if (wrappedStreamFn) {
     log.debug(`applying extraParams to agent streamFn for ${provider}/${modelId}`);
     agent.streamFn = wrappedStreamFn;
+  }
+
+  const providerHeaders = resolveProviderHeaders(cfg, provider);
+  if (providerHeaders) {
+    log.debug(`applying custom provider headers for ${provider}/${modelId}`);
+    agent.streamFn = createCustomHeadersWrapper(agent.streamFn, providerHeaders);
   }
 
   const anthropicBetas = resolveAnthropicBetas(merged, provider, modelId);

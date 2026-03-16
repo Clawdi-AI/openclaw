@@ -1098,6 +1098,117 @@ describe("applyExtraParamsToAgent", () => {
     });
   });
 
+  it("adds configured provider headers to stream options", () => {
+    const { calls, agent } = createOptionsCaptureAgent();
+    const cfg = {
+      models: {
+        providers: {
+          custom: {
+            baseUrl: "https://proxy.example.com/v1",
+            headers: {
+              "X-Proxy-Auth": "token-123",
+              "X-Tenant": "tenant-a",
+            },
+            models: [],
+          },
+        },
+      },
+    };
+
+    applyExtraParamsToAgent(agent, cfg, "custom", "custom-model");
+
+    const model = {
+      api: "openai-completions",
+      provider: "custom",
+      id: "custom-model",
+    } as Model<"openai-completions">;
+    const context: Context = { messages: [] };
+
+    void agent.streamFn?.(model, context, {});
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.headers).toEqual({
+      "X-Proxy-Auth": "token-123",
+      "X-Tenant": "tenant-a",
+    });
+  });
+
+  it("lets caller headers override configured provider headers", () => {
+    const { calls, agent } = createOptionsCaptureAgent();
+    const cfg = {
+      models: {
+        providers: {
+          custom: {
+            baseUrl: "https://proxy.example.com/v1",
+            headers: {
+              "X-Proxy-Auth": "token-123",
+              "X-Tenant": "tenant-a",
+            },
+            models: [],
+          },
+        },
+      },
+    };
+
+    applyExtraParamsToAgent(agent, cfg, "custom", "custom-model");
+
+    const model = {
+      api: "openai-completions",
+      provider: "custom",
+      id: "custom-model",
+    } as Model<"openai-completions">;
+    const context: Context = { messages: [] };
+
+    void agent.streamFn?.(model, context, {
+      headers: {
+        "X-Proxy-Auth": "caller-token",
+        "X-Custom": "1",
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.headers).toEqual({
+      "X-Proxy-Auth": "caller-token",
+      "X-Tenant": "tenant-a",
+      "X-Custom": "1",
+    });
+  });
+
+  it("skips SecretRef marker provider headers when injecting stream options", () => {
+    const { calls, agent } = createOptionsCaptureAgent();
+    const cfg = {
+      models: {
+        providers: {
+          custom: {
+            baseUrl: "https://proxy.example.com/v1",
+            headers: {
+              Authorization: "secretref-env:OPENAI_HEADER_TOKEN",
+              "X-Managed": "secretref-managed",
+              "X-Tenant": "tenant-a",
+            },
+            models: [],
+          },
+        },
+      },
+    };
+
+    applyExtraParamsToAgent(agent, cfg, "custom", "custom-model");
+
+    const model = {
+      api: "openai-completions",
+      provider: "custom",
+      id: "custom-model",
+    } as Model<"openai-completions">;
+    const context: Context = { messages: [] };
+
+    void agent.streamFn?.(model, context, {});
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.headers).toEqual({
+      "X-Tenant": "tenant-a",
+    });
+  });
+
   it("passes configured websocket transport through stream options", () => {
     const { calls, agent } = createOptionsCaptureAgent();
     const cfg = {

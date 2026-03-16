@@ -18,6 +18,7 @@ import {
   applyOpencodeZenConfig,
   applyOpenrouterConfig,
   applyQianfanConfig,
+  applyRedpillConfig,
   applySyntheticConfig,
   applyTogetherConfig,
   applyVeniceConfig,
@@ -38,6 +39,7 @@ import {
   setOpencodeZenApiKey,
   setOpenrouterApiKey,
   setQianfanApiKey,
+  setRedpillApiKey,
   setSyntheticApiKey,
   setTogetherApiKey,
   setVeniceApiKey,
@@ -402,6 +404,23 @@ function buildSimpleApiKeyAuthChoices(params: { opts: OnboardOptions }): SimpleA
           applyAuthProfileConfig(cfg, {
             profileId: "synthetic:default",
             provider: "synthetic",
+            mode: "api_key",
+          }),
+        ),
+    },
+    {
+      authChoices: ["redpill-api-key"],
+      provider: "redpill",
+      flagValue: params.opts.redpillApiKey,
+      flagName: "--redpill-api-key",
+      envVar: "REDPILL_API_KEY",
+      profileId: "redpill:default",
+      setCredential: withStorage(setRedpillApiKey),
+      applyConfig: (cfg) =>
+        applyRedpillConfig(
+          applyAuthProfileConfig(cfg, {
+            profileId: "redpill:default",
+            provider: "redpill",
             mode: "api_key",
           }),
         ),

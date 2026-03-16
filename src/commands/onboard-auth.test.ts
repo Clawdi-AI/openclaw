@@ -22,6 +22,8 @@ import {
   applyOpencodeZenProviderConfig,
   applyOpenrouterConfig,
   applyOpenrouterProviderConfig,
+  applyRedpillConfig,
+  applyRedpillProviderConfig,
   applySyntheticConfig,
   applySyntheticProviderConfig,
   applyXaiConfig,
@@ -32,6 +34,7 @@ import {
   applyZaiProviderConfig,
   OPENROUTER_DEFAULT_MODEL_REF,
   MISTRAL_DEFAULT_MODEL_REF,
+  REDPILL_DEFAULT_MODEL_REF,
   SYNTHETIC_DEFAULT_MODEL_ID,
   SYNTHETIC_DEFAULT_MODEL_REF,
   XAI_DEFAULT_MODEL_REF,
@@ -512,6 +515,41 @@ describe("applySyntheticConfig", () => {
   });
 });
 
+describe("applyRedpillConfig", () => {
+  it("adds redpill provider with correct settings", () => {
+    const cfg = applyRedpillConfig({});
+    expect(cfg.models?.providers?.redpill).toMatchObject({
+      baseUrl: "https://api.redpill.ai/v1",
+      api: "openai-completions",
+    });
+    expect(resolveAgentModelPrimaryValue(cfg.agents?.defaults?.model)).toBe(
+      REDPILL_DEFAULT_MODEL_REF,
+    );
+  });
+
+  it("merges existing redpill provider models and keeps aliases", () => {
+    const cfg = applyRedpillProviderConfig(
+      createLegacyProviderConfig({
+        providerId: "redpill",
+        api: "anthropic-messages",
+        modelId: "custom-model",
+        modelName: "Custom",
+      }),
+    );
+
+    expect(cfg.models?.providers?.redpill?.baseUrl).toBe("https://api.redpill.ai/v1");
+    expect(cfg.models?.providers?.redpill?.api).toBe("openai-completions");
+    expect(cfg.models?.providers?.redpill?.apiKey).toBe("old-key");
+    expect(cfg.models?.providers?.redpill?.models.map((m) => m.id)).toContain("custom-model");
+    expect(cfg.models?.providers?.redpill?.models.map((m) => m.id)).toContain(
+      "deepseek/deepseek-v3.2",
+    );
+    expect(cfg.agents?.defaults?.models?.["redpill/deepseek/deepseek-v3.2"]?.alias).toBe(
+      "DeepSeek v3.2",
+    );
+  });
+});
+
 describe("primary model defaults", () => {
   it("sets correct primary model", () => {
     const configCases = [
@@ -526,6 +564,10 @@ describe("primary model defaults", () => {
       {
         getConfig: () => applySyntheticConfig({}),
         primaryModel: SYNTHETIC_DEFAULT_MODEL_REF,
+      },
+      {
+        getConfig: () => applyRedpillConfig({}),
+        primaryModel: REDPILL_DEFAULT_MODEL_REF,
       },
     ] as const;
     for (const { getConfig, primaryModel } of configCases) {

@@ -5,6 +5,7 @@ import {
   setMoonshotApiKey,
   setOpencodeZenApiKey,
   setOpenaiApiKey,
+  setRedpillApiKey,
   setVolcengineApiKey,
 } from "./onboard-auth.js";
 import {
@@ -23,6 +24,7 @@ describe("onboard auth credentials secret refs", () => {
     "CLOUDFLARE_AI_GATEWAY_API_KEY",
     "VOLCANO_ENGINE_API_KEY",
     "BYTEPLUS_API_KEY",
+    "REDPILL_API_KEY",
     "OPENCODE_API_KEY",
   ]);
 
@@ -208,6 +210,22 @@ describe("onboard auth credentials secret refs", () => {
       keyRef: { source: "env", provider: "default", id: "BYTEPLUS_API_KEY" },
     });
     expect(parsed.profiles?.["byteplus:default"]?.key).toBeUndefined();
+  });
+
+  it("stores env-backed redpill key as keyRef in ref mode", async () => {
+    await expectStoredAuthKey({
+      prefix: "openclaw-onboard-auth-credentials-redpill-ref-",
+      envVar: "REDPILL_API_KEY",
+      envValue: "sk-redpill-env",
+      profileId: "redpill:default",
+      apply: async (agentDir) => {
+        await setRedpillApiKey("sk-redpill-env", agentDir, { secretInputMode: "ref" }); // pragma: allowlist secret
+      },
+      expected: {
+        keyRef: { source: "env", provider: "default", id: "REDPILL_API_KEY" },
+      },
+      absent: ["key"],
+    });
   });
 
   it("stores shared OpenCode credentials for both runtime providers", async () => {
