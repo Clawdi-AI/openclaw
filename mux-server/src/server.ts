@@ -5900,6 +5900,7 @@ async function handleTelegramBotControlCommand(params: {
   chatId: string;
   topicId?: number;
   chatType: "direct" | "group";
+  fromId: string;
   binding: { tenantId: string; bindingId: string; routeKey: string } | null;
 }) {
   if (params.command.kind === "help") {
@@ -6015,7 +6016,7 @@ async function handleTelegramBotControlCommand(params: {
         parseMode: notice.parseMode,
       });
     },
-    fromId: params.chatId,
+    fromId: params.fromId,
     chatId: params.chatId,
     chatType: params.chatType,
   });
@@ -6025,6 +6026,7 @@ async function handleDiscordBotControlCommand(params: {
   command: BotControlCommand;
   channelId: string;
   routeKey: string;
+  fromId: string;
   tenantId: string;
   bindingId: string;
   status: "active" | "pending";
@@ -6117,7 +6119,7 @@ async function handleDiscordBotControlCommand(params: {
         text: notice.text,
       });
     },
-    fromId: route.kind === "dm" ? route.userId : params.channelId,
+    fromId: params.fromId,
     chatId: params.channelId,
     chatType: route.kind === "dm" ? "direct" : "group",
   });
@@ -6128,6 +6130,7 @@ async function handleDiscordBotControlCommandUnbound(params: {
   command: BotControlCommand;
   channelId: string;
   routeKey: string;
+  fromId: string;
 }): Promise<void> {
   if (params.command.kind === "help") {
     const notice = renderBotHelpNotice("discord");
@@ -6198,7 +6201,7 @@ async function handleDiscordBotControlCommandUnbound(params: {
         text: notice.text,
       });
     },
-    fromId: route.kind === "dm" ? route.userId : params.channelId,
+    fromId: params.fromId,
     chatId: params.channelId,
     chatType: route.kind === "dm" ? "direct" : "group",
   });
@@ -6209,6 +6212,7 @@ async function handleWhatsAppBotControlCommand(params: {
   chatJid: string;
   accountId: string;
   chatType: "direct" | "group";
+  fromId: string;
   directPeerId?: string;
   binding: { tenantId: string; bindingId: string; routeKey: string } | null;
 }) {
@@ -6318,7 +6322,7 @@ async function handleWhatsAppBotControlCommand(params: {
         text: notice.text,
       });
     },
-    fromId: params.chatJid,
+    fromId: params.fromId,
     chatId: params.chatJid,
     chatType: params.chatType,
   });
@@ -6368,11 +6372,16 @@ async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
   const botControlCommand = parseBotControlCommand(body);
   if (botControlCommand) {
     try {
+      const fromId =
+        typeof message.from?.id === "number" && Number.isFinite(message.from.id)
+          ? String(Math.trunc(message.from.id))
+          : chatId;
       await handleTelegramBotControlCommand({
         command: botControlCommand,
         chatId,
         topicId,
         chatType,
+        fromId,
         binding,
       });
     } catch (error) {
@@ -6776,6 +6785,7 @@ async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
           command: botControlCommand,
           channelId,
           routeKey: params.route_key,
+          fromId,
           tenantId: params.tenant_id,
           bindingId: params.binding_id,
           status: pending ? "pending" : "active",
@@ -7114,12 +7124,14 @@ async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
           command: botControlCommand,
           channelId,
           routeKey: incomingRouteKey,
+          fromId,
         });
       } else {
         await handleDiscordBotControlCommand({
           command: botControlCommand,
           channelId,
           routeKey: liveBinding.routeKey,
+          fromId,
           tenantId: liveBinding.tenantId,
           bindingId: liveBinding.bindingId,
           status: liveBinding.status,
@@ -7650,11 +7662,14 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
   const botControlCommand = parseBotControlCommand(body);
   if (botControlCommand) {
     try {
+      const fromId =
+        readNonEmptyString(message.senderE164) ?? readNonEmptyString(message.from) ?? chatJid;
       await handleWhatsAppBotControlCommand({
         command: botControlCommand,
         chatJid,
         accountId,
         chatType,
+        fromId,
         directPeerId,
         binding,
       });
