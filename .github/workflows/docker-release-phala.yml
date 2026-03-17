@@ -2,8 +2,6 @@ name: Docker Release (Phala)
 
 on:
   push:
-    branches:
-      - "phala-*"
     tags:
       - "v*"
     paths-ignore:
@@ -113,14 +111,6 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{version}},suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=ref,event=branch,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=sha-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=sha-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
 
       - name: Build and push amd64 image
         uses: docker/build-push-action@v6
@@ -179,14 +169,6 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{version}},suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=ref,event=branch,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=sha-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=sha-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
 
       - name: Build and push amd64 image
         uses: docker/build-push-action@v6
@@ -238,14 +220,6 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{version}},suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=ref,event=branch,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=sha-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=sha-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=phala-,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=sha,format=short,prefix=phala-,suffix=-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=raw,value=phala-latest,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
-            type=raw,value=phala-latest-amd64,enable=${{ startsWith(github.ref, 'refs/heads/phala-') }}
 
       - name: Build and push mux amd64 image
         uses: docker/build-push-action@v6
