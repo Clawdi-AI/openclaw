@@ -13,6 +13,7 @@ import { resolveGatewayAuth } from "../gateway/auth.js";
 import { buildGatewayConnectionDetails } from "../gateway/call.js";
 import { resolveGatewayProbeAuthSafe } from "../gateway/probe-auth.js";
 import { probeGateway } from "../gateway/probe.js";
+import { isTruthyEnvValue } from "../infra/env.js";
 import {
   listInterpreterLikeSafeBins,
   resolveMergedSafeBinProfileFixtures,
@@ -131,6 +132,10 @@ type AuditExecutionContext = {
   codeSafetySummaryCache: Map<string, Promise<unknown>>;
 };
 
+function shouldIgnoreClawdiManagedSafeWarnings(env: NodeJS.ProcessEnv | undefined): boolean {
+  return isTruthyEnvValue(env?.CLAWDI_AUDIT_IGNORE_WARNING_SAFE);
+}
+
 function countBySeverity(findings: SecurityAuditFinding[]): SecurityAuditSummary {
   let critical = 0;
   let warn = 0;
@@ -213,6 +218,7 @@ async function collectFilesystemFindings(params: {
   execIcacls?: ExecFn;
 }): Promise<SecurityAuditFinding[]> {
   const findings: SecurityAuditFinding[] = [];
+  const ignoreClawdiManagedSafeWarnings = shouldIgnoreClawdiManagedSafeWarnings(params.env);
 
   const stateDirPerms = await inspectPathPermissions(params.stateDir, {
     env: params.env,
@@ -220,7 +226,7 @@ async function collectFilesystemFindings(params: {
     exec: params.execIcacls,
   });
   if (stateDirPerms.ok) {
-    if (stateDirPerms.isSymlink) {
+    if (stateDirPerms.isSymlink && !ignoreClawdiManagedSafeWarnings) {
       findings.push({
         checkId: "fs.state_dir.symlink",
         severity: "warn",
@@ -341,6 +347,7 @@ function collectGatewayConfigFindings(
   env: NodeJS.ProcessEnv,
 ): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
+  const ignoreClawdiManagedSafeWarnings = shouldIgnoreClawdiManagedSafeWarnings(env);
 
   const bind = typeof cfg.gateway?.bind === "string" ? cfg.gateway.bind : "loopback";
   const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
@@ -565,7 +572,10 @@ function collectGatewayConfigFindings(
     });
   }
 
-  if (cfg.gateway?.controlUi?.dangerouslyDisableDeviceAuth === true) {
+  if (
+    cfg.gateway?.controlUi?.dangerouslyDisableDeviceAuth === true &&
+    !ignoreClawdiManagedSafeWarnings
+  ) {
     findings.push({
       checkId: "gateway.control_ui.device_auth_disabled",
       severity: "critical",
@@ -588,7 +598,11 @@ function collectGatewayConfigFindings(
     });
   }
 
-  const enabledDangerousFlags = collectEnabledInsecureOrDangerousFlags(cfg);
+  const enabledDangerousFlags = collectEnabledInsecureOrDangerousFlags(cfg).filter((flag) =>
+    ignoreClawdiManagedSafeWarnings
+      ? flag !== "gateway.controlUi.dangerouslyDisableDeviceAuth=true"
+      : true,
+  );
   if (enabledDangerousFlags.length > 0) {
     findings.push({
       checkId: "config.insecure_or_dangerous_flags",
