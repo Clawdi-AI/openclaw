@@ -64,7 +64,7 @@ jobs:
           mv -f "phala-deploy/$TGZ_NAME" phala-deploy/openclaw.tgz
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: phala-deploy/Dockerfile

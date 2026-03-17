@@ -113,7 +113,7 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push amd64 image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: phala-deploy/Dockerfile
@@ -171,7 +171,7 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push amd64 image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: phala-deploy/Dockerfile
@@ -222,7 +222,7 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push mux amd64 image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: mux-server/Dockerfile
