@@ -1,6 +1,4 @@
-import fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import path from "node:path";
 import { resolveAckReaction } from "../agents/identity.js";
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import {
@@ -1221,13 +1219,7 @@ async function resolveAttachmentToStoredFile(params: {
     try {
       const response = await fetchMuxFileStream({ cfg, url: attachment.url });
       const buffer = Buffer.from(await response.arrayBuffer());
-      const saved = await saveMediaBuffer(
-        buffer,
-        mimeType,
-        "inbound",
-        undefined,
-        originalFileName,
-      );
+      const saved = await saveMediaBuffer(buffer, mimeType, "inbound", undefined, originalFileName);
       return { path: saved.path, mimeType: saved.contentType ?? mimeType };
     } catch {
       return null;
@@ -1241,13 +1233,7 @@ async function resolveAttachmentToStoredFile(params: {
       if (buffer.byteLength === 0) {
         return null;
       }
-      const saved = await saveMediaBuffer(
-        buffer,
-        mimeType,
-        "inbound",
-        undefined,
-        originalFileName,
-      );
+      const saved = await saveMediaBuffer(buffer, mimeType, "inbound", undefined, originalFileName);
       return { path: saved.path, mimeType: saved.contentType ?? mimeType };
     } catch {
       return null;
