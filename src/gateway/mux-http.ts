@@ -59,7 +59,7 @@ import {
   type DiscordGuildEntryResolved,
 } from "../discord/monitor/allow-list.js";
 import { logVerbose, warn } from "../globals.js";
-import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
+import { saveMediaBuffer } from "../media/store.js";
 import {
   addChannelAllowFromStoreEntry,
   readChannelAllowFromStore,
@@ -1206,26 +1206,29 @@ function inferExtFromMime(mime: string | undefined): string {
   return "";
 }
 
-async function resolveAttachmentToTempFile(params: {
+async function resolveAttachmentToStoredFile(params: {
   attachment: MuxInboundAttachment;
   cfg: OpenClawConfig;
-  tmpDir: string;
   index: number;
 }): Promise<{ path: string; mimeType: string } | null> {
-  const { attachment, cfg, tmpDir, index } = params;
-  const ext = inferExtFromMime(attachment.mimeType) || path.extname(attachment.fileName || "");
-  const baseName = attachment.fileName
-    ? path.basename(attachment.fileName, path.extname(attachment.fileName))
-    : `mux-att-${index}`;
-  const tmpPath = path.join(tmpDir, `${baseName}-${index}${ext}`);
+  const { attachment, cfg, index } = params;
   const mimeType = attachment.mimeType || "application/octet-stream";
+  const originalFileName = attachment.fileName?.trim()
+    ? attachment.fileName
+    : `mux-att-${index}${inferExtFromMime(attachment.mimeType) || ""}`;
 
   if (attachment.url) {
     try {
       const response = await fetchMuxFileStream({ cfg, url: attachment.url });
       const buffer = Buffer.from(await response.arrayBuffer());
-      fs.writeFileSync(tmpPath, buffer);
-      return { path: tmpPath, mimeType };
+      const saved = await saveMediaBuffer(
+        buffer,
+        mimeType,
+        "inbound",
+        undefined,
+        originalFileName,
+      );
+      return { path: saved.path, mimeType: saved.contentType ?? mimeType };
     } catch {
       return null;
     }
@@ -1238,8 +1241,14 @@ async function resolveAttachmentToTempFile(params: {
       if (buffer.byteLength === 0) {
         return null;
       }
-      fs.writeFileSync(tmpPath, buffer);
-      return { path: tmpPath, mimeType };
+      const saved = await saveMediaBuffer(
+        buffer,
+        mimeType,
+        "inbound",
+        undefined,
+        originalFileName,
+      );
+      return { path: saved.path, mimeType: saved.contentType ?? mimeType };
     } catch {
       return null;
     }
@@ -1431,7 +1440,6 @@ export async function handleMuxInboundHttpRequest(
   };
 
   const dispatchPromise = (async () => {
-    let tmpDir: string | undefined;
     try {
       await bootstrapMuxPairedSender({
         channel,
@@ -1484,12 +1492,12 @@ export async function handleMuxInboundHttpRequest(
         }
       }
 
-      // Resolve attachments to temp files (same pattern as vanilla TG channel).
+      // Persist inbound attachments in the media store so later tool calls and
+      // follow-up turns can still access the same files.
       if (attachments.length > 0) {
-        tmpDir = fs.mkdtempSync(path.join(resolvePreferredOpenClawTmpDir(), "mux-att-"));
         const resolved = await Promise.all(
           attachments.map((att, i) =>
-            resolveAttachmentToTempFile({ attachment: att, cfg, tmpDir: tmpDir!, index: i }),
+            resolveAttachmentToStoredFile({ attachment: att, cfg, index: i }),
           ),
         );
         const mediaPaths: string[] = [];
@@ -1580,15 +1588,6 @@ export async function handleMuxInboundHttpRequest(
       }
     } catch (err) {
       warn(`mux inbound attachment resolve failed messageId=${messageId}: ${String(err)}`);
-    } finally {
-      // Clean up temp files.
-      if (tmpDir) {
-        try {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch {
-          // Best-effort cleanup.
-        }
-      }
     }
   })();
 
