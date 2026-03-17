@@ -8,7 +8,12 @@
     "port": 18789,
     "auth": {
       "mode": "token",
-      "token": "__GATEWAY_AUTH_TOKEN__"
+      "token": "__GATEWAY_AUTH_TOKEN__",
+      "rateLimit": {
+        "maxAttempts": 10,
+        "windowMs": 60000,
+        "lockoutMs": 300000
+      }
     },
     "controlUi": {
       "dangerouslyDisableDeviceAuth": true
@@ -26,16 +31,6 @@
     "tailscale": {
       "mode": "off",
       "resetOnExit": false
-    },
-    "nodes": {
-      "denyCommands": [
-        "camera.snap",
-        "camera.clip",
-        "screen.record",
-        "calendar.add",
-        "contacts.add",
-        "reminders.add"
-      ]
     }
   },
   "update": {
@@ -53,25 +48,33 @@
   },
   "channels": {
     "telegram": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "groupPolicy": "allowlist",
+      "mux": { "enabled": true, "timeoutMs": 30000 },
       "reactionLevel": "extensive",
       "actions": {
         "sticker": true
       },
       "accounts": {
-        "default": { "enabled": false },
-        "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } }
+        "default": { "enabled": true, "dmPolicy": "pairing", "groupPolicy": "allowlist" }
       }
     },
     "discord": {
+      "enabled": true,
+      "groupPolicy": "open",
+      "mux": { "enabled": true, "timeoutMs": 30000 },
       "accounts": {
-        "default": { "enabled": false },
-        "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } }
+        "default": { "enabled": true, "groupPolicy": "open" }
       }
     },
     "whatsapp": {
+      "enabled": true,
+      "dmPolicy": "pairing",
+      "groupPolicy": "allowlist",
+      "mux": { "enabled": true, "timeoutMs": 30000 },
       "accounts": {
-        "default": { "enabled": false },
-        "mux": { "enabled": true, "mux": { "enabled": true, "timeoutMs": 30000 } }
+        "default": { "enabled": true, "dmPolicy": "pairing", "groupPolicy": "allowlist" }
       }
     }
   },

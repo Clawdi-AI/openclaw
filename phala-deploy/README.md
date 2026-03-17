@@ -226,8 +226,9 @@ Key config fields:
 
 1. `gateway.http.endpoints.mux` — `enabled`, `baseUrl`, `registerKey`, `inboundUrl`
    - For `inboundUrl`, use `https://${DSTACK_APP_ID}-18789.${DSTACK_GATEWAY_DOMAIN}/v1/mux/inbound` — the placeholders are resolved at boot time
-2. `channels.<channel>.accounts.mux` — `enabled: true` and `mux: { enabled: true, timeoutMs: 30000 }`
-3. `plugins.entries.<channel>.enabled` — `true` for each channel
+2. `channels.<channel>.accounts.default` — `enabled: true`
+3. `channels.<channel>.mux` — `enabled: true` and `timeoutMs: 30000`
+4. `plugins.entries.<channel>.enabled` — `true` for each channel
 
 ### Config migrations
 
