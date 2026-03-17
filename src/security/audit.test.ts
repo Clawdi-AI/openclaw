@@ -892,6 +892,33 @@ description: test skill
     expect(res.findings.some((f) => f.checkId === "fs.config.perms_group_readable")).toBe(false);
   });
 
+  it("suppresses state-dir symlink warning when clawdi audit bypass is enabled", async () => {
+    if (isWindows) {
+      return;
+    }
+
+    const tmp = await makeTmpDir("state-symlink");
+    const targetStateDir = path.join(tmp, "state-target");
+    await fs.mkdir(targetStateDir, { recursive: true, mode: 0o700 });
+    const stateDir = path.join(tmp, "state-link");
+    await fs.symlink(targetStateDir, stateDir);
+
+    const configPath = path.join(targetStateDir, "openclaw.json");
+    await fs.writeFile(configPath, "{}\n", "utf-8");
+
+    const res = await runSecurityAudit({
+      config: {},
+      includeFilesystem: true,
+      includeChannelSecurity: false,
+      stateDir,
+      configPath,
+      env: { CLAWDI_AUDIT_IGNORE_WARNING_SAFE: "1" },
+      execDockerRawFn: execDockerRawUnavailable,
+    });
+
+    expectNoFinding(res, "fs.state_dir.symlink");
+  });
+
   it("warns when workspace skill files resolve outside workspace root", async () => {
     if (isWindows) {
       return;
@@ -1423,6 +1450,24 @@ description: test skill
           detail: expect.stringContaining("gateway.controlUi.dangerouslyDisableDeviceAuth=true"),
         }),
       ]),
+    );
+  });
+
+  it("suppresses managed-deployment device-auth warning when clawdi audit bypass is enabled", async () => {
+    const cfg: OpenClawConfig = {
+      gateway: {
+        controlUi: { dangerouslyDisableDeviceAuth: true },
+      },
+    };
+
+    const res = await audit(cfg, {
+      env: { CLAWDI_AUDIT_IGNORE_WARNING_SAFE: "1" },
+    });
+
+    expectNoFinding(res, "gateway.control_ui.device_auth_disabled");
+    const flags = res.findings.find((f) => f.checkId === "config.insecure_or_dangerous_flags");
+    expect(flags?.detail ?? "").not.toContain(
+      "gateway.controlUi.dangerouslyDisableDeviceAuth=true",
     );
   });
 
