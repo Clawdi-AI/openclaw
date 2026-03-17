@@ -1791,6 +1791,18 @@ describe("mux server", () => {
         routeKey: "telegram:default:chat:-100888",
       },
     });
+    expect(
+      inboundRequests.find((request) =>
+        h.toSafeString(request.messageId).startsWith("synth:pair:"),
+      ),
+    ).toMatchObject({
+      channel: "telegram",
+      from: "telegram:1234",
+      sessionKey: "agent:main:telegram:group:-100888:switch",
+      channelData: {
+        routeKey: "telegram:default:chat:-100888",
+      },
+    });
 
     const pairingsA = await h.listPairings({ port: server.port, apiKey: "tenant-a-key" });
     expect(pairingsA.status).toBe(200);
@@ -2050,6 +2062,192 @@ describe("mux server", () => {
           routeKey: "discord:default:dm:user:4242",
         },
       ],
+    });
+  }, 20_000);
+
+  test("discord guild bot_switch preserves the claimer user id in post-pair synthetic inbound", async () => {
+    const inboundRequests: Array<Record<string, unknown>> = [];
+    const inbound = await h.startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      inboundRequests.push(await h.readJsonBody(req));
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const guildId = "555001";
+    const parentChannelId = "777001";
+    const threadId = "777102";
+    const claimerId = "4242";
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const gatewayState: {
+      socket: h.TestWebSocket | null;
+      identified: boolean;
+    } = {
+      socket: null,
+      identified: false,
+    };
+
+    const dispatchThreadMessage = (id: string, content: string, timestamp: string) => {
+      if (!gatewayState.socket || !gatewayState.identified) {
+        return;
+      }
+      gatewayState.socket.send(
+        JSON.stringify({
+          op: 0,
+          t: "MESSAGE_CREATE",
+          s: Number(id),
+          d: {
+            id,
+            channel_id: threadId,
+            guild_id: guildId,
+            type: 0,
+            content,
+            author: {
+              id: claimerId,
+              bot: false,
+              username: "tester",
+            },
+            thread: {
+              id: threadId,
+              parent_id: parentChannelId,
+            },
+            attachments: [],
+            mentions: [],
+            mention_roles: [],
+            timestamp,
+          },
+        }),
+      );
+    };
+
+    const gateway = await h.startWsServer((socket) => {
+      gatewayState.socket = socket;
+      socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 60_000 } }));
+      socket.on("message", (raw) => {
+        const payloadText =
+          typeof raw === "string"
+            ? raw
+            : Buffer.isBuffer(raw)
+              ? raw.toString("utf8")
+              : Array.isArray(raw)
+                ? Buffer.concat(raw).toString("utf8")
+                : Buffer.from(raw).toString("utf8");
+        const frame = JSON.parse(payloadText) as { op?: unknown };
+        if (Number(frame.op) !== 2) {
+          return;
+        }
+        gatewayState.identified = true;
+        socket.send(
+          JSON.stringify({
+            op: 0,
+            t: "READY",
+            s: 1,
+            d: { session_id: "gateway-session-discord-guild-bot-switch" },
+          }),
+        );
+      });
+      socket.on("close", () => {
+        gatewayState.socket = null;
+        gatewayState.identified = false;
+      });
+    });
+
+    const discordApi = await h.startHttpServer(async (req, res) => {
+      const method = req.method ?? "GET";
+      const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (method === "GET" && requestUrl.pathname === "/gateway/bot") {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ url: gateway.url }));
+        return;
+      }
+
+      const channelMessagesMatch = requestUrl.pathname.match(/^\/channels\/(\d+)\/messages$/);
+      if (method === "POST" && channelMessagesMatch) {
+        sentMessages.push(await h.readJsonBody(req));
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            id: String(9600 + sentMessages.length),
+            channel_id: channelMessagesMatch[1],
+          }),
+        );
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    const server = await h.startServer({
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 2_000,
+        },
+      ]),
+      extraEnv: {
+        MUX_DISCORD_API_BASE_URL: discordApi.url,
+        MUX_DISCORD_BOOTSTRAP_LATEST: "false",
+        MUX_DISCORD_GATEWAY_DM_ENABLED: "false",
+        MUX_DISCORD_GATEWAY_GUILD_ENABLED: "true",
+      },
+    });
+
+    const tokenResponse = await h.createAdminPairingToken({
+      port: server.port,
+      adminToken: h.DEFAULT_ADMIN_TOKEN,
+      openclawId: "tenant-a",
+      channel: "discord",
+      sessionKey: `agent:main:discord:channel:${threadId}`,
+      ttlSec: 120,
+    });
+    expect(tokenResponse.status).toBe(200);
+    const tokenBody = (await tokenResponse.json()) as { token: string };
+    expect(tokenBody.token.startsWith("mpt_")).toBe(true);
+
+    await h.waitForCondition(
+      () => gatewayState.identified,
+      5_000,
+      "timed out waiting for discord gateway identify before guild bot_switch",
+    );
+
+    dispatchThreadMessage("2001", `!bot_switch ${tokenBody.token}`, "2026-01-01T00:20:01.000Z");
+
+    await h.waitForCondition(
+      () =>
+        sentMessages.some((message) => h.toSafeString(message.content).includes("Paired")) &&
+        inboundRequests.some((request) =>
+          h.toSafeString(request.messageId).startsWith("synth:pair:"),
+        ),
+      8_000,
+      "timed out waiting for discord guild post-pair synthetic inbound",
+    );
+
+    expect(sentMessages.some((message) => h.toSafeString(message.content).includes("Paired"))).toBe(
+      true,
+    );
+    expect(
+      inboundRequests.find((request) =>
+        h.toSafeString(request.messageId).startsWith("synth:pair:"),
+      ),
+    ).toMatchObject({
+      channel: "discord",
+      from: `discord:${claimerId}`,
+      to: `channel:${threadId}`,
+      sessionKey: `agent:main:discord:channel:${threadId}`,
+      chatType: "group",
+      channelData: {
+        routeKey: `discord:default:guild:${guildId}`,
+        channelId: threadId,
+        guildId,
+      },
     });
   }, 20_000);
 
