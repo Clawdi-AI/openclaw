@@ -17,6 +17,7 @@ services:
 
     environment:
       NODE_ENV: production
+      CLAWDI_AUDIT_IGNORE_WARNING_SAFE: ${CLAWDI_AUDIT_IGNORE_WARNING_SAFE:-1}
       # Master key — derives rclone crypt passwords + gateway auth token via HKDF
       MASTER_KEY: ${MASTER_KEY:-}
       # Redpill AI provider
