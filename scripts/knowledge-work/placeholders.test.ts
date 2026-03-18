@@ -51,6 +51,13 @@ describe("normalizePlaceholders", () => {
     });
   });
 
+  it("stops unknown placeholder capture before a connector and next placeholder", () => {
+    expect(normalizePlaceholders("Use ~~marketing ops and ~~seo tools.")).toEqual({
+      text: "Use ~~marketing ops and ~~seo.",
+      unknownPlaceholders: ["~~marketing ops"],
+    });
+  });
+
   it("normalizes placeholders embedded in prose without consuming surrounding words", () => {
     expect(normalizePlaceholders("Does ~~crm things with ~~chat.")).toEqual({
       text: "Does ~~crm things with ~~chat.",

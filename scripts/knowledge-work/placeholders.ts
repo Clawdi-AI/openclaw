@@ -39,6 +39,7 @@ const MAX_PLACEHOLDER_WORDS = PLACEHOLDER_ALIAS_ENTRIES.reduce(
   (max, entry) => Math.max(max, entry.words.length),
   1,
 );
+const PLACEHOLDER_CONNECTOR_WORDS = new Set(["and", "or", "&", "plus"]);
 
 function canonicalizePlaceholder(raw: string): string | null {
   const normalized = raw.toLowerCase().trim().replace(/\s+/g, " ");
@@ -84,6 +85,18 @@ function readUnknownPlaceholderEnd(input: string, startIndex: number): number {
     const nextChar = input[nextIndex];
     if (nextChar == null || !/[a-z0-9]/i.test(nextChar)) {
       break;
+    }
+
+    const nextWord = readWord(input, nextIndex);
+    if (!nextWord) {
+      break;
+    }
+
+    if (PLACEHOLDER_CONNECTOR_WORDS.has(nextWord.value.toLowerCase())) {
+      const afterConnector = skipSpaces(input, nextWord.endIndex);
+      if (input.startsWith("~~", afterConnector)) {
+        break;
+      }
     }
 
     endIndex = nextIndex;
