@@ -1,0 +1,16 @@
+{
+  "plugins": [
+    {
+      "sourceDir": "../../../knowledge-work-plugins/sales",
+      "prefix": "sales",
+      "emoji": "💼",
+      "enabled": true
+    },
+    {
+      "sourceDir": "../../../knowledge-work-plugins/marketing",
+      "prefix": "marketing",
+      "emoji": "📣",
+      "enabled": true
+    }
+  ]
+}

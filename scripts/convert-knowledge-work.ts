@@ -263,8 +263,9 @@ export function convertPlugin(opts: {
   outputDir: string;
   prefix: string;
   emoji: string;
+  dryRun?: boolean;
 }): ConversionResult {
-  const { inputDir, outputDir, prefix, emoji } = opts;
+  const { inputDir, outputDir, prefix, emoji, dryRun = false } = opts;
   const plugin = readKnowledgeWorkPlugin(inputDir);
 
   const skillsWritten: string[] = [];
@@ -290,9 +291,11 @@ export function convertPlugin(opts: {
     const fm = transformFrontmatter(skill, prefix, emoji);
     const bodyTransform = transformKnowledgeWorkBody(skill.body, fm.name);
     const md = renderOpenClawSkillMd(fm, bodyTransform.body);
-    const outDir = path.join(outputDir, fm.name);
-    fs.mkdirSync(outDir, { recursive: true });
-    fs.writeFileSync(path.join(outDir, "SKILL.md"), md);
+    if (!dryRun) {
+      const outDir = path.join(outputDir, fm.name);
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.writeFileSync(path.join(outDir, "SKILL.md"), md);
+    }
     skillsWritten.push(fm.name);
     warnings.push(...bodyTransform.warnings);
   }
@@ -302,9 +305,11 @@ export function convertPlugin(opts: {
     const fm = transformFrontmatter(cmd, prefix, emoji);
     const bodyTransform = transformKnowledgeWorkBody(cmd.body, fm.name);
     const md = renderOpenClawSkillMd(fm, bodyTransform.body);
-    const outDir = path.join(outputDir, fm.name);
-    fs.mkdirSync(outDir, { recursive: true });
-    fs.writeFileSync(path.join(outDir, "SKILL.md"), md);
+    if (!dryRun) {
+      const outDir = path.join(outputDir, fm.name);
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.writeFileSync(path.join(outDir, "SKILL.md"), md);
+    }
     commandsWritten.push(fm.name);
     warnings.push(...bodyTransform.warnings);
   }
