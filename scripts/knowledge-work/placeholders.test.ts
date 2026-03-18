@@ -44,6 +44,13 @@ describe("normalizePlaceholders", () => {
     });
   });
 
+  it("preserves unknown multi-word placeholders in diagnostics", () => {
+    expect(normalizePlaceholders("Use ~~marketing ops.")).toEqual({
+      text: "Use ~~marketing ops.",
+      unknownPlaceholders: ["~~marketing ops"],
+    });
+  });
+
   it("normalizes placeholders embedded in prose without consuming surrounding words", () => {
     expect(normalizePlaceholders("Does ~~crm things with ~~chat.")).toEqual({
       text: "Does ~~crm things with ~~chat.",

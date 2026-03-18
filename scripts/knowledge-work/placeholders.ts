@@ -66,6 +66,32 @@ function skipSpaces(input: string, startIndex: number): number {
   return index;
 }
 
+function readUnknownPlaceholderEnd(input: string, startIndex: number): number {
+  let endIndex = startIndex;
+
+  while (endIndex < input.length) {
+    const word = readWord(input, endIndex);
+    if (!word) {
+      break;
+    }
+
+    endIndex = word.endIndex;
+    const nextIndex = skipSpaces(input, endIndex);
+    if (nextIndex === endIndex) {
+      break;
+    }
+
+    const nextChar = input[nextIndex];
+    if (nextChar == null || !/[a-z0-9]/i.test(nextChar)) {
+      break;
+    }
+
+    endIndex = nextIndex;
+  }
+
+  return endIndex;
+}
+
 function readPlaceholderToken(
   input: string,
   startIndex: number,
@@ -119,9 +145,10 @@ function readPlaceholderToken(
     };
   }
 
+  const unknownEndIndex = readUnknownPlaceholderEnd(input, startIndex + 2);
   return {
-    raw: `~~${words[0]}`,
-    endIndex: firstWord.endIndex,
+    raw: input.slice(startIndex, unknownEndIndex),
+    endIndex: unknownEndIndex,
   };
 }
 
