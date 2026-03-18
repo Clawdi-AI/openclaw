@@ -23,6 +23,20 @@ describe("normalizePlaceholders", () => {
     });
   });
 
+  it("normalizes marketing automation phrase to email-marketing", () => {
+    expect(normalizePlaceholders("~~marketing automation")).toEqual({
+      text: "~~email-marketing",
+      unknownPlaceholders: [],
+    });
+  });
+
+  it("normalizes knowledge base reference phrase to docs", () => {
+    expect(normalizePlaceholders("~~knowledge base reference")).toEqual({
+      text: "~~docs",
+      unknownPlaceholders: [],
+    });
+  });
+
   it("cleans up placeholder phrases to canonical keys", () => {
     expect(normalizePlaceholders("~~SEO tools")).toEqual({
       text: "~~seo",

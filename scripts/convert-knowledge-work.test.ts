@@ -124,16 +124,22 @@ describe("mapMcpServerToCategory", () => {
     ["atlassian", "~~docs"],
     ["guru", "~~docs"],
     ["zoominfo", "~~enrichment"],
+    ["apollo", "~~enrichment"],
     ["clay", "~~enrichment"],
     ["linear", "~~tracker"],
     ["asana", "~~tracker"],
     ["monday", "~~tracker"],
     ["clickup", "~~tracker"],
+    ["google-calendar", "~~calendar"],
     ["amplitude", "~~analytics"],
+    ["similarweb", "~~analytics"],
     ["pendo", "~~analytics"],
     ["figma", "~~design"],
     ["canva", "~~design"],
     ["fireflies", "~~calls"],
+    ["outreach", "~~outreach"],
+    ["ahrefs", "~~seo"],
+    ["klaviyo", "~~email-marketing"],
   ];
 
   for (const [server, category] of expectedMappings) {
@@ -144,8 +150,8 @@ describe("mapMcpServerToCategory", () => {
 
   it("returns null for unknown servers", () => {
     expect(mapMcpServerToCategory("unknown-server")).toBeNull();
-    expect(mapMcpServerToCategory("apollo")).toBeNull();
-    expect(mapMcpServerToCategory("google-calendar")).toBeNull();
+    expect(mapMcpServerToCategory("intercom")).toBeNull();
+    expect(mapMcpServerToCategory("zendesk")).toBeNull();
   });
 });
 

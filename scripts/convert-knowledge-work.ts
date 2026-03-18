@@ -139,16 +139,22 @@ const MCP_CATEGORY_MAP: Record<string, string> = {
   atlassian: "~~docs",
   guru: "~~docs",
   zoominfo: "~~enrichment",
+  apollo: "~~enrichment",
   clay: "~~enrichment",
   linear: "~~tracker",
   asana: "~~tracker",
   monday: "~~tracker",
   clickup: "~~tracker",
+  "google-calendar": "~~calendar",
   amplitude: "~~analytics",
+  similarweb: "~~analytics",
   pendo: "~~analytics",
   figma: "~~design",
   canva: "~~design",
   fireflies: "~~calls",
+  outreach: "~~outreach",
+  ahrefs: "~~seo",
+  klaviyo: "~~email-marketing",
 };
 
 /**
