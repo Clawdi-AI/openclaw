@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { normalizePlaceholders } from "./knowledge-work/placeholders.js";
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -41,6 +42,11 @@ export type ConversionResult = {
   skillsWritten: string[];
   commandsWritten: string[];
   connectorMappings: Record<string, { backend: string; ref: string }>;
+  warnings: string[];
+};
+
+type BodyTransformResult = {
+  body: string;
   warnings: string[];
 };
 
@@ -151,6 +157,21 @@ const MCP_CATEGORY_MAP: Record<string, string> = {
  */
 export function mapMcpServerToCategory(serverName: string): string | null {
   return MCP_CATEGORY_MAP[serverName] ?? null;
+}
+
+function transformKnowledgeWorkBody(body: string, targetName: string): BodyTransformResult {
+  const withoutStaleConnectorNote = body.replace(
+    /^.*If you see unfamiliar placeholders.*CONNECTORS\.md.*\n?/gim,
+    "",
+  );
+  const normalized = normalizePlaceholders(withoutStaleConnectorNote);
+
+  return {
+    body: normalized.text,
+    warnings: normalized.unknownPlaceholders.map(
+      (placeholder) => `Unresolved placeholder in ${targetName}: ${placeholder}`,
+    ),
+  };
 }
 
 // ─── Part 3: Plugin Reader ────────────────────────────────────────
@@ -267,21 +288,25 @@ export function convertPlugin(opts: {
   // Convert skills
   for (const skill of plugin.skills) {
     const fm = transformFrontmatter(skill, prefix, emoji);
-    const md = renderOpenClawSkillMd(fm, skill.body);
+    const bodyTransform = transformKnowledgeWorkBody(skill.body, fm.name);
+    const md = renderOpenClawSkillMd(fm, bodyTransform.body);
     const outDir = path.join(outputDir, fm.name);
     fs.mkdirSync(outDir, { recursive: true });
     fs.writeFileSync(path.join(outDir, "SKILL.md"), md);
     skillsWritten.push(fm.name);
+    warnings.push(...bodyTransform.warnings);
   }
 
   // Convert commands
   for (const cmd of plugin.commands) {
     const fm = transformFrontmatter(cmd, prefix, emoji);
-    const md = renderOpenClawSkillMd(fm, cmd.body);
+    const bodyTransform = transformKnowledgeWorkBody(cmd.body, fm.name);
+    const md = renderOpenClawSkillMd(fm, bodyTransform.body);
     const outDir = path.join(outputDir, fm.name);
     fs.mkdirSync(outDir, { recursive: true });
     fs.writeFileSync(path.join(outDir, "SKILL.md"), md);
     commandsWritten.push(fm.name);
+    warnings.push(...bodyTransform.warnings);
   }
 
   return { skillsWritten, commandsWritten, connectorMappings, warnings };

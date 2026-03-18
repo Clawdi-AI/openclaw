@@ -222,6 +222,14 @@ describe("convertPlugin", () => {
       `---\nname: my-skill\ndescription: Does ~~crm things with ~~chat.\n---\n# My Skill\n\nBody content here.`,
     );
 
+    // Create a skill that exercises placeholder normalization and stale note stripping.
+    const placeholderSkillDir = path.join(inputDir, "skills", "placeholder-skill");
+    fs.mkdirSync(placeholderSkillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(placeholderSkillDir, "SKILL.md"),
+      `---\nname: placeholder-skill\ndescription: Has placeholder variants.\n---\n# Placeholder Skill\n\nIf you see unfamiliar placeholders in source docs, see CONNECTORS.md.\nUse ~~CRM and ~~product analytics. Also watch ~~mystery.`,
+    );
+
     // Create a skill with QUICKREF.md
     const skill2Dir = path.join(inputDir, "skills", "other-skill");
     fs.mkdirSync(skill2Dir, { recursive: true });
@@ -260,6 +268,24 @@ describe("convertPlugin", () => {
     const content = fs.readFileSync(skillPath, "utf-8");
     expect(content).toContain("name: tp-my-skill");
     expect(content).toContain("Does crm things with chat.");
+  });
+
+  it("strips stale connector notes, normalizes placeholders, and warns on unresolved placeholders", () => {
+    const result = convertPlugin({
+      inputDir,
+      outputDir,
+      prefix: "tp",
+      emoji: "🔧",
+    });
+
+    const content = fs.readFileSync(
+      path.join(outputDir, "tp-placeholder-skill", "SKILL.md"),
+      "utf-8",
+    );
+    expect(content).not.toContain("If you see unfamiliar placeholders");
+    expect(content).not.toContain("CONNECTORS.md");
+    expect(content).toContain("Use ~~crm and ~~analytics. Also watch ~~mystery.");
+    expect(result.warnings).toContain("Unresolved placeholder in tp-placeholder-skill: ~~mystery");
   });
 
   it("folds QUICKREF.md into the skill body", () => {
