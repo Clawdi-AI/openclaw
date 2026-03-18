@@ -246,6 +246,10 @@ describe("convertPlugin", () => {
       path.join(cmdDir, "do-thing.md"),
       `---\nname: do-thing\ndescription: Does a thing.\n---\n# Do Thing\n\nCommand body.`,
     );
+    fs.writeFileSync(
+      path.join(cmdDir, "do-placeholder.md"),
+      `---\nname: do-placeholder\ndescription: Uses placeholder variants.\n---\n# Do Placeholder\n\nIf you see unfamiliar placeholders in source docs, see CONNECTORS.md.\nRun with ~~CRM and ~~mystery.`,
+    );
   });
 
   afterAll(() => {
@@ -304,6 +308,22 @@ describe("convertPlugin", () => {
       emoji: "🔧",
     });
     expect(result.commandsWritten).toContain("tp-do-thing");
+    expect(result.commandsWritten).toContain("tp-do-placeholder");
+  });
+
+  it("strips stale connector notes and normalizes placeholders in command bodies", () => {
+    const result = convertPlugin({
+      inputDir,
+      outputDir,
+      prefix: "tp",
+      emoji: "🔧",
+    });
+
+    const content = fs.readFileSync(path.join(outputDir, "tp-do-placeholder", "SKILL.md"), "utf-8");
+    expect(content).not.toContain("If you see unfamiliar placeholders");
+    expect(content).not.toContain("CONNECTORS.md");
+    expect(content).toContain("Run with ~~crm and ~~mystery.");
+    expect(result.warnings).toContain("Unresolved placeholder in tp-do-placeholder: ~~mystery");
   });
 
   it("extracts connector mappings from MCP servers", () => {
