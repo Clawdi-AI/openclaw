@@ -15,6 +15,7 @@ import {
 } from "../config/config.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import { listTelegramAccountIds, resolveTelegramAccount } from "../telegram/accounts.js";
+import { resolveTelegramBotApiBaseUrl } from "../telegram/api-base-url.js";
 import { note } from "../terminal/note.js";
 import { isRecord, resolveHomeDir } from "../utils.js";
 import { normalizeLegacyConfigValues } from "./doctor-legacy-config.js";
@@ -329,7 +330,7 @@ async function maybeRepairTelegramAllowFromUsernames(cfg: OpenClawConfig): Promi
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 4000);
       try {
-        const url = `https://api.telegram.org/bot${token}/getChat?chat_id=${encodeURIComponent(username)}`;
+        const url = `${resolveTelegramBotApiBaseUrl()}/bot${token}/getChat?chat_id=${encodeURIComponent(username)}`;
         const res = await fetch(url, { signal: controller.signal }).catch(() => null);
         if (!res || !res.ok) {
           continue;
