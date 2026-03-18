@@ -43,4 +43,11 @@ describe("normalizePlaceholders", () => {
       unknownPlaceholders: ["~~mystery"],
     });
   });
+
+  it("normalizes placeholders embedded in prose without consuming surrounding words", () => {
+    expect(normalizePlaceholders("Does ~~crm things with ~~chat.")).toEqual({
+      text: "Does ~~crm things with ~~chat.",
+      unknownPlaceholders: [],
+    });
+  });
 });
