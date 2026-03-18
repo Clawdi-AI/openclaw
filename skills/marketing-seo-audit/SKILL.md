@@ -1,12 +1,10 @@
 ---
 name: marketing-seo-audit
-description: Run a comprehensive SEO audit — keyword research, on-page analysis, technical checks, and competitor SEO comparison. Trigger with "SEO audit for [site]", "keyword research for [topic]", "check my site's SEO". NOT for content creation or campaign planning.
+description: Run a comprehensive SEO audit — keyword research, on-page analysis, content gaps, technical checks, and competitor comparison. Use when assessing a site's SEO health, when finding keyword opportunities and content gaps competitors own, or when you need a prioritized action plan split into quick wins and strategic investments.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 
 # /seo-audit
-
-> If you see unfamiliar placeholders or need to check which tools are connected, see [CONNECTORS.md](../../CONNECTORS.md).
 
 Audit a website's SEO health, research keyword opportunities, identify content gaps, and benchmark against competitors. Produces a prioritized action plan a marketer can execute immediately.
 
@@ -39,12 +37,12 @@ Gather the following from the user. If not provided, ask before proceeding:
 
 Research keywords related to the user's domain, topic, or target keywords.
 
-**If ~~SEO tools are connected:**
+**If ~~seo are connected:**
 
 - Pull keyword data, search volume, keyword difficulty scores, and ranking positions automatically
 - Identify keywords the site currently ranks for and where it's gaining or losing ground
 
-**If ~~product analytics are connected:**
+**If ~~analytics are connected:**
 
 - Cross-reference keyword targets with actual organic traffic data to validate which keywords are driving visits and conversions
 

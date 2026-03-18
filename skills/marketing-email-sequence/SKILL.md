@@ -1,12 +1,10 @@
 ---
 name: marketing-email-sequence
-description: Design and draft multi-email sequences with full copy, timing, branching logic, and performance benchmarks. Trigger with "build a nurture sequence", "onboarding email flow", "drip campaign for [goal]". NOT for single emails or general content drafting.
+description: Design and draft multi-email sequences with full copy, timing, branching logic, exit conditions, and performance benchmarks. Use when building onboarding, lead nurture, re-engagement, win-back, or product launch flows, when you need a complete drip campaign with A/B test suggestions, or when mapping a sequence end-to-end with a flow diagram.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 
 # Email Sequence
-
-> If you see unfamiliar placeholders or need to check which tools are connected, see [CONNECTORS.md](../../CONNECTORS.md).
 
 Design and draft complete email sequences with full copy, timing, branching logic, and performance benchmarks for any lifecycle or campaign use case.
 
@@ -158,7 +156,7 @@ Introduction and what they will learn -- Lesson 1: foundational concept -- Lesso
 - Note any platform-specific features to use (e.g., smart send time, conditional splits, A/B testing)
 - Map the branching logic to the platform's visual flow builder concepts
 
-### If ~~marketing automation or ~~CRM is connected (e.g., HubSpot, Marketo)
+### If ~~email-marketing or ~~crm is connected (e.g., HubSpot, Marketo)
 
 - Reference lead scoring data to inform segmentation and exit conditions
 - Use lifecycle stage data to tailor messaging per segment

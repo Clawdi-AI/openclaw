@@ -1,12 +1,10 @@
 ---
 name: marketing-competitive-brief
-description: Research competitors for marketing positioning — analyze messaging, content gaps, and market opportunities. Trigger with "competitive brief", "how are competitors positioning", "content gap analysis vs [competitor]". NOT for sales battlecards or deal-level competitive intel.
+description: Research competitors and generate a positioning and messaging comparison with content gaps, opportunities, and threats. Use when building sales battlecards, when finding positioning gaps and messaging angles competitors haven't claimed, or when a competitor makes a move and you need to assess the impact.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 
 # Competitive Brief
-
-> If you see unfamiliar placeholders or need to check which tools are connected, see [CONNECTORS.md](../../CONNECTORS.md).
 
 Research competitors and generate a structured competitive analysis comparing positioning, messaging, content strategy, and market presence.
 

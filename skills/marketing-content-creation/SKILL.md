@@ -1,6 +1,6 @@
 ---
 name: marketing-content-creation
-description: Reference guide for marketing content best practices — templates, SEO fundamentals, headline formulas, and CTA patterns. Trigger with "content writing guidelines", "blog post template", "SEO checklist". NOT for drafting actual content (use marketing-draft-content) or email sequences.
+description: Draft marketing content across channels — blog posts, social media, email newsletters, landing pages, press releases, and case studies. Use when writing any marketing content, when you need channel-specific formatting, SEO-optimized copy, headline options, or calls to action.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 

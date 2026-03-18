@@ -1,12 +1,10 @@
 ---
 name: sales-call-summary
-description: Process call notes or a transcript after a meeting — extract action items, draft follow-up email, generate internal summary. Trigger with "summarize my call", "process these notes", "call follow-up". NOT for call preparation or scheduling.
-metadata: '{"openclaw":{"emoji":"💰"}}'
+description: Process call notes or a transcript — extract action items, draft follow-up email, generate internal summary. Use when pasting rough notes or a transcript after a discovery, demo, or negotiation call, drafting a customer follow-up, logging the activity for your CRM, or capturing objections and next steps for your team.
+metadata: '{"openclaw":{"emoji":"💼"}}'
 ---
 
 # /call-summary
-
-> If you see unfamiliar placeholders or need to check which tools are connected, see [CONNECTORS.md](../../CONNECTORS.md).
 
 Process call notes or a transcript to extract action items, draft follow-up communications, and update records.
 

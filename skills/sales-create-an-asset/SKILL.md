@@ -1,7 +1,7 @@
 ---
 name: sales-create-an-asset
-description: Generate tailored sales assets — landing pages, decks, one-pagers, workflow demos — from your deal context. Trigger with "create an asset for [company]", "build a demo", "make a one-pager". NOT for general content writing or marketing materials.
-metadata: '{"openclaw":{"emoji":"💰"}}'
+description: Generate tailored sales assets (landing pages, decks, one-pagers, workflow demos) from your deal context. Describe your prospect, audience, and goal — get a polished, branded asset ready to share with customers.
+metadata: '{"openclaw":{"emoji":"💼"}}'
 ---
 
 # Create an Asset

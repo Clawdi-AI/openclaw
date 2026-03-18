@@ -1,12 +1,10 @@
 ---
 name: marketing-campaign-plan
-description: Generate a full campaign brief with objectives, audience, messaging, channel strategy, content calendar, and success metrics. Trigger with "plan a campaign", "launch plan for [product]", "campaign brief". NOT for writing actual content or analyzing past performance.
+description: Generate a full campaign brief with objectives, audience, messaging, channel strategy, content calendar, and success metrics. Use when planning a product launch, lead-gen push, or awareness campaign, when you need a week-by-week content calendar with dependencies, or when translating a marketing goal into a structured, executable plan.
 metadata: '{"openclaw":{"emoji":"📣"}}'
 ---
 
 # Campaign Plan
-
-> If you see unfamiliar placeholders or need to check which tools are connected, see [CONNECTORS.md](../../CONNECTORS.md).
 
 Generate a comprehensive marketing campaign brief with objectives, audience, messaging, channel strategy, content calendar, and success metrics.
 
@@ -106,7 +104,7 @@ Define KPIs aligned to the campaign objective:
 - How each metric will be tracked
 - Reporting cadence recommendation
 
-If ~~product analytics is connected, reference any available historical performance benchmarks to inform targets.
+If ~~analytics is connected, reference any available historical performance benchmarks to inform targets.
 
 ### 8. Budget Allocation (if budget provided)
 
