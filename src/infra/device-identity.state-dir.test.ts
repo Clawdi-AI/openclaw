@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { withStateDirEnv } from "../test-helpers/state-dir-env.js";
+import { withEnvAsync } from "../test-utils/env.js";
 import { loadOrCreateDeviceIdentity } from "./device-identity.js";
 
 describe("device identity state dir defaults", () => {
@@ -68,6 +69,20 @@ describe("device identity state dir defaults", () => {
       expect(stored.deviceId).toBe(regenerated.deviceId);
       expect(stored.publicKeyPem).toBe(regenerated.publicKeyPem);
       expect(stored.privateKeyPem).toBe(regenerated.privateKeyPem);
+    });
+  });
+
+  it("recreates the same identity after device.json loss when MASTER_KEY is set", async () => {
+    await withStateDirEnv("openclaw-identity-state-", async ({ stateDir }) => {
+      await withEnvAsync({ MASTER_KEY: "state-dir-master-key" }, async () => {
+        const identityPath = path.join(stateDir, "identity", "device.json");
+        const first = loadOrCreateDeviceIdentity();
+
+        await fs.rm(identityPath, { force: true });
+
+        const recreated = loadOrCreateDeviceIdentity();
+        expect(recreated).toEqual(first);
+      });
     });
   });
 });
