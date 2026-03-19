@@ -157,6 +157,14 @@ export async function sendReactionWhatsApp(
   }
 }
 
+export async function sendTypingWhatsApp(
+  to: string,
+  options: { accountId?: string },
+): Promise<void> {
+  const { listener: active } = requireActiveWebListener(options.accountId);
+  await active.sendComposingTo(to);
+}
+
 export async function sendPollWhatsApp(
   to: string,
   poll: PollInput,
