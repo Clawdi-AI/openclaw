@@ -192,6 +192,10 @@ function buildHarnessConfig(params: {
                 allowFrom: ["*"],
                 groupPolicy: "open",
                 mux: { enabled: true, timeoutMs: 10_000 },
+                // requireMention must be false: the mux-server does not yet
+                // forward `wasMentioned` from Discord message metadata, so
+                // mention gating silently drops all guild messages.  The
+                // production deploy template also defaults to false.
                 guilds: {
                   "*": { requireMention: false },
                 },

@@ -64,6 +64,7 @@
       "enabled": true,
       "groupPolicy": "open",
       "mux": { "enabled": true, "timeoutMs": 30000 },
+      "guilds": { "*": { "requireMention": false } },
       "accounts": {
         "default": { "enabled": true, "groupPolicy": "open" }
       }
