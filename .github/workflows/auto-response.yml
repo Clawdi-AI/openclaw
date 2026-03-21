@@ -10,6 +10,8 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  HAS_GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY != "" && 'true' || 'false' }}
+  HAS_GH_APP_PRIVATE_KEY_FALLBACK: ${{ secrets.GH_APP_PRIVATE_KEY_FALLBACK != "" && 'true' || 'false' }}
 
 permissions: {}
 
@@ -22,14 +24,14 @@ jobs:
     steps:
       - uses: actions/create-github-app-token@v2
         id: app-token
-        if: ${{ secrets.GH_APP_PRIVATE_KEY != '' }}
+        if: env.HAS_GH_APP_PRIVATE_KEY == 'true'
         continue-on-error: true
         with:
           app-id: "2729701"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
       - uses: actions/create-github-app-token@v2
         id: app-token-fallback
-        if: ${{ steps.app-token.outcome != 'success' && secrets.GH_APP_PRIVATE_KEY_FALLBACK != '' }}
+        if: steps.app-token.outcome != 'success' && env.HAS_GH_APP_PRIVATE_KEY_FALLBACK == 'true'
         with:
           app-id: "2971289"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY_FALLBACK }}
