@@ -20,6 +20,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME_OPENCLAW: ${{ github.repository }}
   IMAGE_NAME_MUX: ${{ github.repository_owner }}/mux-server
+  DOCKER_OUTPUT_COMPRESSION: zstd
+  DOCKER_OUTPUT_COMPRESSION_LEVEL: "3"
 
 jobs:
   prepare-release:
@@ -113,18 +115,30 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push amd64 image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: phala-deploy/Dockerfile
-          target: full
-          platforms: linux/amd64
-          labels: ${{ steps.meta.outputs.labels }}
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_LC }}-cache:amd64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_LC }}-cache:amd64,mode=max
-          provenance: false
-          push: true
+        shell: bash
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+          META_LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          set -euo pipefail
+          args=(
+            --file phala-deploy/Dockerfile
+            --target full
+            --platform linux/amd64
+            --cache-from type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_LC }}-cache:amd64
+            --cache-to type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_LC }}-cache:amd64,mode=max
+            --provenance=false
+            --output type=image,push=true,compression=${{ env.DOCKER_OUTPUT_COMPRESSION }},compression-level=${{ env.DOCKER_OUTPUT_COMPRESSION_LEVEL }},force-compression=true,oci-mediatypes=true
+          )
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            args+=(--tag "$tag")
+          done <<< "$META_TAGS"
+          while IFS= read -r label; do
+            [[ -z "$label" ]] && continue
+            args+=(--label "$label")
+          done <<< "$META_LABELS"
+          docker buildx build "${args[@]}" .
 
   release-openclaw-base-amd64:
     needs: prepare-release
@@ -171,18 +185,30 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push amd64 image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: phala-deploy/Dockerfile
-          target: base
-          platforms: linux/amd64
-          labels: ${{ steps.meta.outputs.labels }}
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_BASE_LC }}-cache:amd64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_BASE_LC }}-cache:amd64,mode=max
-          provenance: false
-          push: true
+        shell: bash
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+          META_LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          set -euo pipefail
+          args=(
+            --file phala-deploy/Dockerfile
+            --target base
+            --platform linux/amd64
+            --cache-from type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_BASE_LC }}-cache:amd64
+            --cache-to type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPENCLAW_BASE_LC }}-cache:amd64,mode=max
+            --provenance=false
+            --output type=image,push=true,compression=${{ env.DOCKER_OUTPUT_COMPRESSION }},compression-level=${{ env.DOCKER_OUTPUT_COMPRESSION_LEVEL }},force-compression=true,oci-mediatypes=true
+          )
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            args+=(--tag "$tag")
+          done <<< "$META_TAGS"
+          while IFS= read -r label; do
+            [[ -z "$label" ]] && continue
+            args+=(--label "$label")
+          done <<< "$META_LABELS"
+          docker buildx build "${args[@]}" .
 
   release-mux-amd64:
     needs: prepare-release
@@ -222,14 +248,26 @@ jobs:
             type=raw,value=${{ env.VERSION_FULL }}-amd64,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push mux amd64 image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: mux-server/Dockerfile
-          platforms: linux/amd64
-          labels: ${{ steps.meta.outputs.labels }}
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MUX_LC }}-cache:amd64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MUX_LC }}-cache:amd64,mode=max
-          provenance: false
-          push: true
+        shell: bash
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+          META_LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          set -euo pipefail
+          args=(
+            --file mux-server/Dockerfile
+            --platform linux/amd64
+            --cache-from type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MUX_LC }}-cache:amd64
+            --cache-to type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME_MUX_LC }}-cache:amd64,mode=max
+            --provenance=false
+            --output type=image,push=true,compression=${{ env.DOCKER_OUTPUT_COMPRESSION }},compression-level=${{ env.DOCKER_OUTPUT_COMPRESSION_LEVEL }},force-compression=true,oci-mediatypes=true
+          )
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            args+=(--tag "$tag")
+          done <<< "$META_TAGS"
+          while IFS= read -r label; do
+            [[ -z "$label" ]] && continue
+            args+=(--label "$label")
+          done <<< "$META_LABELS"
+          docker buildx build "${args[@]}" .
