@@ -88,7 +88,7 @@ If `has_active_connection` is false for a toolkit:
 
 ```bash
 mcporter call clawdi-mcp.COMPOSIO_MANAGE_CONNECTIONS \
-  'toolkits=["googlesuper"]'
+  'toolkits=["<exact-toolkit-from-search>"]'
 ```
 
 This returns a `redirect_url`. Share that link with the user so they can complete OAuth.
@@ -105,13 +105,22 @@ Use exact tool slugs and argument names from search results.
 
 ## Google Services
 
-Prefer `googlesuper` for Gmail, Drive, Docs, Sheets, Calendar, Contacts, and Maps so the user only authenticates once.
+Google routing is inconsistent. Do not assume `googlesuper` covers every Google task.
 
-- Search with `googlesuper` in the use case
-- Connect with `COMPOSIO_MANAGE_CONNECTIONS toolkits=["googlesuper"]`
-- Tool slugs are prefixed `GOOGLESUPER_`
+When speaking to normal users:
 
-For operations `googlesuper` does not cover, search will return toolkit-specific tools like `GOOGLEDRIVE_*` or `GOOGLESHEETS_*`.
+- Treat this as "Google" from the user's perspective.
+- If a task needs more access, say that some Google actions may need an additional Google sign-in or permission step.
+- Offer the auth link plainly and tell the user you can continue right after they finish.
+- Do not mention `googlesuper`, toolkit names, or Composio routing details unless the user asks for technical detail.
+
+- You may try `googlesuper` in the search query for broad Google tasks.
+- If search returns `GOOGLESUPER_*` tools and `toolkit_connection_statuses` only requires `googlesuper`, connect `googlesuper`.
+- If search returns toolkit-specific Google tools like `GOOGLECALENDAR_*`, `GOOGLEDRIVE_*`, `GOOGLESHEETS_*`, or `GMAIL_*`, use the exact toolkit names returned by search when checking or creating connections.
+- Do not map `googlecalendar`, `googledrive`, `googlesheets`, or `gmail` back to `googlesuper` on your own.
+- Tool slugs and `toolkit_connection_statuses` are the source of truth.
+
+Composio-managed auth configs for `googlesuper`, `googlecalendar`, `googledrive`, `googlesheets`, and `gmail` are distinct, so substituting one toolkit for another is unsafe unless search explicitly does it for you.
 
 ## Handling Files
 
@@ -132,7 +141,7 @@ Download the file locally, then process it.
 ## Tips
 
 - Search first. Do not guess tool names.
-- Check connection status before executing.
+- Check connection status before executing and use the exact toolkit names returned by search.
 - Use `recommended_plan_steps`.
 - Read `known_pitfalls`.
 - Loop on pagination when `has_more` is true.
