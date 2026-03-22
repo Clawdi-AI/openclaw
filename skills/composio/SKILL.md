@@ -120,13 +120,6 @@ When speaking to normal users:
 - Do not map `googlecalendar`, `googledrive`, `googlesheets`, or `gmail` back to `googlesuper` on your own.
 - Tool slugs and `toolkit_connection_statuses` are the source of truth.
 
-Verified with live Composio MCP tests on 2026-03-22:
-
-- `use googlesuper to send an email` returned `GOOGLESUPER_SEND_EMAIL`
-- `use googlesuper to create a google calendar event` returned `GOOGLESUPER_CREATE_EVENT`
-- `use googlesuper to list files in google drive` still returned mixed `googledrive` and `googlesuper`
-- `use googlesuper to create a row in google sheets` still returned `GOOGLESHEETS_*`
-
 Composio-managed auth configs for `googlesuper`, `googlecalendar`, `googledrive`, `googlesheets`, and `gmail` are distinct, so substituting one toolkit for another is unsafe unless search explicitly does it for you.
 
 ## Handling Files
