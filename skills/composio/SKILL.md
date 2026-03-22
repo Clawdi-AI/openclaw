@@ -107,6 +107,13 @@ Use exact tool slugs and argument names from search results.
 
 Google routing is inconsistent. Do not assume `googlesuper` covers every Google task.
 
+When speaking to normal users:
+
+- Treat this as "Google" from the user's perspective.
+- If a task needs more access, say that some Google actions may need an additional Google sign-in or permission step.
+- Offer the auth link plainly and tell the user you can continue right after they finish.
+- Do not mention `googlesuper`, toolkit names, or Composio routing details unless the user asks for technical detail.
+
 - You may try `googlesuper` in the search query for broad Google tasks.
 - If search returns `GOOGLESUPER_*` tools and `toolkit_connection_statuses` only requires `googlesuper`, connect `googlesuper`.
 - If search returns toolkit-specific Google tools like `GOOGLECALENDAR_*`, `GOOGLEDRIVE_*`, `GOOGLESHEETS_*`, or `GMAIL_*`, use the exact toolkit names returned by search when checking or creating connections.
