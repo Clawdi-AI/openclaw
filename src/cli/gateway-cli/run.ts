@@ -24,7 +24,7 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { defaultRuntime } from "../../runtime.js";
 import { formatCliCommand } from "../command-format.js";
 import { inheritOptionFromParent } from "../command-options.js";
-import { forceFreePortAndWait, waitForPortBindable } from "../ports.js";
+import { forceFreePortAndWait, probePortFree, waitForPortBindable } from "../ports.js";
 import { ensureDevGatewayConfig } from "./dev.js";
 import { runGatewayLoop } from "./run-loop.js";
 import {
@@ -233,27 +233,6 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
   }
   if (opts.force) {
     try {
-      const { killed, waitedMs, escalatedToSigkill } = await forceFreePortAndWait(port, {
-        timeoutMs: 2000,
-        intervalMs: 100,
-        sigtermTimeoutMs: 700,
-      });
-      if (killed.length === 0) {
-        gatewayLog.info(`force: no listeners on port ${port}`);
-      } else {
-        for (const proc of killed) {
-          gatewayLog.info(
-            `force: killed pid ${proc.pid}${proc.command ? ` (${proc.command})` : ""} on port ${port}`,
-          );
-        }
-        if (escalatedToSigkill) {
-          gatewayLog.info(`force: escalated to SIGKILL while freeing port ${port}`);
-        }
-        if (waitedMs > 0) {
-          gatewayLog.info(`force: waited ${waitedMs}ms for port ${port} to free`);
-        }
-      }
-      // After killing, verify the port is actually bindable (handles TIME_WAIT).
       const bindProbeHost =
         bind === "loopback"
           ? "127.0.0.1"
@@ -262,13 +241,38 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
             : bind === "custom"
               ? toOptionString(cfg.gateway?.customBindHost)
               : undefined;
-      const bindWaitMs = await waitForPortBindable(port, {
-        timeoutMs: 3000,
-        intervalMs: 150,
-        host: bindProbeHost,
-      });
-      if (bindWaitMs > 0) {
-        gatewayLog.info(`force: waited ${bindWaitMs}ms for port ${port} to become bindable`);
+      if (await probePortFree(port, bindProbeHost)) {
+        gatewayLog.info(`force: no listeners on port ${port}`);
+      } else {
+        const { killed, waitedMs, escalatedToSigkill } = await forceFreePortAndWait(port, {
+          timeoutMs: 2000,
+          intervalMs: 100,
+          sigtermTimeoutMs: 700,
+        });
+        if (killed.length === 0) {
+          gatewayLog.info(`force: no listeners on port ${port}`);
+        } else {
+          for (const proc of killed) {
+            gatewayLog.info(
+              `force: killed pid ${proc.pid}${proc.command ? ` (${proc.command})` : ""} on port ${port}`,
+            );
+          }
+          if (escalatedToSigkill) {
+            gatewayLog.info(`force: escalated to SIGKILL while freeing port ${port}`);
+          }
+          if (waitedMs > 0) {
+            gatewayLog.info(`force: waited ${waitedMs}ms for port ${port} to free`);
+          }
+        }
+        // After killing, verify the port is actually bindable (handles TIME_WAIT).
+        const bindWaitMs = await waitForPortBindable(port, {
+          timeoutMs: 3000,
+          intervalMs: 150,
+          host: bindProbeHost,
+        });
+        if (bindWaitMs > 0) {
+          gatewayLog.info(`force: waited ${bindWaitMs}ms for port ${port} to become bindable`);
+        }
       }
     } catch (err) {
       defaultRuntime.error(`Force: ${String(err)}`);

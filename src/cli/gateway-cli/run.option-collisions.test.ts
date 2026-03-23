@@ -13,6 +13,7 @@ const forceFreePortAndWait = vi.fn(async (_port: number, _opts: unknown) => ({
   waitedMs: 0,
   escalatedToSigkill: false,
 }));
+const probePortFree = vi.fn(async (_port: number, _host?: string) => true);
 const waitForPortBindable = vi.fn(async (_port: number, _opts?: unknown) => 0);
 const ensureDevGatewayConfig = vi.fn(async (_opts?: unknown) => {});
 const runGatewayLoop = vi.fn(async ({ start }: { start: () => Promise<unknown> }) => {
@@ -103,6 +104,7 @@ vi.mock("../command-format.js", () => ({
 
 vi.mock("../ports.js", () => ({
   forceFreePortAndWait: (port: number, opts: unknown) => forceFreePortAndWait(port, opts),
+  probePortFree: (port: number, host?: string) => probePortFree(port, host),
   waitForPortBindable: (port: number, opts?: unknown) => waitForPortBindable(port, opts),
 }));
 
@@ -134,6 +136,7 @@ describe("gateway run option collisions", () => {
     setGatewayWsLogStyle.mockClear();
     setVerbose.mockClear();
     forceFreePortAndWait.mockClear();
+    probePortFree.mockClear();
     waitForPortBindable.mockClear();
     ensureDevGatewayConfig.mockClear();
     runGatewayLoop.mockClear();
@@ -166,11 +169,9 @@ describe("gateway run option collisions", () => {
       "--force",
     ]);
 
-    expect(forceFreePortAndWait).toHaveBeenCalledWith(18789, expect.anything());
-    expect(waitForPortBindable).toHaveBeenCalledWith(
-      18789,
-      expect.objectContaining({ host: "127.0.0.1" }),
-    );
+    expect(probePortFree).toHaveBeenCalledWith(18789, "127.0.0.1");
+    expect(forceFreePortAndWait).not.toHaveBeenCalled();
+    expect(waitForPortBindable).not.toHaveBeenCalled();
     expect(setGatewayWsLogStyle).toHaveBeenCalledWith("full");
     expect(startGatewayServer).toHaveBeenCalledWith(
       18789,
@@ -179,6 +180,19 @@ describe("gateway run option collisions", () => {
           token: "tok_run",
         }),
       }),
+    );
+  });
+
+  it("kills listeners for --force only when the port is not bindable", async () => {
+    probePortFree.mockResolvedValueOnce(false);
+
+    await runGatewayCli(["gateway", "run", "--force", "--allow-unconfigured"]);
+
+    expect(probePortFree).toHaveBeenCalledWith(18789, "127.0.0.1");
+    expect(forceFreePortAndWait).toHaveBeenCalledWith(18789, expect.anything());
+    expect(waitForPortBindable).toHaveBeenCalledWith(
+      18789,
+      expect.objectContaining({ host: "127.0.0.1" }),
     );
   });
 

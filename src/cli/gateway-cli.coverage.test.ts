@@ -22,6 +22,7 @@ const forceFreePortAndWait = vi.fn<
   waitedMs: 0,
   escalatedToSigkill: false,
 }));
+const probePortFree = vi.fn(async () => true);
 const serviceIsLoaded = vi.fn().mockResolvedValue(true);
 const discoverGatewayBeacons = vi.fn<(opts: unknown) => Promise<DiscoveredBeacon[]>>(
   async () => [],
@@ -57,6 +58,7 @@ vi.mock("../runtime.js", () => ({
 
 vi.mock("./ports.js", () => ({
   forceFreePortAndWait: (port: number) => forceFreePortAndWait(port),
+  probePortFree: (port: number, host?: string) => probePortFree(port, host),
 }));
 
 vi.mock("../daemon/service.js", () => ({
@@ -116,6 +118,8 @@ describe("gateway-cli coverage", () => {
     gatewayProgram = createGatewayProgram();
     inspectPortUsage.mockClear();
     formatPortDiagnostics.mockClear();
+    forceFreePortAndWait.mockClear();
+    probePortFree.mockClear();
   });
 
   it("registers call/health commands and routes to callGateway", async () => {
