@@ -7,6 +7,8 @@ import { mentatBridgeConfigSchema } from "./config.js";
 import { registerAfterToolCallHook } from "./hooks/after-tool-call.js";
 import { registerAgentEndHook } from "./hooks/agent-end.js";
 import { registerCompactionHooks } from "./hooks/compaction.js";
+import { registerMediaFileTransformHook } from "./hooks/media-file-transform.js";
+import { registerMessageReceivedHook } from "./hooks/message-received.js";
 import { registerSessionLifecycleHooks } from "./hooks/session-lifecycle.js";
 import { registerToolResultPersistHook } from "./hooks/tool-result-persist.js";
 import {
@@ -139,6 +141,10 @@ const mentatBridgePlugin = {
         readTracker,
         docMetaCache,
       );
+
+      // ── Hook: message_received (channel attachment indexing) ────
+
+      registerMessageReceivedHook(api as Parameters<typeof registerMessageReceivedHook>[0], client);
     }
 
     // ── Hook: tool_result_persist (token compression) ──────────────
@@ -149,6 +155,14 @@ const mentatBridgePlugin = {
         client,
         cfg,
         docMetaCache,
+      );
+
+      // ── Hook: media_file_transform (channel attachment compression) ─
+
+      registerMediaFileTransformHook(
+        api as Parameters<typeof registerMediaFileTransformHook>[0],
+        client,
+        cfg,
       );
     }
 

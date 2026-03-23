@@ -8,6 +8,7 @@ import {
   normalizeMimeType,
   resolveInputFileLimits,
 } from "../media/input-files.js";
+import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { resolveAttachmentKind } from "./attachments.js";
 import { runWithConcurrency } from "./concurrency.js";
 import { DEFAULT_ECHO_TRANSCRIPT_FORMAT, sendTranscriptEcho } from "./echo-transcript.js";
@@ -455,6 +456,29 @@ async function extractFileBlocks(params: {
     const safeName = (bufferResult.fileName ?? `file-${attachment.index + 1}`)
       .replace(/[\r\n\t]+/g, " ")
       .trim();
+
+    // Allow plugins to transform file content (e.g. compress via RAG indexing).
+    // Pass raw buffer so hooks can process the full file (e.g. index entire PDF
+    // instead of just the page-limited extracted text).
+    const hookRunner = getGlobalHookRunner();
+    const hasHook = hookRunner?.hasHooks("media_file_transform");
+    if (hasHook && hookRunner && text) {
+      try {
+        const hookResult = await hookRunner.runMediaFileTransform({
+          filename: safeName,
+          mime: mimeType,
+          content: blockText,
+          rawBase64: bufferResult.buffer.toString("base64"),
+          index: attachment.index,
+        });
+        if (hookResult?.content) {
+          blockText = hookResult.content;
+        }
+      } catch (err) {
+        logVerbose(`media: media_file_transform hook failed: ${String(err)}`);
+      }
+    }
+
     // Escape XML special characters in attributes to prevent injection
     blocks.push(
       `<file name="${xmlEscapeAttr(safeName)}" mime="${xmlEscapeAttr(mimeType)}">\n${escapeFileBlockContent(blockText)}\n</file>`,
