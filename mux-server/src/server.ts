@@ -133,6 +133,8 @@ type WhatsAppInboundQueueRow = {
   payload_json: string;
   attempt_count: number;
   created_at_ms: number;
+  delivery_window_started_at_ms: number;
+  last_target_update_at_ms: number;
 };
 
 type TelegramBoundRoute = {
@@ -179,6 +181,7 @@ type TenantInboundTarget = {
   url: string;
   timeoutMs: number;
   openclawId: string;
+  updatedAtMs: number | null;
 };
 
 type WebInboundMessage = {
@@ -775,7 +778,7 @@ const stmtUpsertTenantInboundTargetByAdmin = db.prepare(`
 `);
 
 const stmtSelectTenantInboundTargetById = db.prepare(`
-  SELECT inbound_url, inbound_token, inbound_timeout_ms
+  SELECT inbound_url, inbound_token, inbound_timeout_ms, updated_at_ms
   FROM tenants
   WHERE id = ? AND status = 'active'
   LIMIT 1
@@ -1066,15 +1069,24 @@ const stmtInsertWhatsAppInboundQueue = db.prepare(`
     next_attempt_at_ms,
     attempt_count,
     last_error,
+    delivery_window_started_at_ms,
+    last_target_update_at_ms,
     created_at_ms,
     updated_at_ms
   )
-  VALUES (?, ?, ?, 0, NULL, ?, ?)
+  VALUES (?, ?, ?, 0, NULL, ?, 0, ?, ?)
   ON CONFLICT(dedupe_key) DO NOTHING
 `);
 
 const stmtSelectDueWhatsAppInboundQueue = db.prepare(`
-  SELECT id, dedupe_key, payload_json, attempt_count, created_at_ms
+  SELECT
+    id,
+    dedupe_key,
+    payload_json,
+    attempt_count,
+    created_at_ms,
+    delivery_window_started_at_ms,
+    last_target_update_at_ms
   FROM whatsapp_inbound_queue
   WHERE next_attempt_at_ms <= ?
   ORDER BY id ASC
@@ -1092,7 +1104,9 @@ const stmtDeferWhatsAppInboundQueueById = db.prepare(`
     next_attempt_at_ms = ?,
     attempt_count = ?,
     last_error = ?,
-    updated_at_ms = ?
+    updated_at_ms = ?,
+    delivery_window_started_at_ms = ?,
+    last_target_update_at_ms = ?
   WHERE id = ?
 `);
 
@@ -1263,6 +1277,7 @@ function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | nul
     | {
         inbound_url?: unknown;
         inbound_timeout_ms?: unknown;
+        updated_at_ms?: unknown;
       }
     | undefined;
   const url = readNonEmptyString(row?.inbound_url);
@@ -1270,10 +1285,12 @@ function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | nul
     return null;
   }
   const timeoutMs = readPositiveInt(row?.inbound_timeout_ms) ?? 15_000;
+  const updatedAtMs = readPositiveInt(row?.updated_at_ms) ?? null;
   return {
     url,
     timeoutMs,
     openclawId: tenantId,
+    updatedAtMs,
   };
 }
 
@@ -1666,6 +1683,8 @@ function initializeDatabase(database: DatabaseSync) {
       next_attempt_at_ms INTEGER NOT NULL,
       attempt_count INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
+      delivery_window_started_at_ms INTEGER NOT NULL,
+      last_target_update_at_ms INTEGER NOT NULL DEFAULT 0,
       created_at_ms INTEGER NOT NULL,
       updated_at_ms INTEGER NOT NULL
     );
@@ -1674,6 +1693,7 @@ function initializeDatabase(database: DatabaseSync) {
   `);
   ensureTenantInboundTargetColumns(database);
   ensurePairingTokenColumns(database);
+  ensureWhatsAppInboundQueueColumns(database);
 }
 
 function ensureTenantInboundTargetColumns(database: DatabaseSync) {
@@ -1723,6 +1743,28 @@ function ensurePairingTokenColumns(database: DatabaseSync) {
       DROP TABLE pairing_tokens_old;
     `);
   }
+}
+
+function ensureWhatsAppInboundQueueColumns(database: DatabaseSync) {
+  const rows = database.prepare("PRAGMA table_info(whatsapp_inbound_queue)").all() as Array<{
+    name?: unknown;
+  }>;
+  const columnNames = new Set(rows.map((row) => (typeof row.name === "string" ? row.name : "")));
+  if (!columnNames.has("delivery_window_started_at_ms")) {
+    database.exec(
+      "ALTER TABLE whatsapp_inbound_queue ADD COLUMN delivery_window_started_at_ms INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+  if (!columnNames.has("last_target_update_at_ms")) {
+    database.exec(
+      "ALTER TABLE whatsapp_inbound_queue ADD COLUMN last_target_update_at_ms INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+  database.exec(`
+    UPDATE whatsapp_inbound_queue
+    SET delivery_window_started_at_ms = created_at_ms
+    WHERE delivery_window_started_at_ms <= 0
+  `);
 }
 
 function seedTenants(database: DatabaseSync, tenants: TenantSeed[]) {
@@ -5319,12 +5361,14 @@ function computeWhatsAppQueueRetryDelayMs(attemptCount: number): number {
 class WhatsAppInboundDeliveryError extends Error {
   retryable: boolean;
   statusCode: number | null;
+  targetUpdatedAtMs: number | null;
 
   constructor(
     message: string,
     options: {
       retryable: boolean;
       statusCode?: number | null;
+      targetUpdatedAtMs?: number | null;
       cause?: unknown;
     },
   ) {
@@ -5334,6 +5378,10 @@ class WhatsAppInboundDeliveryError extends Error {
     this.statusCode =
       typeof options.statusCode === "number" && Number.isFinite(options.statusCode)
         ? Math.trunc(options.statusCode)
+        : null;
+    this.targetUpdatedAtMs =
+      typeof options.targetUpdatedAtMs === "number" && Number.isFinite(options.targetUpdatedAtMs)
+        ? Math.trunc(options.targetUpdatedAtMs)
         : null;
   }
 }
@@ -5345,18 +5393,21 @@ function isRetryableWhatsAppInboundStatus(statusCode: number): boolean {
 function classifyWhatsAppInboundDeliveryError(error: unknown): {
   retryable: boolean;
   statusCode: number | null;
+  targetUpdatedAtMs: number | null;
   errorMessage: string;
 } {
   if (error instanceof WhatsAppInboundDeliveryError) {
     return {
       retryable: error.retryable,
       statusCode: error.statusCode,
+      targetUpdatedAtMs: error.targetUpdatedAtMs,
       errorMessage: errorString(error),
     };
   }
   return {
     retryable: true,
     statusCode: null,
+    targetUpdatedAtMs: null,
     errorMessage: errorString(error),
   };
 }
@@ -5408,6 +5459,7 @@ function enqueueWhatsAppInboundMessage(message: WebInboundMessage): void {
   const insertResult = stmtInsertWhatsAppInboundQueue.run(
     dedupeKey,
     JSON.stringify(snapshot),
+    now,
     now,
     now,
     now,
@@ -7657,7 +7709,23 @@ async function processWhatsAppInboundQueuePass(): Promise<void> {
         Number.isFinite(row.created_at_ms) && row.created_at_ms > 0
           ? Math.trunc(row.created_at_ms)
           : now;
-      const ageMs = Math.max(0, now - createdAtMs);
+      let deliveryWindowStartedAtMs =
+        Number.isFinite(row.delivery_window_started_at_ms) && row.delivery_window_started_at_ms > 0
+          ? Math.trunc(row.delivery_window_started_at_ms)
+          : createdAtMs;
+      let lastTargetUpdateAtMs =
+        Number.isFinite(row.last_target_update_at_ms) && row.last_target_update_at_ms > 0
+          ? Math.trunc(row.last_target_update_at_ms)
+          : 0;
+      const targetUpdatedAtMs =
+        Number.isFinite(failure.targetUpdatedAtMs) && (failure.targetUpdatedAtMs ?? 0) > 0
+          ? Math.trunc(failure.targetUpdatedAtMs ?? 0)
+          : 0;
+      if (targetUpdatedAtMs > lastTargetUpdateAtMs) {
+        deliveryWindowStartedAtMs = now;
+        lastTargetUpdateAtMs = targetUpdatedAtMs;
+      }
+      const ageMs = Math.max(0, now - deliveryWindowStartedAtMs);
       const maxAgeMs = Math.max(1_000, Math.trunc(whatsappQueueMaxAgeMs));
       if (!failure.retryable || ageMs >= maxAgeMs) {
         stmtDeleteWhatsAppInboundQueueById.run(row.id);
@@ -7684,6 +7752,8 @@ async function processWhatsAppInboundQueuePass(): Promise<void> {
         attemptCount,
         failure.errorMessage.slice(0, 2_000),
         Date.now(),
+        deliveryWindowStartedAtMs,
+        lastTargetUpdateAtMs,
         row.id,
       );
       log({
@@ -7911,9 +7981,9 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
 
   const target = resolveTenantInboundTarget(binding.tenantId);
   if (!target) {
-    metrics.recordInboundEvent("whatsapp", "dropped");
+    metrics.recordInboundEvent("whatsapp", "error");
     log({
-      type: "whatsapp_inbound_drop_no_target",
+      type: "whatsapp_inbound_deferred_no_target",
       tenantId: binding.tenantId,
       routeKey: binding.routeKey,
       accountId,
@@ -7923,7 +7993,8 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     throw new WhatsAppInboundDeliveryError(
       `whatsapp inbound target missing for tenant ${binding.tenantId}`,
       {
-        retryable: false,
+        retryable: true,
+        targetUpdatedAtMs: null,
       },
     );
   }
@@ -8024,6 +8095,7 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
     metrics.recordInboundEvent("whatsapp", "error");
     throw new WhatsAppInboundDeliveryError(errorString(error), {
       retryable: true,
+      targetUpdatedAtMs: target.updatedAtMs,
       cause: error,
     });
   }
@@ -8036,6 +8108,7 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
       {
         retryable: isRetryableWhatsAppInboundStatus(response.status),
         statusCode: response.status,
+        targetUpdatedAtMs: target.updatedAtMs,
       },
     );
   }

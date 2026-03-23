@@ -1093,6 +1093,127 @@ describe("mux server", () => {
     h.rmSync(tempDir, { recursive: true, force: true });
   }, 15_000);
 
+  test("refreshes WhatsApp queue retention when the tenant re-registers at the same inbound url", async () => {
+    const tempDir = h.mkdtempSync(h.resolve(h.tmpdir(), "mux-server-wa-reregister-"));
+    const authDir = h.resolve(tempDir, "wa-auth");
+    const runtimePath = h.resolve(tempDir, "mock-web-runtime.mjs");
+    const dbPath = h.resolve(tempDir, "mux-server.sqlite");
+    const logPath = h.resolve(tempDir, "mux-server.log");
+    mkdirSync(authDir, { recursive: true });
+    h.writeFileSync(h.resolve(authDir, "creds.json"), "{}", "utf8");
+    writeWhatsAppRuntimeMock({
+      runtimePath,
+      emitDelayMs: 300,
+      message: {
+        id: "wa-reregister-1",
+        from: "15550003333@s.whatsapp.net",
+        to: "15559990000@s.whatsapp.net",
+        accountId: "default",
+        body: "deliver after reregister",
+        timestamp: 1_700_000_000_000,
+        chatType: "direct",
+        chatId: "15550003333@s.whatsapp.net",
+        senderJid: "15550003333@s.whatsapp.net",
+        senderE164: "+15550003333",
+      },
+    });
+
+    let acceptInbound = false;
+    let successfulDeliveries = 0;
+    const inbound = await h.startHttpServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/v1/mux/inbound") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      await h.readJsonBody(req);
+      if (!acceptInbound) {
+        res.writeHead(503, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "offline" }));
+        return;
+      }
+      successfulDeliveries += 1;
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+
+    const server = await h.startServer({
+      tempDir,
+      cleanupTempDir: false,
+      dbPath,
+      tenantsJson: JSON.stringify([
+        {
+          id: "tenant-a",
+          name: "Tenant A",
+          apiKey: "tenant-a-key",
+          inboundUrl: `${inbound.url}/v1/mux/inbound`,
+          inboundTimeoutMs: 500,
+        },
+      ]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-REREGISTER",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550003333@s.whatsapp.net",
+          scope: "chat",
+        },
+      ]),
+      extraEnv: {
+        MUX_WEB_RUNTIME_MODULE_PATH: runtimePath,
+        MUX_WHATSAPP_AUTH_DIR: authDir,
+        MUX_WHATSAPP_QUEUE_POLL_MS: "25",
+        MUX_WHATSAPP_QUEUE_RETRY_INITIAL_MS: "50",
+        MUX_WHATSAPP_QUEUE_RETRY_MAX_MS: "50",
+        MUX_WHATSAPP_QUEUE_MAX_AGE_MS: "1000",
+      },
+    });
+
+    const claim = await h.claimPairing({
+      port: server.port,
+      apiKey: "tenant-a-key",
+      code: "PAIR-WA-REREGISTER",
+      sessionKey: "agent:main:whatsapp:direct:15550003333",
+    });
+    expect(claim.status).toBe(200);
+
+    await h.waitForCondition(
+      () => h.readMuxServerLog(logPath).includes('"type":"whatsapp_inbound_retry_deferred"'),
+      4_000,
+      "timed out waiting for initial WhatsApp retry deferral",
+    );
+
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 500));
+    const refresh = await h.createAdminPairingToken({
+      port: server.port,
+      adminToken: h.DEFAULT_ADMIN_TOKEN,
+      openclawId: "tenant-a",
+      inboundUrl: `${inbound.url}/v1/mux/inbound`,
+      inboundTimeoutMs: 500,
+      ttlSec: 60,
+    });
+    expect(refresh.status).toBe(200);
+
+    // Stay unavailable long enough that the original delivery window would have
+    // expired, then allow delivery after the registration epoch refresh.
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 700));
+    acceptInbound = true;
+
+    await h.waitForCondition(
+      () => successfulDeliveries >= 1,
+      4_000,
+      "timed out waiting for WhatsApp delivery after same-url re-registration",
+    );
+
+    expect(readWhatsAppQueueDepth(dbPath)).toBe(0);
+    const logText = h.readMuxServerLog(logPath);
+    expect(logText).toContain('"messageId":"wa-reregister-1"');
+    expect(logText).not.toContain('"type":"whatsapp_inbound_bg_retry_exhausted"');
+
+    await h.stopServer(server);
+    h.removeRunningServer(server);
+    h.rmSync(tempDir, { recursive: true, force: true });
+  }, 15_000);
+
   test("drops non-retryable WhatsApp inbound delivery failures immediately", async () => {
     const tempDir = h.mkdtempSync(h.resolve(h.tmpdir(), "mux-server-wa-nonretryable-"));
     const authDir = h.resolve(tempDir, "wa-auth");

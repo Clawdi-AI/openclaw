@@ -121,7 +121,7 @@ node --import tsx mux-server/src/server.ts
 - `MUX_WHATSAPP_QUEUE_RETRY_INITIAL_MS` (default `1000`): initial retry backoff for queued WhatsApp inbound deliveries.
 - `MUX_WHATSAPP_QUEUE_RETRY_MAX_MS` (default `60000`): max retry backoff for queued WhatsApp inbound deliveries.
 - `MUX_WHATSAPP_QUEUE_BATCH_SIZE` (default `20`): max number of queued WhatsApp inbound deliveries processed per pass.
-- `MUX_WHATSAPP_QUEUE_MAX_AGE_MS` (default `86400000`): maximum age for queued WhatsApp inbound deliveries before they are explicitly exhausted and dropped.
+- `MUX_WHATSAPP_QUEUE_MAX_AGE_MS` (default `86400000`): maximum delivery-window age for queued WhatsApp inbound deliveries before they are explicitly exhausted and dropped; the window resets when the tenant re-registers, even if the inbound URL stays the same.
 - `MUX_TELEGRAM_BOT_USERNAME` (optional): enables Telegram deep link in pairing-token response.
 - `MUX_PAIRING_TOKEN_TTL_SEC` (default `900`): default one-time pairing-token TTL in seconds.
 - `MUX_PAIRING_TOKEN_MAX_TTL_SEC` (default `3600`): max allowed one-time pairing-token TTL.
