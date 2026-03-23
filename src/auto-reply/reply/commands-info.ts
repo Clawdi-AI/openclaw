@@ -1,13 +1,13 @@
 import { logVerbose } from "../../globals.js";
+import { buildCommandsMessage, buildCommandsMessagePaginated } from "../commands-list.js";
+import { buildHelpMessage } from "../help-message.js";
 import { listSkillCommandsForAgents } from "../skill-commands.js";
-import {
-  buildCommandsMessage,
-  buildCommandsMessagePaginated,
-  buildHelpMessage,
-} from "../status.js";
 import { buildContextReply } from "./commands-context-report.js";
+import { buildCommandsPaginationKeyboard } from "./commands-pagination.js";
 import { buildStatusReply } from "./commands-status.js";
 import type { CommandHandler } from "./commands-types.js";
+
+export { buildCommandsPaginationKeyboard } from "./commands-pagination.js";
 
 export const handleHelpCommand: CommandHandler = async (params, allowTextCommands) => {
   if (!allowTextCommands) {
@@ -84,36 +84,6 @@ export const handleCommandsListCommand: CommandHandler = async (params, allowTex
     reply: { text: buildCommandsMessage(params.cfg, skillCommands, { surface }) },
   };
 };
-
-export function buildCommandsPaginationKeyboard(
-  currentPage: number,
-  totalPages: number,
-  agentId?: string,
-): Array<Array<{ text: string; callback_data: string }>> {
-  const buttons: Array<{ text: string; callback_data: string }> = [];
-  const suffix = agentId ? `:${agentId}` : "";
-
-  if (currentPage > 1) {
-    buttons.push({
-      text: "◀ Prev",
-      callback_data: `commands_page_${currentPage - 1}${suffix}`,
-    });
-  }
-
-  buttons.push({
-    text: `${currentPage}/${totalPages}`,
-    callback_data: `commands_page_noop${suffix}`,
-  });
-
-  if (currentPage < totalPages) {
-    buttons.push({
-      text: "Next ▶",
-      callback_data: `commands_page_${currentPage + 1}${suffix}`,
-    });
-  }
-
-  return [buttons];
-}
 
 export const handleStatusCommand: CommandHandler = async (params, allowTextCommands) => {
   if (!allowTextCommands) {

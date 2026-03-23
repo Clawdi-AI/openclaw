@@ -1,13 +1,13 @@
 import { resolveAgentDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { resolveDefaultModelForAgent } from "../agents/model-selection.js";
-import { buildCommandsPaginationKeyboard } from "../auto-reply/reply/commands-info.js";
+import { buildCommandsMessagePaginated } from "../auto-reply/commands-list.js";
 import {
   buildModelsProviderData,
   formatModelsAvailableHeader,
 } from "../auto-reply/reply/commands-models.js";
+import { buildCommandsPaginationKeyboard } from "../auto-reply/reply/commands-pagination.js";
 import { resolveStoredModelOverride } from "../auto-reply/reply/model-selection.js";
 import { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";
-import { buildCommandsMessagePaginated } from "../auto-reply/status.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { loadSessionStore, resolveStorePath, updateSessionStore } from "../config/sessions.js";
 import { resolveAgentRoute } from "../routing/resolve-route.js";

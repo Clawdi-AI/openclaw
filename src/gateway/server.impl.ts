@@ -401,6 +401,8 @@ export async function startGatewayServer(
 
   // Fail fast before startup if required refs are unresolved.
   let cfgAtStart: OpenClawConfig;
+  let startupPrepared: Awaited<ReturnType<typeof activateRuntimeSecrets>> | null = null;
+  let startupPreflightConfig: OpenClawConfig | null = null;
   {
     if (!configSnapshot.valid) {
       const issues =
@@ -409,14 +411,11 @@ export async function startGatewayServer(
           : "Unknown validation issue.";
       throw new Error(`Invalid config at ${configSnapshot.path}.\n${issues}`);
     }
-    const startupPreflightConfig = applyGatewayAuthOverridesForStartupPreflight(
-      configSnapshot.config,
-      {
-        auth: opts.auth,
-        tailscale: opts.tailscale,
-      },
-    );
-    await activateRuntimeSecrets(startupPreflightConfig, {
+    startupPreflightConfig = applyGatewayAuthOverridesForStartupPreflight(configSnapshot.config, {
+      auth: opts.auth,
+      tailscale: opts.tailscale,
+    });
+    startupPrepared = await activateRuntimeSecrets(startupPreflightConfig, {
       reason: "startup",
       activate: false,
     });
@@ -442,12 +441,21 @@ export async function startGatewayServer(
       );
     }
   }
-  cfgAtStart = (
-    await activateRuntimeSecrets(cfgAtStart, {
-      reason: "startup",
-      activate: true,
-    })
-  ).config;
+  if (startupPrepared && startupPreflightConfig && authBootstrap.cfg === startupPreflightConfig) {
+    activateSecretsRuntimeSnapshot(startupPrepared);
+    logGatewayAuthSurfaceDiagnostics(startupPrepared);
+    for (const warning of startupPrepared.warnings) {
+      logSecrets.warn(`[${warning.code}] ${warning.message}`);
+    }
+    cfgAtStart = startupPrepared.config;
+  } else {
+    cfgAtStart = (
+      await activateRuntimeSecrets(cfgAtStart, {
+        reason: "startup",
+        activate: true,
+      })
+    ).config;
+  }
   const diagnosticsEnabled = isDiagnosticsEnabled(cfgAtStart);
   if (diagnosticsEnabled) {
     startDiagnosticHeartbeat();
@@ -663,129 +671,33 @@ export async function startGatewayServer(
   const { getRuntimeSnapshot, startChannels, startChannel, stopChannel, markChannelLoggedOut } =
     channelManager;
 
-  if (!minimalTestGateway) {
-    const machineDisplayName = await getMachineDisplayName();
-    const discovery = await startGatewayDiscovery({
-      machineDisplayName,
-      port,
-      gatewayTls: gatewayTls.enabled
-        ? { enabled: true, fingerprintSha256: gatewayTls.fingerprintSha256 }
-        : undefined,
-      wideAreaDiscoveryEnabled: cfgAtStart.discovery?.wideArea?.enabled === true,
-      wideAreaDiscoveryDomain: cfgAtStart.discovery?.wideArea?.domain,
-      tailscaleMode,
-      mdnsMode: cfgAtStart.discovery?.mdns?.mode,
-      logDiscovery,
-    });
-    bonjourStop = discovery.bonjourStop;
-  }
-
-  if (!minimalTestGateway) {
-    setSkillsRemoteRegistry(nodeRegistry);
-    void primeRemoteSkillsCache();
-  }
   // Debounce skills-triggered node probes to avoid feedback loops and rapid-fire invokes.
   // Skills changes can happen in bursts (e.g., file watcher events), and each probe
   // takes time to complete. A 30-second delay ensures we batch changes together.
   let skillsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   const skillsRefreshDelayMs = 30_000;
-  const skillsChangeUnsub = minimalTestGateway
-    ? () => {}
-    : registerSkillsChangeListener((event) => {
-        if (event.reason === "remote-node") {
-          return;
-        }
-        if (skillsRefreshTimer) {
-          clearTimeout(skillsRefreshTimer);
-        }
-        skillsRefreshTimer = setTimeout(() => {
-          skillsRefreshTimer = null;
-          const latest = loadConfig();
-          void refreshRemoteBinsForConnectedNodes(latest);
-        }, skillsRefreshDelayMs);
-      });
+  let skillsChangeUnsub: () => void = () => {};
 
   const noopInterval = () => setInterval(() => {}, 1 << 30);
   let tickInterval = noopInterval();
   let healthInterval = noopInterval();
   let dedupeCleanup = noopInterval();
   let mediaCleanup: ReturnType<typeof setInterval> | null = null;
-  if (!minimalTestGateway) {
-    ({ tickInterval, healthInterval, dedupeCleanup, mediaCleanup } = startGatewayMaintenanceTimers({
-      broadcast,
-      nodeSendToAllSubscribed,
-      getPresenceVersion,
-      getHealthVersion,
-      refreshGatewayHealthSnapshot,
-      logHealth,
-      dedupe,
-      chatAbortControllers,
-      chatRunState,
-      chatRunBuffers,
-      chatDeltaSentAt,
-      removeChatRun,
-      agentRunSeq,
-      nodeSendToSession,
-      ...(typeof cfgAtStart.media?.ttlHours === "number"
-        ? { mediaCleanupTtlMs: resolveMediaCleanupTtlMs(cfgAtStart.media.ttlHours) }
-        : {}),
-    }));
-  }
-
-  const agentUnsub = minimalTestGateway
-    ? null
-    : onAgentEvent(
-        createAgentEventHandler({
-          broadcast,
-          broadcastToConnIds,
-          nodeSendToSession,
-          agentRunSeq,
-          chatRunState,
-          resolveSessionKeyForRun,
-          clearAgentRunContext,
-          toolEventRecipients,
-        }),
-      );
-
-  const heartbeatUnsub = minimalTestGateway
-    ? null
-    : onHeartbeatEvent((evt) => {
-        broadcast("heartbeat", evt, { dropIfSlow: true });
-      });
-
+  let agentUnsub: ReturnType<typeof onAgentEvent> | null = null;
+  let heartbeatUnsub: ReturnType<typeof onHeartbeatEvent> | null = null;
   let heartbeatRunner: HeartbeatRunner = minimalTestGateway
     ? {
         stop: () => {},
         updateConfig: () => {},
       }
-    : startHeartbeatRunner({ cfg: cfgAtStart });
+    : {
+        stop: () => {},
+        updateConfig: () => {},
+      };
 
   const healthCheckMinutes = cfgAtStart.gateway?.channelHealthCheckMinutes;
   const healthCheckDisabled = healthCheckMinutes === 0;
-  let channelHealthMonitor = healthCheckDisabled
-    ? null
-    : startChannelHealthMonitor({
-        channelManager,
-        checkIntervalMs: (healthCheckMinutes ?? 5) * 60_000,
-      });
-
-  if (!minimalTestGateway) {
-    void cron.start().catch((err) => logCron.error(`failed to start: ${String(err)}`));
-  }
-
-  // Recover pending outbound deliveries from previous crash/restart.
-  if (!minimalTestGateway) {
-    void (async () => {
-      const { recoverPendingDeliveries } = await import("../infra/outbound/delivery-queue.js");
-      const { deliverOutboundPayloads } = await import("../infra/outbound/deliver.js");
-      const logRecovery = log.child("delivery-recovery");
-      await recoverPendingDeliveries({
-        deliver: deliverOutboundPayloads,
-        log: logRecovery,
-        cfg: cfgAtStart,
-      });
-    })().catch((err) => log.error(`Delivery recovery failed: ${String(err)}`));
-  }
+  let channelHealthMonitor = null as ReturnType<typeof startChannelHealthMonitor> | null;
 
   const execApprovalManager = new ExecApprovalManager();
   const execApprovalForwarder = createExecApprovalForwarder();
@@ -908,6 +820,89 @@ export async function startGatewayServer(
     log,
     isNixMode,
   });
+  if (!minimalTestGateway) {
+    const machineDisplayName = await getMachineDisplayName();
+    const discovery = await startGatewayDiscovery({
+      machineDisplayName,
+      port,
+      gatewayTls: gatewayTls.enabled
+        ? { enabled: true, fingerprintSha256: gatewayTls.fingerprintSha256 }
+        : undefined,
+      wideAreaDiscoveryEnabled: cfgAtStart.discovery?.wideArea?.enabled === true,
+      wideAreaDiscoveryDomain: cfgAtStart.discovery?.wideArea?.domain,
+      tailscaleMode,
+      mdnsMode: cfgAtStart.discovery?.mdns?.mode,
+      logDiscovery,
+    });
+    bonjourStop = discovery.bonjourStop;
+    setSkillsRemoteRegistry(nodeRegistry);
+    void primeRemoteSkillsCache();
+    skillsChangeUnsub = registerSkillsChangeListener((event) => {
+      if (event.reason === "remote-node") {
+        return;
+      }
+      if (skillsRefreshTimer) {
+        clearTimeout(skillsRefreshTimer);
+      }
+      skillsRefreshTimer = setTimeout(() => {
+        skillsRefreshTimer = null;
+        const latest = loadConfig();
+        void refreshRemoteBinsForConnectedNodes(latest);
+      }, skillsRefreshDelayMs);
+    });
+    ({ tickInterval, healthInterval, dedupeCleanup, mediaCleanup } = startGatewayMaintenanceTimers({
+      broadcast,
+      nodeSendToAllSubscribed,
+      getPresenceVersion,
+      getHealthVersion,
+      refreshGatewayHealthSnapshot,
+      logHealth,
+      dedupe,
+      chatAbortControllers,
+      chatRunState,
+      chatRunBuffers,
+      chatDeltaSentAt,
+      removeChatRun,
+      agentRunSeq,
+      nodeSendToSession,
+      ...(typeof cfgAtStart.media?.ttlHours === "number"
+        ? { mediaCleanupTtlMs: resolveMediaCleanupTtlMs(cfgAtStart.media.ttlHours) }
+        : {}),
+    }));
+    agentUnsub = onAgentEvent(
+      createAgentEventHandler({
+        broadcast,
+        broadcastToConnIds,
+        nodeSendToSession,
+        agentRunSeq,
+        chatRunState,
+        resolveSessionKeyForRun,
+        clearAgentRunContext,
+        toolEventRecipients,
+      }),
+    );
+    heartbeatUnsub = onHeartbeatEvent((evt) => {
+      broadcast("heartbeat", evt, { dropIfSlow: true });
+    });
+    heartbeatRunner = startHeartbeatRunner({ cfg: cfgAtStart });
+    if (!healthCheckDisabled) {
+      channelHealthMonitor = startChannelHealthMonitor({
+        channelManager,
+        checkIntervalMs: (healthCheckMinutes ?? 5) * 60_000,
+      });
+    }
+    void cron.start().catch((err) => logCron.error(`failed to start: ${String(err)}`));
+    void (async () => {
+      const { recoverPendingDeliveries } = await import("../infra/outbound/delivery-queue.js");
+      const { deliverOutboundPayloads } = await import("../infra/outbound/deliver.js");
+      const logRecovery = log.child("delivery-recovery");
+      await recoverPendingDeliveries({
+        deliver: deliverOutboundPayloads,
+        log: logRecovery,
+        cfg: cfgAtStart,
+      });
+    })().catch((err) => log.error(`Delivery recovery failed: ${String(err)}`));
+  }
   const stopGatewayUpdateCheck = minimalTestGateway
     ? () => {}
     : scheduleGatewayUpdateCheck({
