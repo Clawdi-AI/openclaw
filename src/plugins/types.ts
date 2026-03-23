@@ -444,6 +444,7 @@ export type PluginHookName =
   | "subagent_delivery_target"
   | "subagent_spawned"
   | "subagent_ended"
+  | "media_file_transform"
   | "gateway_start"
   | "gateway_stop";
 
@@ -470,6 +471,7 @@ export const PLUGIN_HOOK_NAMES = [
   "subagent_delivery_target",
   "subagent_spawned",
   "subagent_ended",
+  "media_file_transform",
   "gateway_start",
   "gateway_stop",
 ] as const satisfies readonly PluginHookName[];
@@ -771,6 +773,27 @@ export type PluginHookBeforeMessageWriteResult = {
   message?: AgentMessage; // Optional: modified message to write instead
 };
 
+// media_file_transform hook
+// Fires for each <file> block extracted during media understanding.
+// Handlers may return transformed content (e.g. compressed summary).
+export type PluginHookMediaFileTransformEvent = {
+  /** Original filename of the attachment. */
+  filename: string;
+  /** MIME type of the attachment. */
+  mime: string;
+  /** Extracted text content from the file (may be truncated, e.g. PDF page limits). */
+  content: string;
+  /** Raw file content as base64. Allows hooks to process the full file (e.g. index entire PDF). */
+  rawBase64?: string;
+  /** Attachment index within the message. */
+  index: number;
+};
+
+export type PluginHookMediaFileTransformResult = {
+  /** Replacement content for the <file> block. If provided, replaces the original. */
+  content?: string;
+};
+
 // Session context
 export type PluginHookSessionContext = {
   agentId?: string;
@@ -949,6 +972,12 @@ export type PluginHookHandlerMap = {
     event: PluginHookBeforeMessageWriteEvent,
     ctx: { agentId?: string; sessionKey?: string },
   ) => PluginHookBeforeMessageWriteResult | void;
+  media_file_transform: (
+    event: PluginHookMediaFileTransformEvent,
+  ) =>
+    | Promise<PluginHookMediaFileTransformResult | undefined>
+    | PluginHookMediaFileTransformResult
+    | undefined;
   session_start: (
     event: PluginHookSessionStartEvent,
     ctx: PluginHookSessionContext,
