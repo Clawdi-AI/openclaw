@@ -81,6 +81,17 @@ The response includes:
 - `tool_schemas`
 - `recommended_plan_steps`
 - `known_pitfalls`
+- a short workflow `session.id`; pass it to later meta-tool calls when provided
+
+### Connection model
+
+Use this skill as toolkit-level connection management.
+
+- Assume one usable active account per toolkit from MCP's perspective.
+- Unless the execution tool schema explicitly exposes account switching, do not tell the user they can choose between multiple accounts for the same toolkit through MCP. Google toolkits do not support account switching.
+- `COMPOSIO_MANAGE_CONNECTIONS` is for checking, connecting, or reconnecting toolkits, not for selecting individual accounts.
+- If a toolkit is already active, calling `COMPOSIO_MANAGE_CONNECTIONS` again usually returns the existing active connection instead of a second-account OAuth link.
+- If the user explicitly wants to switch the active account for a toolkit, reconnect that toolkit with `reinitiate_all=true` and explain that MCP will reconnect the toolkit rather than let them pick from multiple existing accounts.
 
 ### 2. Connect services if needed
 
@@ -88,10 +99,21 @@ If `has_active_connection` is false for a toolkit:
 
 ```bash
 mcporter call clawdi-mcp.COMPOSIO_MANAGE_CONNECTIONS \
-  'toolkits=["<exact-toolkit-from-search>"]'
+  'toolkits=["<exact-toolkit-from-search>"]' \
+  'session_id="star"'
 ```
 
 This returns a `redirect_url`. Share that link with the user so they can complete OAuth.
+
+If `has_active_connection` is true, do not try to use `COMPOSIO_MANAGE_CONNECTIONS` to add a second account for that same toolkit. MCP generally treats the toolkit as already connected. If the user explicitly wants to replace or refresh the active account, use:
+
+```bash
+mcporter call clawdi-mcp.COMPOSIO_MANAGE_CONNECTIONS \
+  'toolkits=["gmail"]' \
+  'reinitiate_all=true'
+```
+
+Explain clearly that MCP will reconnect the toolkit, not let the user pick between multiple existing accounts.
 
 ### 3. Execute tools
 
@@ -106,7 +128,6 @@ Use exact tool slugs and argument names from search results.
 ## Google Services
 
 Google routing is inconsistent. Do not assume `googlesuper` covers every Google task.
-
 When speaking to normal users:
 
 - Treat this as "Google" from the user's perspective.
@@ -142,6 +163,7 @@ Download the file locally, then process it.
 
 - Search first. Do not guess tool names.
 - Check connection status before executing and use the exact toolkit names returned by search.
+- If the user asks to connect a second account for the same toolkit, warn that MCP is single-account-oriented from the agent's perspective and cannot target a specific account unless the execution schema explicitly supports switching.
 - Use `recommended_plan_steps`.
 - Read `known_pitfalls`.
 - Loop on pagination when `has_more` is true.
