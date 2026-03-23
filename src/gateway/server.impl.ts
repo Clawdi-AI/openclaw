@@ -306,9 +306,8 @@ export async function startGatewayServer(
         );
       }
     }
+    configSnapshot = await readConfigFileSnapshot();
   }
-
-  configSnapshot = await readConfigFileSnapshot();
   if (configSnapshot.exists && !configSnapshot.valid) {
     const issues =
       configSnapshot.issues.length > 0
@@ -323,6 +322,7 @@ export async function startGatewayServer(
   if (autoEnable.changes.length > 0) {
     try {
       await writeConfigFile(autoEnable.config);
+      configSnapshot = await readConfigFileSnapshot();
       log.info(
         `gateway: auto-enabled plugins:\n${autoEnable.changes
           .map((entry) => `- ${entry}`)
@@ -402,16 +402,15 @@ export async function startGatewayServer(
   // Fail fast before startup if required refs are unresolved.
   let cfgAtStart: OpenClawConfig;
   {
-    const freshSnapshot = await readConfigFileSnapshot();
-    if (!freshSnapshot.valid) {
+    if (!configSnapshot.valid) {
       const issues =
-        freshSnapshot.issues.length > 0
-          ? formatConfigIssueLines(freshSnapshot.issues, "", { normalizeRoot: true }).join("\n")
+        configSnapshot.issues.length > 0
+          ? formatConfigIssueLines(configSnapshot.issues, "", { normalizeRoot: true }).join("\n")
           : "Unknown validation issue.";
-      throw new Error(`Invalid config at ${freshSnapshot.path}.\n${issues}`);
+      throw new Error(`Invalid config at ${configSnapshot.path}.\n${issues}`);
     }
     const startupPreflightConfig = applyGatewayAuthOverridesForStartupPreflight(
-      freshSnapshot.config,
+      configSnapshot.config,
       {
         auth: opts.auth,
         tailscale: opts.tailscale,
@@ -423,7 +422,7 @@ export async function startGatewayServer(
     });
   }
 
-  cfgAtStart = loadConfig();
+  cfgAtStart = configSnapshot.config;
   const authBootstrap = await ensureGatewayStartupAuth({
     cfg: cfgAtStart,
     env: process.env,

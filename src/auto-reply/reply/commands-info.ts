@@ -6,7 +6,6 @@ import {
   buildHelpMessage,
 } from "../status.js";
 import { buildContextReply } from "./commands-context-report.js";
-import { buildExportSessionReply } from "./commands-export-session.js";
 import { buildStatusReply } from "./commands-status.js";
 import type { CommandHandler } from "./commands-types.js";
 
@@ -189,6 +188,7 @@ export const handleExportSessionCommand: CommandHandler = async (params, allowTe
     );
     return { shouldContinue: false };
   }
+  const { buildExportSessionReply } = await import("./commands-export-session.js");
   return { shouldContinue: false, reply: await buildExportSessionReply(params) };
 };
 
