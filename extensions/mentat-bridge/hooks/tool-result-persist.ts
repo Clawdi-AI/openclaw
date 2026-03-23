@@ -81,8 +81,9 @@ function compressToolResultMessage(message: AgentMessage, meta: DocMeta): AgentM
     parts.push(`Brief: ${meta.brief_intro}`);
   }
 
-  if (meta.toc && meta.toc.length > 0) {
-    parts.push(`Sections: ${meta.toc.join(", ")}`);
+  const toc = (meta.toc_entries ?? []).map((e) => e.title);
+  if (toc.length > 0) {
+    parts.push(`Sections: ${toc.join(", ")}`);
   }
 
   parts.push("Use read_segment(doc_id, section_name) to read specific sections.");

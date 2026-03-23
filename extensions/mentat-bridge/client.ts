@@ -161,7 +161,11 @@ export class MentatClient {
     name: string,
     opts?: CollectionCreateOpts,
   ): Promise<CollectionInfo | null> {
-    return this.request<CollectionInfo>("POST", `/collections/${encodeURIComponent(name)}`, opts);
+    return this.request<CollectionInfo>(
+      "POST",
+      `/collections/${encodeURIComponent(name)}`,
+      opts ?? {},
+    );
   }
 
   async getCollection(name: string): Promise<CollectionInfo | null> {
@@ -169,15 +173,21 @@ export class MentatClient {
   }
 
   async deleteCollection(name: string): Promise<boolean> {
-    const res = await this.request<{ deleted: boolean }>(
+    const res = await this.request<{ deleted: string }>(
       "DELETE",
       `/collections/${encodeURIComponent(name)}`,
     );
-    return res?.deleted ?? false;
+    return res?.deleted != null;
   }
 
   async listCollections(): Promise<CollectionInfo[] | null> {
-    return this.request<CollectionInfo[]>("GET", "/collections");
+    const res = await this.request<{ collections: CollectionInfo[] } | CollectionInfo[]>(
+      "GET",
+      "/collections",
+    );
+    if (!res) return null;
+    // Server may return { collections: [...] } or [...] directly
+    return Array.isArray(res) ? res : (res.collections ?? null);
   }
 
   async triggerGc(): Promise<{ deleted: string[] } | null> {

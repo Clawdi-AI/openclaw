@@ -279,11 +279,12 @@ export function registerMentatTools(
 
         const parts: string[] = [`Document: ${meta.filename} (${meta.doc_id})`];
         if (meta.brief_intro) parts.push(`\nBrief: ${meta.brief_intro}`);
-        if (meta.toc && meta.toc.length > 0) {
-          parts.push(`\nSections:\n${meta.toc.map((s) => `  - ${s}`).join("\n")}`);
+        const toc = (meta.toc_entries ?? []).map((e) => e.title);
+        if (toc.length > 0) {
+          parts.push(`\nSections:\n${toc.map((s) => `  - ${s}`).join("\n")}`);
         }
         if (meta.instructions) parts.push(`\nInstructions: ${meta.instructions}`);
-        if (meta.status) parts.push(`\nStatus: ${meta.status}`);
+        if (meta.processing_status) parts.push(`\nStatus: ${meta.processing_status}`);
 
         return {
           content: [{ type: "text" as const, text: parts.join("") }],
@@ -334,10 +335,21 @@ export function registerMentatTools(
           };
         }
 
-        let text = segment.content;
-        if (segment.summary) {
-          text = `Summary: ${segment.summary}\n\n${text}`;
+        // Build text from chunks + toc_context
+        const parts: string[] = [];
+        if (segment.toc_context && segment.toc_context.length > 0) {
+          for (const entry of segment.toc_context) {
+            parts.push(`${"#".repeat(entry.level)} ${entry.title}`);
+            if (entry.preview) parts.push(entry.preview);
+          }
         }
+        for (const chunk of segment.chunks) {
+          if (chunk.summary) parts.push(`Summary: ${chunk.summary}`);
+          if (chunk.content) parts.push(chunk.content);
+        }
+        if (segment.note) parts.push(`\n_${segment.note}_`);
+
+        const text = parts.join("\n\n") || `No content for section "${params.section_path}".`;
 
         return {
           content: [{ type: "text" as const, text }],
