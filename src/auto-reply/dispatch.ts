@@ -1,6 +1,5 @@
 import type { OpenClawConfig } from "../config/config.js";
 import type { DispatchFromConfigResult } from "./reply/dispatch-from-config.js";
-import { dispatchReplyFromConfig } from "./reply/dispatch-from-config.js";
 import { finalizeInboundContext } from "./reply/inbound-context.js";
 import {
   createReplyDispatcher,
@@ -13,6 +12,19 @@ import type { FinalizedMsgContext, MsgContext } from "./templating.js";
 import type { GetReplyOptions } from "./types.js";
 
 export type DispatchInboundResult = DispatchFromConfigResult;
+
+let dispatchReplyFromConfigRuntime:
+  | typeof import("./reply/dispatch-from-config.js").dispatchReplyFromConfig
+  | null = null;
+
+async function loadDispatchReplyFromConfig() {
+  if (dispatchReplyFromConfigRuntime) {
+    return dispatchReplyFromConfigRuntime;
+  }
+  const runtime = await import("./reply/dispatch-from-config.runtime.js");
+  dispatchReplyFromConfigRuntime = runtime.dispatchReplyFromConfig;
+  return dispatchReplyFromConfigRuntime;
+}
 
 export async function withReplyDispatcher<T>(params: {
   dispatcher: ReplyDispatcher;
@@ -40,6 +52,7 @@ export async function dispatchInboundMessage(params: {
   replyResolver?: typeof import("./reply.js").getReplyFromConfig;
 }): Promise<DispatchInboundResult> {
   const finalized = finalizeInboundContext(params.ctx);
+  const dispatchReplyFromConfig = await loadDispatchReplyFromConfig();
   return await withReplyDispatcher({
     dispatcher: params.dispatcher,
     run: () =>
