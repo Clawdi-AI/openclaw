@@ -83,17 +83,30 @@ export type SearchGroupedResponse = {
 
 // ── Document Meta ────────────────────────────────────────────────────
 
+export type TocEntry = {
+  level: number;
+  title: string;
+  page?: number | null;
+  preview?: string;
+  annotation?: string;
+};
+
 export type DocMeta = {
   doc_id: string;
   filename: string;
   brief_intro?: string;
-  toc?: string[];
+  toc_entries?: TocEntry[];
   instructions?: string;
   token_estimate?: number;
   source?: string;
-  status?: string;
+  processing_status?: string;
   metadata?: Record<string, unknown>;
 };
+
+/** Extract flat section title list from toc_entries. */
+export function tocTitles(meta: DocMeta): string[] {
+  return (meta.toc_entries ?? []).map((e) => e.title);
+}
 
 // ── Read Segment ─────────────────────────────────────────────────────
 
@@ -103,12 +116,22 @@ export type ReadSegmentRequest = {
   include_summary?: boolean;
 };
 
-export type ReadSegmentResponse = {
-  doc_id: string;
-  section_path: string;
+export type ReadSegmentChunk = {
+  chunk_id: string;
+  section: string;
   content: string;
   summary?: string;
-  children?: string[];
+};
+
+export type ReadSegmentResponse = {
+  doc_id: string;
+  filename: string;
+  section_path: string;
+  chunks: ReadSegmentChunk[];
+  toc_context: TocEntry[];
+  token_estimate: number;
+  expanded: boolean;
+  note?: string;
 };
 
 // ── Collections ──────────────────────────────────────────────────────
@@ -157,8 +180,11 @@ export type HealthResponse = {
 // ── Stats ────────────────────────────────────────────────────────────
 
 export type StatsResponse = {
-  total_docs: number;
-  total_chunks: number;
-  total_collections: number;
-  pending_tasks?: number;
+  docs_indexed: number;
+  chunks_stored: number;
+  cached_hashes: number;
+  storage_size_bytes: number;
+  collections: number;
+  access_tracker?: Record<string, unknown>;
+  section_heat?: Record<string, unknown>;
 };
