@@ -8,7 +8,6 @@ import {
 import { createServer as createHttpsServer } from "node:https";
 import type { TlsOptions } from "node:tls";
 import type { WebSocketServer } from "ws";
-import { resolveAgentAvatar } from "../agents/identity-avatar.js";
 import { CANVAS_WS_PATH, handleA2uiHttpRequest } from "../canvas-host/a2ui.js";
 import type { CanvasHostHandler } from "../canvas-host/server.js";
 import { loadConfig } from "../config/config.js";
@@ -28,11 +27,7 @@ import {
   type ResolvedGatewayAuth,
 } from "./auth.js";
 import { normalizeCanvasScopedUrl } from "./canvas-capability.js";
-import {
-  handleControlUiAvatarRequest,
-  handleControlUiHttpRequest,
-  type ControlUiRootState,
-} from "./control-ui.js";
+import type { ControlUiRootState } from "./control-ui.js";
 import { applyHookMappings } from "./hooks-mapping.js";
 import {
   extractHookToken,
@@ -100,6 +95,16 @@ type HookReplayScope = {
   idempotencyKey?: string;
   dispatchScope: Record<string, unknown>;
 };
+
+let controlUiRuntime: typeof import("./control-ui.runtime.js") | null = null;
+
+async function loadControlUiRuntime() {
+  if (controlUiRuntime) {
+    return controlUiRuntime;
+  }
+  controlUiRuntime = await import("./control-ui.runtime.js");
+  return controlUiRuntime;
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
@@ -891,20 +896,24 @@ export function createGatewayHttpServer(opts: {
       if (controlUiEnabled) {
         requestStages.push({
           name: "control-ui-avatar",
-          run: () =>
-            handleControlUiAvatarRequest(req, res, {
+          run: async () => {
+            const runtime = await loadControlUiRuntime();
+            return runtime.handleControlUiAvatarRequest(req, res, {
               basePath: controlUiBasePath,
-              resolveAvatar: (agentId) => resolveAgentAvatar(configSnapshot, agentId),
-            }),
+              resolveAvatar: (agentId) => runtime.resolveAgentAvatar(configSnapshot, agentId),
+            });
+          },
         });
         requestStages.push({
           name: "control-ui-http",
-          run: () =>
-            handleControlUiHttpRequest(req, res, {
+          run: async () => {
+            const runtime = await loadControlUiRuntime();
+            return runtime.handleControlUiHttpRequest(req, res, {
               basePath: controlUiBasePath,
               config: configSnapshot,
               root: controlUiRoot,
-            }),
+            });
+          },
         });
       }
 

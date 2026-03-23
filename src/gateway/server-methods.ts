@@ -6,9 +6,7 @@ import { ErrorCodes, errorShape } from "./protocol/index.js";
 import { isRoleAuthorizedForMethod, parseGatewayRole } from "./role-policy.js";
 import { agentHandlers } from "./server-methods/agent.js";
 import { agentsHandlers } from "./server-methods/agents.js";
-import { browserHandlers } from "./server-methods/browser.js";
 import { channelsHandlers } from "./server-methods/channels.js";
-import { chatHandlers } from "./server-methods/chat.js";
 import { configHandlers } from "./server-methods/config.js";
 import { connectHandlers } from "./server-methods/connect.js";
 import { cronHandlers } from "./server-methods/cron.js";
@@ -36,6 +34,30 @@ import { webHandlers } from "./server-methods/web.js";
 import { wizardHandlers } from "./server-methods/wizard.js";
 
 const CONTROL_PLANE_WRITE_METHODS = new Set(["config.apply", "config.patch", "update.run"]);
+const BROWSER_METHOD_PREFIX = "browser.";
+const CHAT_METHOD_PREFIX = "chat.";
+
+let browserHandlersRuntime: GatewayRequestHandlers | null = null;
+let chatHandlersRuntime: GatewayRequestHandlers | null = null;
+
+async function loadBrowserHandlers(): Promise<GatewayRequestHandlers> {
+  if (browserHandlersRuntime) {
+    return browserHandlersRuntime;
+  }
+  const runtime = await import("./server-methods/browser.runtime.js");
+  browserHandlersRuntime = runtime.browserHandlers;
+  return browserHandlersRuntime;
+}
+
+async function loadChatHandlers(): Promise<GatewayRequestHandlers> {
+  if (chatHandlersRuntime) {
+    return chatHandlersRuntime;
+  }
+  const runtime = await import("./server-methods/chat.runtime.js");
+  chatHandlersRuntime = runtime.chatHandlers;
+  return chatHandlersRuntime;
+}
+
 function authorizeGatewayMethod(method: string, client: GatewayRequestOptions["client"]) {
   if (!client?.connect) {
     return null;
@@ -71,7 +93,6 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
   ...voicewakeHandlers,
   ...healthHandlers,
   ...channelsHandlers,
-  ...chatHandlers,
   ...cronHandlers,
   ...deviceHandlers,
   ...doctorHandlers,
@@ -94,7 +115,6 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
   ...usageHandlers,
   ...agentHandlers,
   ...agentsHandlers,
-  ...browserHandlers,
 };
 
 export async function handleGatewayRequest(
@@ -132,7 +152,15 @@ export async function handleGatewayRequest(
       return;
     }
   }
-  const handler = opts.extraHandlers?.[req.method] ?? coreGatewayHandlers[req.method];
+  let handler = opts.extraHandlers?.[req.method] ?? coreGatewayHandlers[req.method];
+  if (!handler && req.method.startsWith(BROWSER_METHOD_PREFIX)) {
+    const browserHandlers = await loadBrowserHandlers();
+    handler = browserHandlers[req.method];
+  }
+  if (!handler && req.method.startsWith(CHAT_METHOD_PREFIX)) {
+    const chatHandlers = await loadChatHandlers();
+    handler = chatHandlers[req.method];
+  }
   if (!handler) {
     respond(
       false,
