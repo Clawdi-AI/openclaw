@@ -3,14 +3,20 @@ import type { DocMeta } from "./types.js";
 
 // ── Skill Prompt ─────────────────────────────────────────────────────
 
-const FALLBACK_SKILL_PROMPT = `## Memory System (Mentat)
+const FALLBACK_SKILL_PROMPT = `## Document Intelligence System (Mentat)
 
-You have access to a structured memory system. Use \`search_memory\` to find \
-relevant documents and \`read_segment\` to read specific sections. Use \
-\`memory_store\` to save important information and \`memory_forget\` to remove it.
+You have access to Mentat, a document intelligence system that automatically \
+indexes all files you read, web pages you fetch, and external service results \
+(Gmail, Google Drive, etc.).
 
-Prefer the two-step retrieval protocol: search with toc_only=true first, \
-then read_segment for specific sections (saves 80-90% tokens vs full RAG).`;
+**Default to two-step retrieval for all file access**: use \`search_memory\` \
+with toc_only=true to discover documents, then \`read_segment\` for specific \
+sections (saves 80-90% tokens). Only use the Read tool for first-time reads \
+or tiny files (<50 lines).
+
+Use \`memory_store\` to save important information and \`memory_forget\` to \
+remove it. Use \`search_memory\` with source filter to find content by origin \
+(e.g. source="composio:gmail", source="web_fetch").`;
 
 /** Fetch the Mentat skill prompt (cached after first success). */
 export async function fetchSkillPrompt(client: MentatClient): Promise<string> {
@@ -29,7 +35,7 @@ export function formatHotContext(docs: DocMeta[]): string {
   });
   return [
     "<mentat-context>",
-    "Documents previously read in this session (use search_memory or read_segment to access details):",
+    "Documents indexed in this session. Use get_doc_meta + read_segment to access specific sections — do NOT re-read these files with the Read tool:",
     ...lines,
     "</mentat-context>",
   ].join("\n");
