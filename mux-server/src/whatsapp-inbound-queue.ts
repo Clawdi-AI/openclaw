@@ -64,6 +64,12 @@ export function classifyWhatsAppInboundDeliveryError(
   };
 }
 
+function readPositiveInt(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.trunc(value)
+    : null;
+}
+
 export function resolveWhatsAppInboundQueueRetryState(input: {
   row: WhatsAppInboundQueueRetryRow;
   now: number;
@@ -77,26 +83,11 @@ export function resolveWhatsAppInboundQueueRetryState(input: {
   exhausted: boolean;
 } {
   const { row, now, maxAgeMs, failure } = input;
-  const attemptCount = Math.max(
-    1,
-    Number.isFinite(row.attempt_count) ? Math.trunc(row.attempt_count) + 1 : 1,
-  );
-  const createdAtMs =
-    Number.isFinite(row.created_at_ms) && row.created_at_ms > 0
-      ? Math.trunc(row.created_at_ms)
-      : now;
-  let deliveryWindowStartedAtMs =
-    Number.isFinite(row.delivery_window_started_at_ms) && row.delivery_window_started_at_ms > 0
-      ? Math.trunc(row.delivery_window_started_at_ms)
-      : createdAtMs;
-  let lastTargetUpdateAtMs =
-    Number.isFinite(row.last_target_update_at_ms) && row.last_target_update_at_ms > 0
-      ? Math.trunc(row.last_target_update_at_ms)
-      : 0;
-  const targetUpdatedAtMs =
-    Number.isFinite(failure.targetUpdatedAtMs) && (failure.targetUpdatedAtMs ?? 0) > 0
-      ? Math.trunc(failure.targetUpdatedAtMs ?? 0)
-      : 0;
+  const attemptCount = (readPositiveInt(row.attempt_count) ?? 0) + 1;
+  const createdAtMs = readPositiveInt(row.created_at_ms) ?? now;
+  let deliveryWindowStartedAtMs = readPositiveInt(row.delivery_window_started_at_ms) ?? createdAtMs;
+  let lastTargetUpdateAtMs = readPositiveInt(row.last_target_update_at_ms) ?? 0;
+  const targetUpdatedAtMs = readPositiveInt(failure.targetUpdatedAtMs) ?? 0;
   if (targetUpdatedAtMs > lastTargetUpdateAtMs) {
     deliveryWindowStartedAtMs = now;
     lastTargetUpdateAtMs = targetUpdatedAtMs;
