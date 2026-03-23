@@ -128,7 +128,6 @@ Use exact tool slugs and argument names from search results.
 ## Google Services
 
 Google routing is inconsistent. Do not assume `googlesuper` covers every Google task.
-
 When speaking to normal users:
 
 - Treat this as "Google" from the user's perspective.
