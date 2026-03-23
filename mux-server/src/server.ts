@@ -33,6 +33,12 @@ import {
 } from "./observability/snapshot.js";
 import { createInboundTraceId } from "./observability/tracing.js";
 import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
+import {
+  WhatsAppInboundDeliveryError,
+  classifyWhatsAppInboundDeliveryError,
+  isRetryableWhatsAppInboundStatus,
+  resolveWhatsAppInboundQueueRetryState,
+} from "./whatsapp-inbound-queue.js";
 
 type SendResult = {
   statusCode: number;
@@ -5358,60 +5364,6 @@ function computeWhatsAppQueueRetryDelayMs(attemptCount: number): number {
   return Math.min(maxDelay, delay);
 }
 
-class WhatsAppInboundDeliveryError extends Error {
-  retryable: boolean;
-  statusCode: number | null;
-  targetUpdatedAtMs: number | null;
-
-  constructor(
-    message: string,
-    options: {
-      retryable: boolean;
-      statusCode?: number | null;
-      targetUpdatedAtMs?: number | null;
-      cause?: unknown;
-    },
-  ) {
-    super(message, "cause" in options ? { cause: options.cause } : undefined);
-    this.name = "WhatsAppInboundDeliveryError";
-    this.retryable = options.retryable;
-    this.statusCode =
-      typeof options.statusCode === "number" && Number.isFinite(options.statusCode)
-        ? Math.trunc(options.statusCode)
-        : null;
-    this.targetUpdatedAtMs =
-      typeof options.targetUpdatedAtMs === "number" && Number.isFinite(options.targetUpdatedAtMs)
-        ? Math.trunc(options.targetUpdatedAtMs)
-        : null;
-  }
-}
-
-function isRetryableWhatsAppInboundStatus(statusCode: number): boolean {
-  return statusCode === 408 || statusCode === 425 || statusCode === 429 || statusCode >= 500;
-}
-
-function classifyWhatsAppInboundDeliveryError(error: unknown): {
-  retryable: boolean;
-  statusCode: number | null;
-  targetUpdatedAtMs: number | null;
-  errorMessage: string;
-} {
-  if (error instanceof WhatsAppInboundDeliveryError) {
-    return {
-      retryable: error.retryable,
-      statusCode: error.statusCode,
-      targetUpdatedAtMs: error.targetUpdatedAtMs,
-      errorMessage: errorString(error),
-    };
-  }
-  return {
-    retryable: true,
-    statusCode: null,
-    targetUpdatedAtMs: null,
-    errorMessage: errorString(error),
-  };
-}
-
 function snapshotWhatsAppInboundMessage(message: WebInboundMessage): WebInboundMessage {
   return {
     id: readNonEmptyString(message.id) ?? undefined,
@@ -7700,34 +7652,15 @@ async function processWhatsAppInboundQueuePass(): Promise<void> {
         messageId: message.id ?? null,
       });
     } catch (error) {
-      const failure = classifyWhatsAppInboundDeliveryError(error);
-      const attemptCount = Math.max(
-        1,
-        Number.isFinite(row.attempt_count) ? Math.trunc(row.attempt_count) + 1 : 1,
-      );
-      const createdAtMs =
-        Number.isFinite(row.created_at_ms) && row.created_at_ms > 0
-          ? Math.trunc(row.created_at_ms)
-          : now;
-      let deliveryWindowStartedAtMs =
-        Number.isFinite(row.delivery_window_started_at_ms) && row.delivery_window_started_at_ms > 0
-          ? Math.trunc(row.delivery_window_started_at_ms)
-          : createdAtMs;
-      let lastTargetUpdateAtMs =
-        Number.isFinite(row.last_target_update_at_ms) && row.last_target_update_at_ms > 0
-          ? Math.trunc(row.last_target_update_at_ms)
-          : 0;
-      const targetUpdatedAtMs =
-        Number.isFinite(failure.targetUpdatedAtMs) && (failure.targetUpdatedAtMs ?? 0) > 0
-          ? Math.trunc(failure.targetUpdatedAtMs ?? 0)
-          : 0;
-      if (targetUpdatedAtMs > lastTargetUpdateAtMs) {
-        deliveryWindowStartedAtMs = now;
-        lastTargetUpdateAtMs = targetUpdatedAtMs;
-      }
-      const ageMs = Math.max(0, now - deliveryWindowStartedAtMs);
+      const failure = classifyWhatsAppInboundDeliveryError(error, errorString);
       const maxAgeMs = Math.max(1_000, Math.trunc(whatsappQueueMaxAgeMs));
-      if (!failure.retryable || ageMs >= maxAgeMs) {
+      const retryState = resolveWhatsAppInboundQueueRetryState({
+        row,
+        now,
+        maxAgeMs,
+        failure,
+      });
+      if (retryState.exhausted) {
         stmtDeleteWhatsAppInboundQueueById.run(row.id);
         metrics.recordInboundEvent("whatsapp", "dropped");
         log({
@@ -7735,8 +7668,8 @@ async function processWhatsAppInboundQueuePass(): Promise<void> {
           queueId: row.id,
           dedupeKey: row.dedupe_key,
           messageId: message.id ?? null,
-          attemptCount,
-          ageMs,
+          attemptCount: retryState.attemptCount,
+          ageMs: retryState.ageMs,
           maxAgeMs,
           retryable: failure.retryable,
           statusCode: failure.statusCode,
@@ -7745,15 +7678,15 @@ async function processWhatsAppInboundQueuePass(): Promise<void> {
         continue;
       }
 
-      const retryDelayMs = computeWhatsAppQueueRetryDelayMs(attemptCount);
+      const retryDelayMs = computeWhatsAppQueueRetryDelayMs(retryState.attemptCount);
       const nextAttemptAtMs = Date.now() + retryDelayMs;
       stmtDeferWhatsAppInboundQueueById.run(
         nextAttemptAtMs,
-        attemptCount,
+        retryState.attemptCount,
         failure.errorMessage.slice(0, 2_000),
         Date.now(),
-        deliveryWindowStartedAtMs,
-        lastTargetUpdateAtMs,
+        retryState.deliveryWindowStartedAtMs,
+        retryState.lastTargetUpdateAtMs,
         row.id,
       );
       log({
@@ -7761,7 +7694,7 @@ async function processWhatsAppInboundQueuePass(): Promise<void> {
         queueId: row.id,
         dedupeKey: row.dedupe_key,
         messageId: message.id ?? null,
-        attemptCount,
+        attemptCount: retryState.attemptCount,
         retryDelayMs,
         nextAttemptAtMs,
         error: failure.errorMessage,
