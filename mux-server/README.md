@@ -117,6 +117,11 @@ node --import tsx mux-server/src/server.ts
 - `MUX_WHATSAPP_AUTH_DIR` (optional): WhatsApp auth directory; defaults to OpenClaw's default web auth dir.
 - `MUX_WHATSAPP_INBOUND_MEDIA_MAX_BYTES` (default `5000000`): max file size for WhatsApp inbound media attachments (all types: images, documents, video, audio).
 - `MUX_WHATSAPP_INBOUND_RETRY_MS` (default `1000`): reconnect backoff when WhatsApp listener closes.
+- `MUX_WHATSAPP_QUEUE_POLL_MS` (default `500`): poll interval for the persisted WhatsApp inbound delivery queue.
+- `MUX_WHATSAPP_QUEUE_RETRY_INITIAL_MS` (default `1000`): initial retry backoff for queued WhatsApp inbound deliveries.
+- `MUX_WHATSAPP_QUEUE_RETRY_MAX_MS` (default `60000`): max retry backoff for queued WhatsApp inbound deliveries.
+- `MUX_WHATSAPP_QUEUE_BATCH_SIZE` (default `20`): max number of queued WhatsApp inbound deliveries processed per pass.
+- `MUX_WHATSAPP_QUEUE_MAX_AGE_MS` (default `86400000`): maximum age for queued WhatsApp inbound deliveries before they are explicitly exhausted and dropped.
 - `MUX_TELEGRAM_BOT_USERNAME` (optional): enables Telegram deep link in pairing-token response.
 - `MUX_PAIRING_TOKEN_TTL_SEC` (default `900`): default one-time pairing-token TTL in seconds.
 - `MUX_PAIRING_TOKEN_MAX_TTL_SEC` (default `3600`): max allowed one-time pairing-token TTL.
