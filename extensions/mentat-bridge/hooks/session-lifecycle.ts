@@ -43,6 +43,7 @@ export function registerSessionLifecycleHooks(
 ) {
   // session_start: create ephemeral session collection
   api.on("session_start", async (event, _ctx) => {
+    await client.ensureStarted();
     if (!client.isHealthy()) return;
     const ev = event as SessionStartEvent;
     if (!ev.sessionId) return;
@@ -80,6 +81,7 @@ export function registerSessionLifecycleHooks(
     const ev = event as SubagentSpawningEvent;
     const subCtx = ctx as SubagentContext;
 
+    await client.ensureStarted();
     if (!client.isHealthy()) {
       return { status: "ok" as const };
     }

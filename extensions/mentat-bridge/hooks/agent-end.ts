@@ -58,6 +58,7 @@ function extractUserTexts(messages: unknown[]): string[] {
 
 export function registerAgentEndHook(api: PluginApi, client: MentatClient) {
   api.on("agent_end", async (event, _ctx) => {
+    await client.ensureStarted();
     if (!client.isHealthy()) return;
     if (!event.success || !event.messages || event.messages.length === 0) return;
 

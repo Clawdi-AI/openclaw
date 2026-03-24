@@ -24,7 +24,7 @@ async function ensureDefaultCollections(client: MentatClient) {
   // memory: auto-collect memory_store + memory file changes
   await client.createCollection("memory", {
     metadata: { type: "system", description: "Long-term memory" },
-    watch_paths: [join(homedir(), ".openclaw", "memory")],
+    watch_paths: [join(homedir(), ".openclaw", "workspace", "memory")],
     auto_add_sources: ["openclaw:memory_store", "openclaw:memory", "openclaw:auto_capture"],
   });
 
@@ -77,6 +77,7 @@ const mentatBridgePlugin = {
     api.on(
       "before_prompt_build",
       async (event, ctx) => {
+        await client.ensureStarted();
         if (!client.isHealthy()) return;
 
         // Static: Mentat two-step retrieval protocol instructions (cached by providers)

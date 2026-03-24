@@ -55,6 +55,7 @@ function mimeToContentType(mime: string): string {
 
 export function registerMessageReceivedHook(api: PluginApi, client: MentatClient) {
   api.on("message_received", async (event, ctx) => {
+    await client.ensureStarted();
     if (!client.isHealthy()) return;
     if (!event.content || event.content.length < 50) return;
 

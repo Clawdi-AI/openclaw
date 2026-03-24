@@ -9,7 +9,7 @@ export function toolToSource(toolName: string): string {
   return `openclaw:${toolName}`;
 }
 
-const FILE_READ_TOOLS = new Set(["Read", "read_file", "file_read", "ReadFile", "cat"]);
+const FILE_READ_TOOLS = new Set(["Read", "read", "read_file", "file_read", "ReadFile", "cat"]);
 
 export function isFileReadTool(toolName: string): boolean {
   return FILE_READ_TOOLS.has(toolName);
@@ -23,12 +23,45 @@ export function isComposioTool(toolName: string): boolean {
   return toolName.startsWith("composio:");
 }
 
+/**
+ * Try to unwrap a JSON string into its nested text content.
+ * Tool results like WebFetch arrive as `{ content: [{ type: "text", text: JSON.stringify(payload) }] }`
+ * where the inner text is a serialized object with a `.text` field holding the actual page content.
+ * Returns null if the string is not JSON or has no extractable text.
+ */
+function tryUnwrapJsonText(str: string): string | null {
+  if (!str.startsWith("{") && !str.startsWith("[")) return null;
+  try {
+    const parsed: unknown = JSON.parse(str);
+    if (parsed && typeof parsed === "object") {
+      const obj = parsed as Record<string, unknown>;
+      // Prefer .text (WebFetch result shape)
+      if (typeof obj.text === "string") return obj.text;
+      // Fallback to .result
+      if (typeof obj.result === "string") return obj.result;
+    }
+  } catch {
+    // Not valid JSON
+  }
+  return null;
+}
+
 /** Extract text content from a tool result. Handles both string and structured results. */
 export function extractContentFromResult(result: unknown): string | null {
-  if (typeof result === "string") return result;
+  if (typeof result === "string") {
+    return tryUnwrapJsonText(result) ?? result;
+  }
   if (!result || typeof result !== "object") return null;
 
   const obj = result as Record<string, unknown>;
+
+  // jsonResult() produces { content: [...], details: payload }.
+  // Prefer details.text directly — avoids re-parsing the stringified JSON in content blocks.
+  if (obj.details && typeof obj.details === "object") {
+    const details = obj.details as Record<string, unknown>;
+    if (typeof details.text === "string") return details.text;
+    if (typeof details.result === "string") return details.result;
+  }
 
   // { content: [{ type: "text", text: "..." }] }
   if (Array.isArray(obj.content)) {
@@ -43,7 +76,11 @@ export function extractContentFromResult(result: unknown): string | null {
         texts.push((block as Record<string, unknown>).text as string);
       }
     }
-    if (texts.length > 0) return texts.join("\n");
+    if (texts.length > 0) {
+      const joined = texts.join("\n");
+      // The text inside content blocks may itself be serialized JSON (e.g. jsonResult wrapper)
+      return tryUnwrapJsonText(joined) ?? joined;
+    }
   }
 
   // { text: "..." }

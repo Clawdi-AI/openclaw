@@ -139,6 +139,26 @@ describe("source-map", () => {
     expect(extractContentFromResult(null)).toBeNull();
     expect(extractContentFromResult(42)).toBeNull();
     expect(extractContentFromResult({ content: [] })).toBeNull();
+
+    // WebFetch result wrapped via jsonResult(): content block text is JSON-serialized payload
+    const webFetchPayload = {
+      url: "https://example.com",
+      status: 200,
+      text: "page content here",
+      truncated: false,
+    };
+    // jsonResult wraps as { content: [{ type: "text", text: JSON.stringify(payload) }] }
+    expect(
+      extractContentFromResult({
+        content: [{ type: "text", text: JSON.stringify(webFetchPayload) }],
+      }),
+    ).toBe("page content here");
+
+    // Also works when result arrives as a raw JSON string
+    expect(extractContentFromResult(JSON.stringify(webFetchPayload))).toBe("page content here");
+
+    // Plain string that starts with { but is not valid JSON
+    expect(extractContentFromResult("{not json")).toBe("{not json");
   });
 
   test("urlToFilename produces safe filenames", async () => {

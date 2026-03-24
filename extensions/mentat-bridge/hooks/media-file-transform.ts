@@ -57,12 +57,8 @@ export function registerMediaFileTransformHook(
   cfg: MentatBridgeConfig,
 ) {
   api.on("media_file_transform", async (event) => {
-    // Stale health state can cause false negatives after gateway reload;
-    // do a live check before bailing.
-    if (!client.isHealthy()) {
-      await client.checkHealth();
-      if (!client.isHealthy()) return undefined;
-    }
+    await client.ensureStarted();
+    if (!client.isHealthy()) return undefined;
 
     // When raw file data is available, index the full file via indexFile
     // so mentat can parse the complete content (e.g. all PDF pages).
