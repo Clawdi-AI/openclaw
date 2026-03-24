@@ -29,6 +29,7 @@ const HEALTH_CHECK_INTERVAL_MS = 30_000;
 
 export class MentatClient {
   private healthy = false;
+  private started = false;
   private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
   private skillPromptCache: string | null = null;
   private readonly logger: Logger;
@@ -46,11 +47,19 @@ export class MentatClient {
 
   // ── Lifecycle ────────────────────────────────────────────────────
 
+  /** Start health checking. Idempotent — safe to call multiple times. */
   async start(): Promise<void> {
+    if (this.started) return;
+    this.started = true;
     await this.checkHealth();
     this.healthCheckTimer = setInterval(() => {
       this.checkHealth().catch(() => {});
     }, HEALTH_CHECK_INTERVAL_MS);
+  }
+
+  /** Ensure the client is started. Call from hooks that may run before service start. */
+  async ensureStarted(): Promise<void> {
+    if (!this.started) await this.start();
   }
 
   stop(): void {
