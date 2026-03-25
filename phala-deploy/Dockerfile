@@ -75,4 +75,3 @@ FROM base-prereqs AS dev
 
 RUN printf '#!/bin/sh\nexec node /app/openclaw.mjs "$@"\n' > /usr/local/bin/openclaw && \
     chmod +x /usr/local/bin/openclaw
-
