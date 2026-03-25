@@ -58,32 +58,24 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 
 ENTRYPOINT ["/entrypoint.sh"]
 
-# --- Stage 3: Production base (openclaw from tarball) ---
+# --- Stage 2: Production image (openclaw from tarball + SSH) ---
 FROM base-prereqs AS base
 
 COPY phala-deploy/openclaw.tgz /tmp/openclaw.tgz
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential && \
+    apt-get install -y --no-install-recommends build-essential openssh-server && \
     npm install -g /tmp/openclaw.tgz && \
     rm -f /tmp/openclaw.tgz && \
     rm -f /root/.openclaw/openclaw.json /root/.openclaw/openclaw.json.bak && \
     apt-get purge -y --auto-remove build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /root/.npm /tmp/* /usr/include
+RUN mkdir -p /var/run/sshd && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
 
-# --- Stage 4: Dev image (openclaw via bind mount) ---
+# --- Stage 3: Dev image (openclaw via bind mount) ---
 FROM base-prereqs AS dev
 
 RUN printf '#!/bin/sh\nexec node /app/openclaw.mjs "$@"\n' > /usr/local/bin/openclaw && \
     chmod +x /usr/local/bin/openclaw
-
-# --- Stage 5: Full image (standalone with SSH) ---
-FROM base AS full
-
-# SSH daemon
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends openssh-server && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /var/run/sshd && \
-    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
 
