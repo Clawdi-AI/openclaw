@@ -58,20 +58,18 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 
 ENTRYPOINT ["/entrypoint.sh"]
 
-# --- Stage 2: Production image (openclaw from tarball + SSH) ---
+# --- Stage 2: Production image (openclaw from tarball) ---
 FROM base-prereqs AS base
 
 COPY phala-deploy/openclaw.tgz /tmp/openclaw.tgz
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential openssh-server && \
+    apt-get install -y --no-install-recommends build-essential && \
     npm install -g /tmp/openclaw.tgz && \
     rm -f /tmp/openclaw.tgz && \
     rm -f /root/.openclaw/openclaw.json /root/.openclaw/openclaw.json.bak && \
     apt-get purge -y --auto-remove build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /root/.npm /tmp/* /usr/include
-RUN mkdir -p /var/run/sshd && \
-    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
 
 # --- Stage 3: Dev image (openclaw via bind mount) ---
 FROM base-prereqs AS dev
