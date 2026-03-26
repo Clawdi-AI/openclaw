@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "skills": {
+    "word-docx": {
+      "version": "1.0.2",
+      "installedAt": 1774510743385
+    },
+    "excel-xlsx": {
+      "version": "1.0.2",
+      "installedAt": 1774510746123
+    },
+    "exa-web-search-free": {
+      "version": "1.0.1",
+      "installedAt": 1774510749116
+    },
+    "powerpoint-pptx": {
+      "version": "1.0.1",
+      "installedAt": 1774510750595
+    },
+    "todoist": {
+      "version": "0.2.1",
+      "installedAt": 1774510752265
+    },
+    "firecrawl-search": {
+      "version": "1.0.0",
+      "installedAt": 1774510757071
+    },
+    "xiucheng-self-improving-agent": {
+      "version": "1.0.0",
+      "installedAt": 1774510759552
+    },
+    "pdf-extract": {
+      "version": "1.0.0",
+      "installedAt": 1774510761298
+    },
+    "sql-toolkit": {
+      "version": "1.0.0",
+      "installedAt": 1774510801656
+    },
+    "frontend-design-3": {
+      "version": "0.1.0",
+      "installedAt": 1774510804055
+    },
+    "evolver": {
+      "version": "1.39.0",
+      "installedAt": 1774510868317
+    }
+  }
+}
