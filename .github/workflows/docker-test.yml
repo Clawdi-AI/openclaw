@@ -8,13 +8,13 @@ on:
         required: true
         default: "proxy-test"
       target:
-        description: "Dockerfile target (base or full)"
+        description: "Dockerfile target (base or dev)"
         required: true
-        default: "full"
+        default: "base"
         type: choice
         options:
           - base
-          - full
+          - dev
 
 permissions:
   contents: read
