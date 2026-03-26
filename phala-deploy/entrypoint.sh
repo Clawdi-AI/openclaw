@@ -1,13 +1,10 @@
 #!/bin/sh
 set -e
 
-# Persistent storage root (S3 mount or Docker volume)
+# Persistent storage root (Docker volume or k8s PVC)
 DATA_DIR="/data"
-SQLITE_LOCAL_DIR="/data-local/sqlite"
 
-# --- Derive keys from MASTER_KEY via HKDF-SHA256 ---
-# One master secret derives: rclone crypt password, crypt salt, gateway auth token.
-# S3 credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) are provider-issued and stay separate.
+# --- Derive gateway auth token from MASTER_KEY via HKDF-SHA256 ---
 if [ -n "$MASTER_KEY" ]; then
   echo "Deriving keys from MASTER_KEY..."
   derive_key() {
@@ -20,118 +17,10 @@ if [ -n "$MASTER_KEY" ]; then
 
   GATEWAY_AUTH_TOKEN=$(derive_key gateway-auth-token | tr -d '/+=' | head -c 32)
   export GATEWAY_AUTH_TOKEN
-
-  # Derive rclone keys only if rclone is installed
-  if command -v rclone >/dev/null 2>&1; then
-    RCLONE_CRYPT_PASSWORD=$(rclone obscure "$(derive_key rclone-crypt-password)")
-    RCLONE_CRYPT_PASSWORD2=$(rclone obscure "$(derive_key rclone-crypt-salt)")
-    export RCLONE_CRYPT_PASSWORD RCLONE_CRYPT_PASSWORD2
-    echo "Keys derived (gateway token, crypt password, crypt salt)."
-  else
-    echo "Keys derived (gateway token)."
-  fi
+  echo "Keys derived."
 fi
 
-# --- Encrypted S3 storage via rclone crypt + mount ---
-if [ -n "$S3_BUCKET" ]; then
-  if ! command -v rclone >/dev/null 2>&1; then
-    echo "Error: S3_BUCKET is set but rclone is not installed. Use the full image for S3 support."
-    mkdir -p "$DATA_DIR"
-  else
-    echo "S3 storage configured (bucket: $S3_BUCKET), setting up rclone..."
-
-    S3_PREFIX="${S3_PREFIX:-openclaw-data}"
-    S3_REGION="${S3_REGION:-us-east-1}"
-
-    # Generate rclone config from env vars (write to temp location, not ~/.config)
-    mkdir -p /tmp/rclone
-    cat > /tmp/rclone/rclone.conf <<RCONF
-[s3]
-type = s3
-provider = ${S3_PROVIDER:-Other}
-env_auth = true
-endpoint = ${S3_ENDPOINT}
-region = ${S3_REGION}
-no_check_bucket = true
-
-[s3-crypt]
-type = crypt
-remote = s3:${S3_BUCKET}/${S3_PREFIX}
-password = ${RCLONE_CRYPT_PASSWORD}
-password2 = ${RCLONE_CRYPT_PASSWORD2:-}
-filename_encryption = standard
-directory_name_encryption = true
-RCONF
-    export RCLONE_CONFIG=/tmp/rclone/rclone.conf
-
-    # Try FUSE mount first; fall back to rclone sync if FUSE unavailable
-    mkdir -p "$DATA_DIR"
-    S3_MODE=""
-
-    if [ -e /dev/fuse ]; then
-      echo "Attempting FUSE mount..."
-      # Unmount Docker volume if present (FUSE can't overlay on existing mounts)
-      if mountpoint -q "$DATA_DIR" 2>/dev/null; then
-        echo "Unmounting existing volume at $DATA_DIR..."
-        umount "$DATA_DIR" 2>/dev/null || true
-      fi
-      rclone mount s3-crypt: "$DATA_DIR" \
-        --config "$RCLONE_CONFIG" \
-        --vfs-cache-mode writes \
-        --vfs-write-back 5s \
-        --dir-cache-time 30s \
-        --vfs-cache-max-size 500M \
-        --allow-other \
-        --daemon 2>&1 || true
-
-      # Wait for FUSE mount (up to 10s) — check for fuse.rclone specifically,
-      # not just mountpoint (Docker volume is already a mountpoint)
-      MOUNT_WAIT=0
-      while ! mount | grep -q "on $DATA_DIR type fuse.rclone"; do
-        sleep 0.5
-        MOUNT_WAIT=$((MOUNT_WAIT + 1))
-        if [ $MOUNT_WAIT -ge 20 ]; then
-          break
-        fi
-      done
-
-      if mount | grep -q "on $DATA_DIR type fuse.rclone"; then
-        S3_MODE="mount"
-        echo "rclone FUSE mount ready at $DATA_DIR"
-      else
-        echo "FUSE mount failed, falling back to sync mode."
-      fi
-    fi
-
-    # Fallback: sync mode (pull from S3, periodic push back)
-    if [ -z "$S3_MODE" ]; then
-      S3_MODE="sync"
-      echo "Using rclone sync mode (no FUSE)."
-      # Restore SQLite files to local storage (can't run on FUSE, use symlinks instead)
-      mkdir -p "$SQLITE_LOCAL_DIR"
-      echo "Restoring SQLite files from S3..."
-      rclone copy s3-crypt:sqlite/ "$SQLITE_LOCAL_DIR/" --config "$RCLONE_CONFIG" 2>/dev/null || true
-      # Pull remaining state
-      rclone copy s3-crypt: "$DATA_DIR/" --config "$RCLONE_CONFIG" --exclude "sqlite/**" 2>&1 || true
-      echo "Initial sync from S3 complete."
-    fi
-
-    # In sync mode, run periodic background jobs to push changes to S3.
-    # In mount mode, rclone VFS cache handles syncing automatically.
-    if [ "$S3_MODE" = "sync" ]; then
-      (
-        while true; do
-          sleep 60
-          rclone copy "$SQLITE_LOCAL_DIR/" s3-crypt:sqlite/ --config "$RCLONE_CONFIG" 2>/dev/null || true
-          rclone copy "$DATA_DIR/" s3-crypt: --config "$RCLONE_CONFIG" --exclude "sqlite/**" 2>/dev/null || true
-        done
-      ) &
-      echo "Background sync started (PID $!)"
-    fi
-  fi
-else
-  mkdir -p "$DATA_DIR"
-fi
+mkdir -p "$DATA_DIR"
 
 # --- Set up home directory symlinks ---
 # ~/.openclaw → /data/openclaw (state dir)
@@ -230,29 +119,6 @@ if [ -n "$MASTER_KEY" ]; then
   ' "$PAIRED_JSON"
 fi
 
-# --- SQLite symlink helper ---
-# Called after gateway creates agent dirs to redirect memory.db to local storage
-setup_sqlite_symlinks() {
-  if [ -z "$S3_BUCKET" ]; then return; fi
-  for agent_dir in /root/.openclaw/agents/*/; do
-    [ -d "$agent_dir" ] || continue
-    agent_id=$(basename "$agent_dir")
-    local_db="$SQLITE_LOCAL_DIR/${agent_id}-memory.db"
-    target_db="${agent_dir}memory.db"
-    # If real file exists on mount, move it to local
-    if [ -f "$target_db" ] && [ ! -L "$target_db" ]; then
-      cp "$target_db" "$local_db" 2>/dev/null || true
-      rm -f "$target_db"
-    fi
-    # Create symlink if not already there
-    if [ ! -L "$target_db" ]; then
-      # Ensure local db exists (may have been restored from S3)
-      touch "$local_db"
-      ln -sf "$local_db" "$target_db"
-    fi
-  done
-}
-
 # Start SSH daemon if installed (full image only)
 if [ -x /usr/sbin/sshd ]; then
   mkdir -p /var/run/sshd /root/.ssh
@@ -262,45 +128,32 @@ if [ -x /usr/sbin/sshd ]; then
   echo "SSH daemon started."
 fi
 
-# Clean up stale PID files from previous container restarts
-rm -f /var/run/docker.pid /var/run/containerd/containerd.pid
+# Start Docker daemon only when explicitly enabled (e.g. Phala CVM).
+# k3s pods don't need Docker — the agent runs directly on the host.
+if [ "${ENABLE_DOCKER:-}" = "1" ]; then
+  rm -f /var/run/docker.pid /var/run/containerd/containerd.pid
+  dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs &
+  DOCKERD_PID=$!
 
-# Start Docker daemon in background (best-effort, not critical for gateway)
-# TODO: This blocking wait adds ~20s to startup. The gateway HTTP/WS server
-# doesn't need Docker — only tool execution does. Move the wait into a
-# background task and let the gateway start immediately.
-dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs &
-DOCKERD_PID=$!
-
-echo "Waiting for Docker daemon..."
-DOCKER_WAIT=0
-while ! docker info >/dev/null 2>&1; do
-  sleep 1
-  DOCKER_WAIT=$((DOCKER_WAIT + 1))
-  if [ $DOCKER_WAIT -ge 30 ]; then
-    echo "Warning: Docker daemon not ready after 30s, continuing without it."
-    break
+  echo "Waiting for Docker daemon..."
+  DOCKER_WAIT=0
+  while ! docker info >/dev/null 2>&1; do
+    sleep 1
+    DOCKER_WAIT=$((DOCKER_WAIT + 1))
+    if [ $DOCKER_WAIT -ge 30 ]; then
+      echo "Warning: Docker daemon not ready after 30s, continuing without it."
+      break
+    fi
+    if ! kill -0 $DOCKERD_PID 2>/dev/null; then
+      echo "Warning: Docker daemon exited, continuing without it."
+      break
+    fi
+  done
+  if docker info >/dev/null 2>&1; then
+    echo "Docker daemon ready."
   fi
-  # Check if dockerd process died
-  if ! kill -0 $DOCKERD_PID 2>/dev/null; then
-    echo "Warning: Docker daemon exited, continuing without it."
-    break
-  fi
-done
-if docker info >/dev/null 2>&1; then
-  echo "Docker daemon ready."
-fi
-
-# Set up SQLite symlinks — only needed in sync mode (no VFS cache).
-# In FUSE mount mode, --vfs-cache-mode writes handles SQLite locally.
-if [ "$S3_MODE" = "sync" ]; then
-  setup_sqlite_symlinks
-  (
-    while true; do
-      sleep 30
-      setup_sqlite_symlinks
-    done
-  ) &
+else
+  echo "Docker daemon disabled (set ENABLE_DOCKER=1 to enable)."
 fi
 
 # Gateway supervision (keep container alive for SSH even if gateway fails).

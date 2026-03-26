@@ -1,17 +1,4 @@
-# --- Stage 1: Build gogcli (Google API CLI with env-var credential injection) ---
-FROM golang:1.25-bookworm AS gogcli-builder
-ARG GOGCLI_REPO=https://github.com/Leechael/gogcli.git
-ARG GOGCLI_BRANCH=feat/env-token-injection
-RUN git clone --depth 1 --branch "$GOGCLI_BRANCH" "$GOGCLI_REPO" /src/gogcli
-WORKDIR /src/gogcli
-RUN CGO_ENABLED=0 go build \
-      -ldflags "-s -w \
-        -X github.com/steipete/gogcli/internal/cmd.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev) \
-        -X github.com/steipete/gogcli/internal/cmd.commit=$(git rev-parse --short=12 HEAD) \
-        -X github.com/steipete/gogcli/internal/cmd.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      -o /out/gog-bin ./cmd/gog
-
-# --- Stage 2: Base prerequisites (system deps, no openclaw) ---
+# --- Stage 1: Base prerequisites (system deps, no openclaw) ---
 FROM ubuntu:24.04 AS base-prereqs
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -61,11 +48,6 @@ RUN echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /root/.bash
 RUN npm install -g mcporter && \
     rm -rf /root/.npm /tmp/*
 
-# gogcli: static binary + credential-sourcing wrapper
-COPY --from=gogcli-builder /out/gog-bin /usr/local/bin/gog-bin
-COPY phala-deploy/gogcli/gog-wrapper.sh /usr/local/bin/gog
-RUN chmod +x /usr/local/bin/gog /usr/local/bin/gog-bin
-
 COPY phala-deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
@@ -76,7 +58,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 
 ENTRYPOINT ["/entrypoint.sh"]
 
-# --- Stage 3: Production base (openclaw from tarball) ---
+# --- Stage 2: Production image (openclaw from tarball) ---
 FROM base-prereqs AS base
 
 COPY phala-deploy/openclaw.tgz /tmp/openclaw.tgz
@@ -84,38 +66,14 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential && \
     npm install -g /tmp/openclaw.tgz && \
     rm -f /tmp/openclaw.tgz && \
-    openclaw plugins install @tencent-connect/openclaw-qqbot@latest && \
-    openclaw plugins install @dingtalk-real-ai/dingtalk-connector@latest && \
     rm -f /root/.openclaw/openclaw.json /root/.openclaw/openclaw.json.bak && \
     apt-get purge -y --auto-remove build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /root/.npm /tmp/* /usr/include
 
-# --- Stage 4: Dev image (openclaw via bind mount) ---
+# --- Stage 3: Dev image (openclaw via bind mount) ---
 FROM base-prereqs AS dev
 
 RUN printf '#!/bin/sh\nexec node /app/openclaw.mjs "$@"\n' > /usr/local/bin/openclaw && \
     chmod +x /usr/local/bin/openclaw
 
-# --- Stage 5: Full image (standalone with SSH + S3 support) ---
-FROM base AS full
-
-# SSH daemon
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends openssh-server && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /var/run/sshd && \
-    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-
-# rclone for encrypted S3 mount (single static binary, ~50MB)
-ARG RCLONE_VERSION=1.73.0
-RUN curl -fsSL "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" \
-      -o /tmp/rclone.zip && \
-    unzip -j /tmp/rclone.zip '*/rclone' -d /usr/local/bin && \
-    chmod +x /usr/local/bin/rclone && \
-    rm /tmp/rclone.zip
-
-# fuse3 for rclone mount
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends fuse3 && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
