@@ -45,6 +45,8 @@ import type {
   PluginHookSubagentEndedEvent,
   PluginHookSubagentSpawnedEvent,
   PluginHookToolContext,
+  PluginHookTransformToolResultEvent,
+  PluginHookTransformToolResultResult,
   PluginHookToolResultPersistContext,
   PluginHookToolResultPersistEvent,
   PluginHookToolResultPersistResult,
@@ -78,6 +80,8 @@ export type {
   PluginHookBeforeToolCallEvent,
   PluginHookBeforeToolCallResult,
   PluginHookAfterToolCallEvent,
+  PluginHookTransformToolResultEvent,
+  PluginHookTransformToolResultResult,
   PluginHookToolResultPersistContext,
   PluginHookToolResultPersistEvent,
   PluginHookToolResultPersistResult,
@@ -467,6 +471,24 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
   }
 
   /**
+   * Run transform_tool_result hook.
+   * Allows plugins to replace the tool result before it is returned to the
+   * agent framework (and therefore before session persistence / LLM context).
+   * Runs sequentially (async, awaited).
+   */
+  async function runTransformToolResult(
+    event: PluginHookTransformToolResultEvent,
+    ctx: PluginHookToolContext,
+  ): Promise<PluginHookTransformToolResultResult | undefined> {
+    return runModifyingHook<"transform_tool_result", PluginHookTransformToolResultResult>(
+      "transform_tool_result",
+      event,
+      ctx,
+      (_acc, next) => next,
+    );
+  }
+
+  /**
    * Run tool_result_persist hook.
    *
    * This hook is intentionally synchronous: it runs in hot paths where session
@@ -785,6 +807,7 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
     // Tool hooks
     runBeforeToolCall,
     runAfterToolCall,
+    runTransformToolResult,
     runToolResultPersist,
     // Message write hooks
     runBeforeMessageWrite,
