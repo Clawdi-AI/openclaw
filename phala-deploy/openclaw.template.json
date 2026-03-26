@@ -170,8 +170,6 @@
       "skill-creator",
       "healthcheck",
       "coding-agent",
-      "github",
-      "gh-issues",
       "composio",
       "discord",
       "slack",
@@ -193,7 +191,18 @@
       "xurl",
       "polymarket",
       "node-connect",
-      "sag"
+      "sag",
+      "evolver",
+      "word-docx",
+      "excel-xlsx",
+      "exa-web-search-free",
+      "powerpoint-pptx",
+      "todoist",
+      "firecrawl-search",
+      "xiucheng-self-improving-agent",
+      "pdf-extract",
+      "sql-toolkit",
+      "frontend-design-3"
     ],
     "entries": {
       "gog": { "enabled": false },
