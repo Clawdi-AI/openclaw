@@ -33,6 +33,12 @@ import {
 } from "./observability/snapshot.js";
 import { createInboundTraceId } from "./observability/tracing.js";
 import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
+import {
+  WhatsAppInboundDeliveryError,
+  classifyWhatsAppInboundDeliveryError,
+  isRetryableWhatsAppInboundStatus,
+  resolveWhatsAppInboundQueueRetryState,
+} from "./whatsapp-inbound-queue.js";
 
 type SendResult = {
   statusCode: number;
@@ -132,6 +138,9 @@ type WhatsAppInboundQueueRow = {
   dedupe_key: string;
   payload_json: string;
   attempt_count: number;
+  created_at_ms: number;
+  delivery_window_started_at_ms: number;
+  last_target_update_at_ms: number;
 };
 
 type TelegramBoundRoute = {
@@ -178,6 +187,7 @@ type TenantInboundTarget = {
   url: string;
   timeoutMs: number;
   openclawId: string;
+  updatedAtMs: number | null;
 };
 
 type WebInboundMessage = {
@@ -613,6 +623,7 @@ const whatsappQueueRetryInitialMs = Number(
 );
 const whatsappQueueRetryMaxMs = Number(process.env.MUX_WHATSAPP_QUEUE_RETRY_MAX_MS || 60_000);
 const whatsappQueueBatchSize = Number(process.env.MUX_WHATSAPP_QUEUE_BATCH_SIZE || 20);
+const whatsappQueueMaxAgeMs = Number(process.env.MUX_WHATSAPP_QUEUE_MAX_AGE_MS || 24 * 60 * 60_000);
 const pairingTokenTtlSec = Number(process.env.MUX_PAIRING_TOKEN_TTL_SEC || 15 * 60);
 const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
 let telegramBotUsername = readNonEmptyString(process.env.MUX_TELEGRAM_BOT_USERNAME);
@@ -773,7 +784,7 @@ const stmtUpsertTenantInboundTargetByAdmin = db.prepare(`
 `);
 
 const stmtSelectTenantInboundTargetById = db.prepare(`
-  SELECT inbound_url, inbound_token, inbound_timeout_ms
+  SELECT inbound_url, inbound_token, inbound_timeout_ms, updated_at_ms
   FROM tenants
   WHERE id = ? AND status = 'active'
   LIMIT 1
@@ -1064,15 +1075,24 @@ const stmtInsertWhatsAppInboundQueue = db.prepare(`
     next_attempt_at_ms,
     attempt_count,
     last_error,
+    delivery_window_started_at_ms,
+    last_target_update_at_ms,
     created_at_ms,
     updated_at_ms
   )
-  VALUES (?, ?, ?, 0, NULL, ?, ?)
+  VALUES (?, ?, ?, 0, NULL, ?, 0, ?, ?)
   ON CONFLICT(dedupe_key) DO NOTHING
 `);
 
 const stmtSelectDueWhatsAppInboundQueue = db.prepare(`
-  SELECT id, dedupe_key, payload_json, attempt_count
+  SELECT
+    id,
+    dedupe_key,
+    payload_json,
+    attempt_count,
+    created_at_ms,
+    delivery_window_started_at_ms,
+    last_target_update_at_ms
   FROM whatsapp_inbound_queue
   WHERE next_attempt_at_ms <= ?
   ORDER BY id ASC
@@ -1090,7 +1110,9 @@ const stmtDeferWhatsAppInboundQueueById = db.prepare(`
     next_attempt_at_ms = ?,
     attempt_count = ?,
     last_error = ?,
-    updated_at_ms = ?
+    updated_at_ms = ?,
+    delivery_window_started_at_ms = ?,
+    last_target_update_at_ms = ?
   WHERE id = ?
 `);
 
@@ -1261,6 +1283,7 @@ function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | nul
     | {
         inbound_url?: unknown;
         inbound_timeout_ms?: unknown;
+        updated_at_ms?: unknown;
       }
     | undefined;
   const url = readNonEmptyString(row?.inbound_url);
@@ -1268,10 +1291,12 @@ function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | nul
     return null;
   }
   const timeoutMs = readPositiveInt(row?.inbound_timeout_ms) ?? 15_000;
+  const updatedAtMs = readPositiveInt(row?.updated_at_ms) ?? null;
   return {
     url,
     timeoutMs,
     openclawId: tenantId,
+    updatedAtMs,
   };
 }
 
@@ -1664,6 +1689,8 @@ function initializeDatabase(database: DatabaseSync) {
       next_attempt_at_ms INTEGER NOT NULL,
       attempt_count INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
+      delivery_window_started_at_ms INTEGER NOT NULL,
+      last_target_update_at_ms INTEGER NOT NULL DEFAULT 0,
       created_at_ms INTEGER NOT NULL,
       updated_at_ms INTEGER NOT NULL
     );
@@ -1672,6 +1699,7 @@ function initializeDatabase(database: DatabaseSync) {
   `);
   ensureTenantInboundTargetColumns(database);
   ensurePairingTokenColumns(database);
+  ensureWhatsAppInboundQueueColumns(database);
 }
 
 function ensureTenantInboundTargetColumns(database: DatabaseSync) {
@@ -1721,6 +1749,28 @@ function ensurePairingTokenColumns(database: DatabaseSync) {
       DROP TABLE pairing_tokens_old;
     `);
   }
+}
+
+function ensureWhatsAppInboundQueueColumns(database: DatabaseSync) {
+  const rows = database.prepare("PRAGMA table_info(whatsapp_inbound_queue)").all() as Array<{
+    name?: unknown;
+  }>;
+  const columnNames = new Set(rows.map((row) => (typeof row.name === "string" ? row.name : "")));
+  if (!columnNames.has("delivery_window_started_at_ms")) {
+    database.exec(
+      "ALTER TABLE whatsapp_inbound_queue ADD COLUMN delivery_window_started_at_ms INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+  if (!columnNames.has("last_target_update_at_ms")) {
+    database.exec(
+      "ALTER TABLE whatsapp_inbound_queue ADD COLUMN last_target_update_at_ms INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+  database.exec(`
+    UPDATE whatsapp_inbound_queue
+    SET delivery_window_started_at_ms = created_at_ms
+    WHERE delivery_window_started_at_ms <= 0
+  `);
 }
 
 function seedTenants(database: DatabaseSync, tenants: TenantSeed[]) {
@@ -5364,6 +5414,7 @@ function enqueueWhatsAppInboundMessage(message: WebInboundMessage): void {
     now,
     now,
     now,
+    now,
   );
   if (insertResult.changes > 0) {
     log({
@@ -7601,17 +7652,41 @@ async function processWhatsAppInboundQueuePass(): Promise<void> {
         messageId: message.id ?? null,
       });
     } catch (error) {
-      const attemptCount = Math.max(
-        1,
-        Number.isFinite(row.attempt_count) ? Math.trunc(row.attempt_count) + 1 : 1,
-      );
-      const retryDelayMs = computeWhatsAppQueueRetryDelayMs(attemptCount);
+      const failure = classifyWhatsAppInboundDeliveryError(error, errorString);
+      const maxAgeMs = Math.max(1_000, Math.trunc(whatsappQueueMaxAgeMs));
+      const retryState = resolveWhatsAppInboundQueueRetryState({
+        row,
+        now,
+        maxAgeMs,
+        failure,
+      });
+      if (retryState.exhausted) {
+        stmtDeleteWhatsAppInboundQueueById.run(row.id);
+        metrics.recordInboundEvent("whatsapp", "dropped");
+        log({
+          type: "whatsapp_inbound_bg_retry_exhausted",
+          queueId: row.id,
+          dedupeKey: row.dedupe_key,
+          messageId: message.id ?? null,
+          attemptCount: retryState.attemptCount,
+          ageMs: retryState.ageMs,
+          maxAgeMs,
+          retryable: failure.retryable,
+          statusCode: failure.statusCode,
+          error: failure.errorMessage,
+        });
+        continue;
+      }
+
+      const retryDelayMs = computeWhatsAppQueueRetryDelayMs(retryState.attemptCount);
       const nextAttemptAtMs = Date.now() + retryDelayMs;
       stmtDeferWhatsAppInboundQueueById.run(
         nextAttemptAtMs,
-        attemptCount,
-        String(error).slice(0, 2_000),
+        retryState.attemptCount,
+        failure.errorMessage.slice(0, 2_000),
         Date.now(),
+        retryState.deliveryWindowStartedAtMs,
+        retryState.lastTargetUpdateAtMs,
         row.id,
       );
       log({
@@ -7619,10 +7694,10 @@ async function processWhatsAppInboundQueuePass(): Promise<void> {
         queueId: row.id,
         dedupeKey: row.dedupe_key,
         messageId: message.id ?? null,
-        attemptCount,
+        attemptCount: retryState.attemptCount,
         retryDelayMs,
         nextAttemptAtMs,
-        error: String(error),
+        error: failure.errorMessage,
       });
     }
   }
@@ -7839,16 +7914,22 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
 
   const target = resolveTenantInboundTarget(binding.tenantId);
   if (!target) {
-    metrics.recordInboundEvent("whatsapp", "dropped");
+    metrics.recordInboundEvent("whatsapp", "error");
     log({
-      type: "whatsapp_inbound_drop_no_target",
+      type: "whatsapp_inbound_deferred_no_target",
       tenantId: binding.tenantId,
       routeKey: binding.routeKey,
       accountId,
       chatJid,
       traceId,
     });
-    throw new Error(`whatsapp inbound target missing for tenant ${binding.tenantId}`);
+    throw new WhatsAppInboundDeliveryError(
+      `whatsapp inbound target missing for tenant ${binding.tenantId}`,
+      {
+        retryable: true,
+        targetUpdatedAtMs: null,
+      },
+    );
   }
 
   const inboundMedia = await extractWhatsAppInboundMedia({ message });
@@ -7945,13 +8026,24 @@ async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
   } catch (error) {
     metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
     metrics.recordInboundEvent("whatsapp", "error");
-    throw error;
+    throw new WhatsAppInboundDeliveryError(errorString(error), {
+      retryable: true,
+      targetUpdatedAtMs: target.updatedAtMs,
+      cause: error,
+    });
   }
   if (!response.ok) {
     metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
     metrics.recordInboundEvent("whatsapp", "error");
     const bodyText = await response.text();
-    throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
+    throw new WhatsAppInboundDeliveryError(
+      `openclaw inbound failed (${response.status}): ${bodyText || "no body"}`,
+      {
+        retryable: isRetryableWhatsAppInboundStatus(response.status),
+        statusCode: response.status,
+        targetUpdatedAtMs: target.updatedAtMs,
+      },
+    );
   }
   metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
   metrics.recordInboundEvent("whatsapp", "forwarded");
