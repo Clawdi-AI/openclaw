@@ -1,6 +1,6 @@
 import type { MentatBridgeConfig } from "../config.js";
 import type { DocMetaCache } from "../session-state.js";
-import { isFileReadTool } from "../source-map.js";
+import { isFileReadTool, isWebFetchTool } from "../source-map.js";
 import type { DocMeta } from "../types.js";
 
 type PluginApi = {
@@ -11,6 +11,7 @@ type PluginApi = {
       ctx: ToolResultPersistContext,
     ) => ToolResultPersistResult | void,
   ) => void;
+  logger: { info: (msg: string) => void; debug?: (msg: string) => void };
 };
 
 type AgentMessage = {
@@ -108,18 +109,41 @@ export function registerToolResultPersistHook(
   // Doc metadata must be pre-cached by after_tool_call.
   api.on("tool_result_persist", (event, _ctx) => {
     if (!client.isHealthy()) return;
-    if (!isFileReadTool(event.toolName ?? "")) return;
+    const toolName = event.toolName ?? "";
+    if (!isFileReadTool(toolName) && !isWebFetchTool(toolName)) return;
     if (event.isSynthetic) return;
 
     const content = extractTextFromMessage(event.message);
     if (!content) return;
-    if (estimateTokens(content) < cfg.compressThresholdTokens) return;
 
-    // Try to find cached doc meta
-    const filePath = extractPathFromMessage(event.message);
-    const meta = filePath ? docMetaCache.get(filePath) : undefined;
-    if (!meta) return; // Not yet indexed — keep raw result
+    const tokens = estimateTokens(content);
+    if (tokens < cfg.compressThresholdTokens) return;
 
-    return { message: compressToolResultMessage(event.message, meta) };
+    // Try to find cached doc meta — keyed by file path (reads) or toolCallId (web fetch)
+    let meta: DocMeta | undefined;
+    if (isWebFetchTool(toolName) && event.toolCallId) {
+      meta = docMetaCache.get(`__toolcall__:${event.toolCallId}`);
+    } else {
+      const filePath = extractPathFromMessage(event.message);
+      meta = filePath ? docMetaCache.get(filePath) : undefined;
+    }
+    if (!meta) {
+      api.logger.debug?.(
+        `mentat-bridge: compress skipped (no cached meta) for ${toolName} (~${tokens} tokens)`,
+      );
+      return;
+    }
+
+    const compressed = compressToolResultMessage(event.message, meta);
+    const compressedTokens = estimateTokens(
+      typeof compressed.content === "string"
+        ? compressed.content
+        : JSON.stringify(compressed.content),
+    );
+    api.logger.info(
+      `mentat-bridge: compressed ${toolName} result → ${meta.filename} (~${tokens} → ~${compressedTokens} tokens)`,
+    );
+
+    return { message: compressed };
   });
 }

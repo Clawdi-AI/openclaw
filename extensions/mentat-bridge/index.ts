@@ -11,6 +11,7 @@ import { registerMediaFileTransformHook } from "./hooks/media-file-transform.js"
 import { registerMessageReceivedHook } from "./hooks/message-received.js";
 import { registerSessionLifecycleHooks } from "./hooks/session-lifecycle.js";
 import { registerToolResultPersistHook } from "./hooks/tool-result-persist.js";
+import { registerTransformToolResultHook } from "./hooks/transform-tool-result.js";
 import {
   escapeMemoryForPrompt,
   fetchSkillPrompt,
@@ -100,6 +101,9 @@ const mentatBridgePlugin = {
                 score: r.score,
               })),
             );
+            api.logger.info(
+              `mentat-bridge: auto-recall → ${results.length} memories (scores: ${results.map((r) => r.score.toFixed(2)).join(", ")})`,
+            );
           }
         }
 
@@ -114,6 +118,9 @@ const mentatBridgePlugin = {
           if (hotDocs.length > 0) {
             const hotCtx = formatHotContext(hotDocs);
             prependContext = prependContext ? `${prependContext}\n\n${hotCtx}` : hotCtx;
+            api.logger.info(
+              `mentat-bridge: hot context → ${hotDocs.length} docs (${hotDocs.map((d) => d.filename).join(", ")})`,
+            );
           }
         }
 
@@ -148,7 +155,19 @@ const mentatBridgePlugin = {
       registerMessageReceivedHook(api as Parameters<typeof registerMessageReceivedHook>[0], client);
     }
 
-    // ── Hook: tool_result_persist (token compression) ──────────────
+    // ── Hook: transform_tool_result (mentat indexing + compression) ─
+
+    if (cfg.autoIndex && cfg.compressResults) {
+      registerTransformToolResultHook(
+        api as Parameters<typeof registerTransformToolResultHook>[0],
+        client,
+        cfg,
+        readTracker,
+        docMetaCache,
+      );
+    }
+
+    // ── Hook: tool_result_persist (token compression for file reads) ─
 
     if (cfg.compressResults) {
       registerToolResultPersistHook(

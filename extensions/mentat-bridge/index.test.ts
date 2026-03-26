@@ -122,6 +122,52 @@ describe("source-map", () => {
     expect(isComposioTool("Read")).toBe(false);
   });
 
+  test("composioFilename uses resource ID when available", async () => {
+    const { composioFilename } = await import("./source-map.js");
+
+    // Param with _id suffix → stable filename based on ID value
+    expect(composioFilename("composio:gmail:read", { message_id: "abc123" }, "tc1")).toBe(
+      "composio_gmail_read-abc123.md",
+    );
+
+    // Param named "id" → stable filename
+    expect(composioFilename("composio:drive:get", { id: "file-xyz" }, "tc1")).toBe(
+      "composio_drive_get-file-xyz.md",
+    );
+
+    // camelCase ID params
+    expect(composioFilename("composio:drive:get", { fileId: "f1" }, "tc1")).toBe(
+      "composio_drive_get-f1.md",
+    );
+
+    // Same resource ID → same filename regardless of toolCallId
+    const fn1 = composioFilename("composio:gmail:read", { message_id: "m1" }, "tc1");
+    const fn2 = composioFilename("composio:gmail:read", { message_id: "m1" }, "tc99");
+    expect(fn1).toBe(fn2);
+  });
+
+  test("composioFilename hashes scalar params when no ID found", async () => {
+    const { composioFilename } = await import("./source-map.js");
+
+    // No ID param but has scalar params → hash-based stable filename
+    const fn1 = composioFilename("composio:slack:post", { channel: "general", text: "hi" }, "tc1");
+    const fn2 = composioFilename("composio:slack:post", { channel: "general", text: "hi" }, "tc2");
+    expect(fn1).toBe(fn2); // same params → same filename
+    expect(fn1).toMatch(/^composio_slack_post-[0-9a-f]+\.md$/);
+
+    // Different params → different filename
+    const fn3 = composioFilename("composio:slack:post", { channel: "random", text: "hi" }, "tc1");
+    expect(fn3).not.toBe(fn1);
+  });
+
+  test("composioFilename falls back to toolCallId when no params", async () => {
+    const { composioFilename } = await import("./source-map.js");
+    expect(composioFilename("composio:gmail:send", {}, "tc42")).toBe("composio_gmail_send-tc42.md");
+    expect(composioFilename("composio:gmail:send", {}, undefined)).toBe(
+      "composio_gmail_send-unknown.md",
+    );
+  });
+
   test("extractContentFromResult handles various formats", async () => {
     const { extractContentFromResult } = await import("./source-map.js");
     expect(extractContentFromResult("plain text")).toBe("plain text");
@@ -950,7 +996,7 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => {
           handlers.push(handler);
         },
-        logger: { debug: vi.fn() },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
         isHealthy: vi.fn(() => true),
@@ -977,7 +1023,7 @@ describe("hooks", () => {
       expect(tracker.hasReads("s1")).toBe(true);
     });
 
-    test("indexes web fetch with content", async () => {
+    test("skips web fetch (delegated to transform_tool_result)", async () => {
       const { registerAfterToolCallHook } = await import("./hooks/after-tool-call.js");
       const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
 
@@ -986,11 +1032,17 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => {
           handlers.push(handler);
         },
-        logger: { debug: vi.fn() },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(),
         isHealthy: vi.fn(() => true),
-        indexContentAsync: vi.fn(),
+        indexContent: vi.fn(async () => ({ doc_id: "d1", filename: "example.html", status: "ok" })),
+        getDocMeta: vi.fn(async () => ({
+          doc_id: "d1",
+          filename: "example.html",
+          toc_entries: [{ level: 1, title: "Intro" }],
+        })),
       };
 
       registerAfterToolCallHook(api, client as never, new SessionReadTracker(), new DocMetaCache());
@@ -998,15 +1050,15 @@ describe("hooks", () => {
       await handlers[0](
         {
           toolName: "WebFetch",
+          toolCallId: "tc1",
           params: { url: "https://example.com/page" },
           result: { content: [{ type: "text", text: "x".repeat(300) }] },
         },
         { sessionKey: "s1" },
       );
 
-      expect(client.indexContentAsync).toHaveBeenCalledWith(
-        expect.objectContaining({ source: "web_fetch", content_type: "text/html" }),
-      );
+      // WebFetch is now handled by transform_tool_result, not after_tool_call
+      expect(client.indexContent).not.toHaveBeenCalled();
     });
 
     test("skips when unhealthy", async () => {
@@ -1018,7 +1070,7 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => {
           handlers.push(handler);
         },
-        logger: { debug: vi.fn() },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
         isHealthy: vi.fn(() => false),
@@ -1040,7 +1092,7 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => {
           handlers.push(handler);
         },
-        logger: { debug: vi.fn() },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
         isHealthy: vi.fn(() => true),
@@ -1056,7 +1108,7 @@ describe("hooks", () => {
       expect(client.indexFileAsync).not.toHaveBeenCalled();
     });
 
-    test("indexes composio tool results", async () => {
+    test("indexes composio tool results with stable filename", async () => {
       const { registerAfterToolCallHook } = await import("./hooks/after-tool-call.js");
       const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
 
@@ -1065,27 +1117,319 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => {
           handlers.push(handler);
         },
-        logger: { debug: vi.fn() },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(),
         isHealthy: vi.fn(() => true),
         indexContentAsync: vi.fn(),
       };
 
       registerAfterToolCallHook(api, client as never, new SessionReadTracker(), new DocMetaCache());
 
+      // With resource ID param → stable filename
       await handlers[0](
         {
           toolName: "composio:gmail:read",
           toolCallId: "tc1",
-          params: {},
+          params: { message_id: "msg-abc" },
           result: "x".repeat(300),
         },
         { sessionKey: "s1" },
       );
       expect(client.indexContentAsync).toHaveBeenCalledWith(
-        expect.objectContaining({ source: "composio:gmail" }),
+        expect.objectContaining({
+          source: "composio:gmail",
+          filename: "composio_gmail_read-msg-abc.md",
+        }),
       );
+
+      // Without ID param, no scalar params → falls back to toolCallId
+      client.indexContentAsync.mockClear();
+      await handlers[0](
+        {
+          toolName: "composio:gmail:read",
+          toolCallId: "tc2",
+          params: {},
+          result: "y".repeat(300),
+        },
+        { sessionKey: "s1" },
+      );
+      expect(client.indexContentAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: "composio:gmail",
+          filename: "composio_gmail_read-tc2.md",
+        }),
+      );
+    });
+  });
+
+  describe("transform-tool-result", () => {
+    test("compresses WebFetch result via mentat indexing", async () => {
+      const { registerTransformToolResultHook } = await import("./hooks/transform-tool-result.js");
+      const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
+
+      const handlers: Array<
+        (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>
+      > = [];
+      const api = {
+        on: (
+          _name: string,
+          handler: (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>,
+        ) => {
+          handlers.push(handler);
+        },
+        logger: { info: vi.fn(), debug: vi.fn() },
+      };
+      const client = {
+        isHealthy: vi.fn(() => true),
+        indexContent: vi.fn(async () => ({
+          doc_id: "d1",
+          filename: "example_com_page.html",
+          status: "ok",
+        })),
+        getDocMeta: vi.fn(async () => ({
+          doc_id: "d1",
+          filename: "example_com_page.html",
+          brief_intro: "Example page about testing",
+          toc_entries: [
+            { level: 1, title: "Introduction" },
+            { level: 1, title: "Details" },
+          ],
+        })),
+      };
+      const cfg = { compressThresholdTokens: 100 }; // low threshold for test
+      const tracker = new SessionReadTracker();
+      const cache = new DocMetaCache();
+
+      // Mock global fetch for HTML re-fetch
+      const origFetch = globalThis.fetch;
+      const fakeHtml = "<html><body>" + "x".repeat(300) + "</body></html>";
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        arrayBuffer: async () => new TextEncoder().encode(fakeHtml).buffer,
+      })) as unknown as typeof fetch;
+
+      try {
+        registerTransformToolResultHook(api, client as never, cfg as never, tracker, cache);
+        expect(handlers).toHaveLength(1);
+
+        // Simulate a large WebFetch result (> 100 tokens = 400 chars)
+        const bigContent = "x".repeat(600);
+        const result = await handlers[0](
+          {
+            toolName: "WebFetch",
+            toolCallId: "tc1",
+            params: { url: "https://example.com/page" },
+            result: { content: [{ type: "text", text: bigContent }], details: {} },
+          },
+          { toolName: "WebFetch", toolCallId: "tc1", sessionKey: "s1", sessionId: "sid1" },
+        );
+
+        // Should have indexed content
+        expect(client.indexContent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            source: "web_fetch",
+            content_type: "text/html",
+            collection: "ses_sid1",
+          }),
+        );
+
+        // Should return compressed result
+        expect(result).toBeDefined();
+        const text = (result as { result: { content: Array<{ text: string }> } }).result.content[0]
+          .text;
+        expect(text).toContain("<mentat-indexed");
+        expect(text).toContain("d1");
+        expect(text).toContain("example_com_page.html");
+        expect(text).toContain("Introduction");
+        expect(text).toContain("Details");
+        expect(text).toContain("read_segment");
+
+        // Should track read for hot context
+        expect(tracker.hasReads("s1")).toBe(true);
+
+        // Should cache doc meta
+        expect(cache.has("__toolcall__:tc1")).toBe(true);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    test("passes through when result is below threshold", async () => {
+      const { registerTransformToolResultHook } = await import("./hooks/transform-tool-result.js");
+      const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
+
+      const handlers: Array<
+        (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>
+      > = [];
+      const api = {
+        on: (
+          _name: string,
+          handler: (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>,
+        ) => {
+          handlers.push(handler);
+        },
+        logger: { info: vi.fn(), debug: vi.fn() },
+      };
+      const client = {
+        isHealthy: vi.fn(() => true),
+        indexContent: vi.fn(),
+      };
+      const cfg = { compressThresholdTokens: 5000 }; // high threshold
+
+      registerTransformToolResultHook(
+        api,
+        client as never,
+        cfg as never,
+        new SessionReadTracker(),
+        new DocMetaCache(),
+      );
+
+      const result = await handlers[0](
+        {
+          toolName: "WebFetch",
+          params: { url: "https://example.com" },
+          result: { content: [{ type: "text", text: "short result" }] },
+        },
+        { toolName: "WebFetch" },
+      );
+
+      // Below threshold — should not index or compress
+      expect(result).toBeUndefined();
+      expect(client.indexContent).not.toHaveBeenCalled();
+    });
+
+    test("passes through for non-WebFetch tools", async () => {
+      const { registerTransformToolResultHook } = await import("./hooks/transform-tool-result.js");
+      const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
+
+      const handlers: Array<
+        (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>
+      > = [];
+      const api = {
+        on: (
+          _name: string,
+          handler: (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>,
+        ) => {
+          handlers.push(handler);
+        },
+        logger: { info: vi.fn(), debug: vi.fn() },
+      };
+      const client = {
+        isHealthy: vi.fn(() => true),
+        indexContent: vi.fn(),
+      };
+
+      registerTransformToolResultHook(
+        api,
+        client as never,
+        { compressThresholdTokens: 100 } as never,
+        new SessionReadTracker(),
+        new DocMetaCache(),
+      );
+
+      const result = await handlers[0](
+        {
+          toolName: "Read",
+          params: { path: "/test.ts" },
+          result: { content: [{ type: "text", text: "x".repeat(600) }] },
+        },
+        { toolName: "Read" },
+      );
+
+      expect(result).toBeUndefined();
+      expect(client.indexContent).not.toHaveBeenCalled();
+    });
+
+    test("passes through when client is unhealthy", async () => {
+      const { registerTransformToolResultHook } = await import("./hooks/transform-tool-result.js");
+      const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
+
+      const handlers: Array<
+        (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>
+      > = [];
+      const api = {
+        on: (
+          _name: string,
+          handler: (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>,
+        ) => {
+          handlers.push(handler);
+        },
+        logger: { info: vi.fn(), debug: vi.fn() },
+      };
+      const client = {
+        isHealthy: vi.fn(() => false),
+      };
+
+      registerTransformToolResultHook(
+        api,
+        client as never,
+        { compressThresholdTokens: 100 } as never,
+        new SessionReadTracker(),
+        new DocMetaCache(),
+      );
+
+      const result = await handlers[0](
+        {
+          toolName: "WebFetch",
+          params: { url: "https://example.com" },
+          result: { content: [{ type: "text", text: "x".repeat(600) }] },
+        },
+        { toolName: "WebFetch" },
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    test("falls back when HTML re-fetch fails", async () => {
+      const { registerTransformToolResultHook } = await import("./hooks/transform-tool-result.js");
+      const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
+
+      const handlers: Array<
+        (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>
+      > = [];
+      const api = {
+        on: (
+          _name: string,
+          handler: (event: unknown, ctx: unknown) => Promise<{ result?: unknown } | void>,
+        ) => {
+          handlers.push(handler);
+        },
+        logger: { info: vi.fn(), debug: vi.fn() },
+      };
+      const client = {
+        isHealthy: vi.fn(() => true),
+        indexContent: vi.fn(),
+      };
+
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async () => ({ ok: false })) as unknown as typeof fetch;
+
+      try {
+        registerTransformToolResultHook(
+          api,
+          client as never,
+          { compressThresholdTokens: 100 } as never,
+          new SessionReadTracker(),
+          new DocMetaCache(),
+        );
+
+        const result = await handlers[0](
+          {
+            toolName: "WebFetch",
+            params: { url: "https://example.com" },
+            result: { content: [{ type: "text", text: "x".repeat(600) }] },
+          },
+          { toolName: "WebFetch" },
+        );
+
+        // Fetch failed → original result passed through
+        expect(result).toBeUndefined();
+        expect(client.indexContent).not.toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = origFetch;
+      }
     });
   });
 
@@ -1099,6 +1443,7 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
           handlers.push(handler);
         },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = { isHealthy: () => true };
       const cfg = { compressThresholdTokens: 100 }; // low threshold for test
@@ -1143,6 +1488,7 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
           handlers.push(handler);
         },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
 
       registerToolResultPersistHook(
@@ -1162,7 +1508,7 @@ describe("hooks", () => {
       expect(result).toBeUndefined();
     });
 
-    test("passes through for non-file-read tools", async () => {
+    test("passes through for non-file-read/non-web-fetch tools", async () => {
       const { registerToolResultPersistHook } = await import("./hooks/tool-result-persist.js");
       const { DocMetaCache } = await import("./session-state.js");
 
@@ -1171,6 +1517,7 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
           handlers.push(handler);
         },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
 
       registerToolResultPersistHook(
@@ -1181,7 +1528,7 @@ describe("hooks", () => {
       );
 
       const result = handlers[0](
-        { toolName: "WebFetch", message: { role: "tool", content: "x".repeat(600) } },
+        { toolName: "Bash", message: { role: "tool", content: "x".repeat(600) } },
         {},
       );
       expect(result).toBeUndefined();
@@ -1196,6 +1543,7 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
           handlers.push(handler);
         },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
 
       registerToolResultPersistHook(
@@ -1221,6 +1569,7 @@ describe("hooks", () => {
         on: (_name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
           handlers.push(handler);
         },
+        logger: { info: vi.fn(), debug: vi.fn() },
       };
 
       registerToolResultPersistHook(

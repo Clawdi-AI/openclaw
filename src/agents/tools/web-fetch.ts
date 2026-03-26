@@ -754,6 +754,7 @@ export function createWebFetchTool(options?: {
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
       const url = readStringParam(params, "url", { required: true });
+      logDebug(`[web-fetch] execute: toolCallId=${_toolCallId} url=${redactUrlForDebugLog(url)}`);
       const extractMode = readStringParam(params, "extractMode") === "text" ? "text" : "markdown";
       const maxChars = readNumberParam(params, "maxChars", { integer: true });
       const maxCharsCap = resolveFetchMaxCharsCap(fetch);
@@ -780,6 +781,9 @@ export function createWebFetchTool(options?: {
         firecrawlStoreInCache: true,
         firecrawlTimeoutSeconds,
       });
+      logDebug(
+        `[web-fetch] execute done: toolCallId=${_toolCallId} resultKeys=${Object.keys(result).join(",")}`,
+      );
       return jsonResult(result);
     },
   };
