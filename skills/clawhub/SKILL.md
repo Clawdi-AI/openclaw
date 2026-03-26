@@ -5,6 +5,7 @@ metadata:
   {
     "openclaw":
       {
+        "always": true,
         "requires": { "bins": ["clawhub"] },
         "install":
           [
