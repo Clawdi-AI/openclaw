@@ -45,30 +45,103 @@ Known optional parameter:
 
 ## Return Value Types
 
-The API does not return one normalized schema. Each operation returns one of these structural types:
+The API returns four structural families. Treat them like these schema definitions:
 
-| Return type | Operations | Root shape | Entity payloads | Cursor payloads |
-| --- | --- | --- | --- | --- |
-| `UserResult` | `UserByScreenName` | one object at `data.user.result` | one user object | none |
-| `TweetTimelineInstructions` | `UserTweets`, `UserTweetsAndReplies`, `UserMedia`, `SearchTimeline`, `ListLatestTweetsTimeline`, `CommunityTweetsTimeline` | `instructions[]` list containing timeline entries | tweet objects at `tweet_results.result`; sometimes module-wrapped | usually `Top` and `Bottom` |
-| `UserTimelineInstructions` | `Followers`, `Following` | `instructions[]` list containing timeline entries | user objects at `user_results.result`; sometimes module-wrapped | usually `Top` and `Bottom` |
-| `ThreadInstructions` | `TweetDetail` | `instructions[]` list containing thread entries | tweet objects at `tweet_results.result`, often inside `content.items[]` thread modules | commonly `ShowMore` and `ShowMoreThreads` |
+```ts
+type UserResultResponse = {
+  data: {
+    user: {
+      result: User
+    }
+  }
+}
 
-Use these type assumptions when planning extraction:
-- `UserResult` means direct object access; no instruction traversal.
-- `TweetTimelineInstructions` means the useful payload is a sequence of tweet entities plus optional cursors.
-- `UserTimelineInstructions` means the useful payload is a sequence of user entities plus optional cursors.
-- `ThreadInstructions` means the useful payload is a conversation tree represented as instruction entries, thread modules, tweet items, and pagination cursors.
+type TweetTimelineResponse = {
+  data: {
+    user?: {
+      result: {
+        timeline: {
+          timeline: {
+            instructions: Instruction[]
+          }
+        }
+      }
+    }
+    search_by_raw_query?: {
+      search_timeline: {
+        timeline: {
+          instructions: Instruction[]
+        }
+      }
+    }
+    list?: {
+      tweets_timeline: {
+        timeline: {
+          instructions: Instruction[]
+        }
+      }
+    }
+    communityResults?: {
+      result: {
+        ranked_community_timeline: {
+          timeline: {
+            instructions: Instruction[]
+          }
+        }
+      }
+    }
+  }
+}
 
-Normalized output targets:
+type UserTimelineResponse = {
+  data: {
+    user: {
+      result: {
+        timeline: {
+          timeline: {
+            instructions: Instruction[]
+          }
+        }
+      }
+    }
+  }
+}
 
-| Normalized type | Source fields to read |
-| --- | --- |
-| `ResolvedUser` | `rest_id`, `core.name`, `core.screen_name`, `legacy.description`, counts, verification, profile image/banner |
-| `TweetItem` | `rest_id`, author from `core.user_results.result`, `legacy.full_text`, timestamp, engagement counts, reply metadata, entities, `views.count`, quote/note/card/edit metadata |
-| `UserItem` | `rest_id`, `core.name`, `core.screen_name`, bio, counts, verification, profile image |
-| `MediaItem` | `legacy.entities.media[]` or media-bearing tweet payloads; keep `type`, URLs, sizes, and video variants |
-| `CursorItem` | `entryId`, `cursorType`, `value` |
+type ThreadResponse = {
+  data: {
+    threaded_conversation_with_injections_v2: {
+      instructions: Instruction[]
+    }
+  }
+}
+```
+
+Operation to response family:
+
+```ts
+type OperationResponseMap = {
+  UserByScreenName: UserResultResponse
+  UserTweets: TweetTimelineResponse
+  UserTweetsAndReplies: TweetTimelineResponse
+  UserMedia: TweetTimelineResponse
+  SearchTimeline: TweetTimelineResponse
+  ListLatestTweetsTimeline: TweetTimelineResponse
+  CommunityTweetsTimeline: TweetTimelineResponse
+  Followers: UserTimelineResponse
+  Following: UserTimelineResponse
+  TweetDetail: ThreadResponse
+}
+```
+
+Useful normalized extraction targets:
+
+```ts
+type ResolvedUser = User
+type TweetItem = Tweet
+type UserItem = User
+type MediaItem = Media
+type CursorItem = Cursor
+```
 
 ## Input Rules
 
@@ -107,12 +180,122 @@ Practical extraction rule:
 
 ## Object Map
 
-| Object | High-value fields |
-| --- | --- |
-| User | `rest_id`, `core.name`, `core.screen_name`, `legacy.description`, `legacy.created_at`, `legacy.followers_count`, `legacy.friends_count`, `legacy.statuses_count`, `legacy.media_count`, `legacy.profile_image_url_https`, `legacy.profile_banner_url`, `legacy.verified`, `is_blue_verified`, `privacy.protected`, `dm_permissions`, `relationship_perspectives` |
-| Tweet | `rest_id`, `core.user_results.result`, `legacy.full_text`, `legacy.created_at`, `legacy.favorite_count`, `legacy.retweet_count`, `legacy.reply_count`, `legacy.quote_count`, `legacy.bookmark_count`, `legacy.conversation_id_str`, `legacy.in_reply_to_status_id_str`, `legacy.in_reply_to_user_id_str`, `legacy.in_reply_to_screen_name`, `legacy.entities.urls`, `legacy.entities.user_mentions`, `legacy.entities.hashtags`, `legacy.entities.media`, `views.count`, `quoted_status_result`, `note_tweet.note_tweet_results.result.text`, `card`, `edit_control` |
-| Media | variants: `photo`, `video`, `animated_gif`; fields: `media_url_https`, `type`, `ext_media_availability.status`, `video_info.variants[]`, `sizes` |
-| Cursor | types: `Top`, `Bottom`, `ShowMore`, `ShowMoreThreads`; fields: `cursorType`, `value`, `entryId` |
+```ts
+type User = {
+  rest_id: string
+  core?: {
+    name?: string
+    screen_name?: string
+  }
+  legacy?: {
+    description?: string
+    created_at?: string
+    followers_count?: number
+    friends_count?: number
+    statuses_count?: number
+    media_count?: number
+    profile_image_url_https?: string
+    profile_banner_url?: string
+    verified?: boolean
+  }
+  is_blue_verified?: boolean
+  privacy?: {
+    protected?: boolean
+  }
+  dm_permissions?: unknown
+  relationship_perspectives?: unknown
+}
+
+type Tweet = {
+  rest_id: string
+  core?: {
+    user_results?: {
+      result?: User
+    }
+  }
+  legacy?: {
+    full_text?: string
+    created_at?: string
+    favorite_count?: number
+    retweet_count?: number
+    reply_count?: number
+    quote_count?: number
+    bookmark_count?: number
+    conversation_id_str?: string
+    in_reply_to_status_id_str?: string
+    in_reply_to_user_id_str?: string
+    in_reply_to_screen_name?: string
+    entities?: {
+      urls?: unknown[]
+      user_mentions?: unknown[]
+      hashtags?: unknown[]
+      media?: Media[]
+    }
+  }
+  views?: {
+    count?: string
+  }
+  quoted_status_result?: {
+    result?: Tweet
+  }
+  note_tweet?: {
+    note_tweet_results?: {
+      result?: {
+        text?: string
+      }
+    }
+  }
+  card?: unknown
+  edit_control?: unknown
+}
+
+type Media = {
+  type?: "photo" | "video" | "animated_gif"
+  media_url_https?: string
+  ext_media_availability?: {
+    status?: string
+  }
+  video_info?: {
+    variants?: unknown[]
+  }
+  sizes?: unknown
+}
+
+type Cursor = {
+  entryId?: string
+  cursorType?: "Top" | "Bottom" | "ShowMore" | "ShowMoreThreads"
+  value?: string
+}
+
+type TimelineItemContent =
+  | {
+      itemType?: "TimelineTweet"
+      tweet_results?: { result?: Tweet }
+    }
+  | {
+      itemType?: "TimelineUser"
+      user_results?: { result?: User }
+    }
+
+type TimelineEntry = {
+  entryId?: string
+  content?: {
+    itemContent?: TimelineItemContent
+    items?: Array<{
+      item?: {
+        itemContent?: TimelineItemContent
+      }
+    }>
+    cursorType?: Cursor["cursorType"]
+    value?: string
+  }
+}
+
+type Instruction = {
+  type?: string
+  entries?: TimelineEntry[]
+}
+```
 
 ## Canonical Examples
 
