@@ -174,6 +174,198 @@ Observed media variants:
 
 Media appears under `legacy.entities.media` and `legacy.extended_entities.media`. Videos include `video_info.variants` with multiple bitrate URLs.
 
+## Example responses
+
+### `UserByScreenName`
+
+```json
+{
+  "data": {
+    "user": {
+      "result": {
+        "__typename": "User",
+        "rest_id": "1212607092600606722",
+        "core": {
+          "name": "Limichange",
+          "screen_name": "Limichange2",
+          "created_at": "Thu Jan 02 05:30:41 +0000 2020"
+        },
+        "avatar": {
+          "image_url": "https://pbs.twimg.com/profile_images/..._normal.jpg"
+        },
+        "legacy": {
+          "description": "...",
+          "followers_count": 3446,
+          "friends_count": 1060,
+          "statuses_count": 5856,
+          "media_count": 811,
+          "profile_banner_url": "https://pbs.twimg.com/profile_banners/..."
+        },
+        "is_blue_verified": false,
+        "verification": {
+          "verified": false
+        }
+      }
+    }
+  }
+}
+```
+
+### Timeline tweet entry shape
+
+This is the common pattern for `UserTweets`, `UserTweetsAndReplies`, `SearchTimeline`, `ListLatestTweetsTimeline`, and `CommunityTweetsTimeline`:
+
+```json
+{
+  "type": "TimelineAddEntries",
+  "entries": [
+    {
+      "content": {
+        "entryType": "TimelineTimelineItem",
+        "itemContent": {
+          "__typename": "TimelineTweet",
+          "itemType": "TimelineTweet",
+          "tweetDisplayType": "Tweet",
+          "tweet_results": {
+            "result": {
+              "__typename": "Tweet",
+              "rest_id": "2032415448755822937",
+              "core": {
+                "user_results": {
+                  "result": {
+                    "__typename": "User",
+                    "rest_id": "1212607092600606722",
+                    "core": {
+                      "name": "Limichange",
+                      "screen_name": "Limichange2"
+                    }
+                  }
+                }
+              },
+              "legacy": {
+                "full_text": "native https://t.co/...",
+                "created_at": "Fri Mar 13 11:16:18 +0000 2026",
+                "conversation_id_str": "2032415448755822937",
+                "favorite_count": 4,
+                "reply_count": 3,
+                "retweet_count": 0,
+                "quoted_status_id_str": "2032414008398233901"
+              },
+              "quoted_status_result": {
+                "result": {
+                  "__typename": "Tweet",
+                  "rest_id": "2032414008398233901"
+                }
+              },
+              "views": {
+                "count": "2834"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "content": {
+        "entryType": "TimelineTimelineCursor",
+        "cursorType": "Bottom",
+        "value": "DAAHCgAB..."
+      }
+    }
+  ]
+}
+```
+
+### `Followers` / `Following` entry shape
+
+```json
+{
+  "type": "TimelineAddEntries",
+  "entries": [
+    {
+      "content": {
+        "entryType": "TimelineTimelineItem",
+        "itemContent": {
+          "__typename": "TimelineUser",
+          "itemType": "TimelineUser",
+          "userDisplayType": "User",
+          "user_results": {
+            "result": {
+              "__typename": "User",
+              "rest_id": "1581259092928040961",
+              "core": {
+                "name": "尹珉",
+                "screen_name": "yinmin1987"
+              },
+              "legacy": {
+                "followers_count": 4781,
+                "friends_count": 3871,
+                "media_count": 847,
+                "statuses_count": 5524
+              },
+              "relationship_perspectives": {
+                "following": false,
+                "followed_by": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "content": {
+        "entryType": "TimelineTimelineCursor",
+        "cursorType": "Bottom",
+        "value": "1834014275286553197|2037456451307306941"
+      }
+    }
+  ]
+}
+```
+
+### `TweetDetail` thread shape
+
+```json
+{
+  "data": {
+    "threaded_conversation_with_injections_v2": {
+      "instructions": [
+        {
+          "type": "TimelineAddEntries",
+          "entries": [
+            {
+              "content": {
+                "entryType": "TimelineTimelineItem",
+                "itemContent": {
+                  "__typename": "TimelineTweet",
+                  "tweet_results": {
+                    "result": {
+                      "__typename": "Tweet",
+                      "rest_id": "1897289524193214579",
+                      "legacy": {
+                        "full_text": "...",
+                        "conversation_id_str": "1897289524193214579"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "content": {
+                "entryType": "TimelineTimelineCursor",
+                "cursorType": "ShowMoreThreads",
+                "value": "DAAKCgAB..."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
 ## Pagination and traversal
 
 - Most timeline endpoints return `Top` and `Bottom` cursors.
@@ -198,10 +390,6 @@ Media appears under `legacy.entities.media` and `legacy.extended_entities.media`
 - `404`: unknown operation name.
 - `5xx`: upstream or proxy failure; report it as service-side.
 - Some upstream validation failures can return plain `Error` instead of structured JSON. Treat that as a caller-visible upstream error.
-
-## Admin-only surface
-
-- `tokenInfo` exists, but it is an admin/operational endpoint. Do not expose it to end users or treat it as part of the user-facing skill contract.
 
 ## Rules
 
