@@ -43,6 +43,33 @@ Read-only scope:
 Known optional parameter:
 - `CommunityTweetsTimeline` may accept `rankingMode=Recency`. This value was observed working and yields recent-first community results.
 
+## Return Value Types
+
+The API does not return one normalized schema. Each operation returns one of these structural types:
+
+| Return type | Operations | Root shape | Entity payloads | Cursor payloads |
+| --- | --- | --- | --- | --- |
+| `UserResult` | `UserByScreenName` | one object at `data.user.result` | one user object | none |
+| `TweetTimelineInstructions` | `UserTweets`, `UserTweetsAndReplies`, `UserMedia`, `SearchTimeline`, `ListLatestTweetsTimeline`, `CommunityTweetsTimeline` | `instructions[]` list containing timeline entries | tweet objects at `tweet_results.result`; sometimes module-wrapped | usually `Top` and `Bottom` |
+| `UserTimelineInstructions` | `Followers`, `Following` | `instructions[]` list containing timeline entries | user objects at `user_results.result`; sometimes module-wrapped | usually `Top` and `Bottom` |
+| `ThreadInstructions` | `TweetDetail` | `instructions[]` list containing thread entries | tweet objects at `tweet_results.result`, often inside `content.items[]` thread modules | commonly `ShowMore` and `ShowMoreThreads` |
+
+Use these type assumptions when planning extraction:
+- `UserResult` means direct object access; no instruction traversal.
+- `TweetTimelineInstructions` means the useful payload is a sequence of tweet entities plus optional cursors.
+- `UserTimelineInstructions` means the useful payload is a sequence of user entities plus optional cursors.
+- `ThreadInstructions` means the useful payload is a conversation tree represented as instruction entries, thread modules, tweet items, and pagination cursors.
+
+Normalized output targets:
+
+| Normalized type | Source fields to read |
+| --- | --- |
+| `ResolvedUser` | `rest_id`, `core.name`, `core.screen_name`, `legacy.description`, counts, verification, profile image/banner |
+| `TweetItem` | `rest_id`, author from `core.user_results.result`, `legacy.full_text`, timestamp, engagement counts, reply metadata, entities, `views.count`, quote/note/card/edit metadata |
+| `UserItem` | `rest_id`, `core.name`, `core.screen_name`, bio, counts, verification, profile image |
+| `MediaItem` | `legacy.entities.media[]` or media-bearing tweet payloads; keep `type`, URLs, sizes, and video variants |
+| `CursorItem` | `entryId`, `cursorType`, `value` |
+
 ## Input Rules
 
 - `screenName`: X handle without `@`.
