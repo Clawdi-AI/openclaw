@@ -13,58 +13,98 @@ metadata:
 
 # X API Read-Only
 
-Use Clawdi's managed X proxy for read-only Twitter/X data.
+This skill is a detailed manual for Clawdi's managed read-only X proxy.
 
-- Fixed base URL: `https://api.clawdi.com/proxy/twitter`
-- Auth header: `Authorization: Bearer $COMPOSIO_MCP_TOKEN`
-- Do not send the upstream `token` query parameter yourself. The backend injects it.
-- This skill is for Clawdi-managed deployments. If `COMPOSIO_MCP_TOKEN` is absent, the deployment is not provisioned for Clawdi-managed APIs.
+Use it when the task requires reading X users, tweets, replies, media, lists, communities, search results, followers, or following relationships. Do not use it for posting, liking, following, bookmarks, DMs, or any admin/operational surface.
 
-## Operations
+## Contract
 
-The proxy exposes these operations:
+- Base URL is fixed: `https://api.clawdi.com/proxy/twitter`
+- Auth header is fixed: `Authorization: Bearer $COMPOSIO_MCP_TOKEN`
+- All requests are `GET`
+- All supported operations are allowlisted by the gateway
+- The upstream `token` query parameter is injected by the backend; never send it yourself
+- The API is read-only from the agent's perspective
 
-- `UserByScreenName` with `screenName`
-- `UserTweets` with `restId`
-- `UserTweetsAndReplies` with `restId`
-- `SearchTimeline` with `rawQuery`
-- `TweetDetail` with `restId`
-- `Followers` with `restId`
-- `Following` with `restId`
-- `ListLatestTweetsTimeline` with `listId`
-- `CommunityTweetsTimeline` with `communityId`
-- `UserMedia` with `restId`
+If `COMPOSIO_MCP_TOKEN` is absent, this deployment is not provisioned for Clawdi-managed APIs and the skill should not be used.
 
-Optional pagination uses `cursor`. Forward it unchanged when the previous response includes one.
+## Supported operations
 
-## Endpoint result roots
+| Operation | Required input | Primary use |
+| --- | --- | --- |
+| `UserByScreenName` | `screenName` | Resolve a handle to a user object and `rest_id` |
+| `UserTweets` | `restId` | Get a user's recent tweets |
+| `UserTweetsAndReplies` | `restId` | Get a user's recent tweets plus replies |
+| `SearchTimeline` | `rawQuery` | Run an X search query |
+| `TweetDetail` | `restId` | Inspect a tweet and its thread context |
+| `Followers` | `restId` | Page through follower users |
+| `Following` | `restId` | Page through following users |
+| `ListLatestTweetsTimeline` | `listId` | Get latest tweets from a list |
+| `CommunityTweetsTimeline` | `communityId` | Get latest community tweets |
+| `UserMedia` | `restId` | Get a user's media tweets |
 
-Use these root paths when reasoning about responses:
+Optional pagination uses `cursor`.
 
-- `UserByScreenName`: `data.user.result`
-- `UserTweets`: `data.user.result.timeline.timeline.instructions`
-- `UserTweetsAndReplies`: `data.user.result.timeline.timeline.instructions`
-- `UserMedia`: `data.user.result.timeline.timeline.instructions`
-- `Followers`: `data.user.result.timeline.timeline.instructions`
-- `Following`: `data.user.result.timeline.timeline.instructions`
-- `SearchTimeline`: `data.search_by_raw_query.search_timeline.timeline.instructions`
-- `TweetDetail`: `data.threaded_conversation_with_injections_v2.instructions`
-- `ListLatestTweetsTimeline`: `data.list.tweets_timeline.timeline.instructions`
-- `CommunityTweetsTimeline`: `data.communityResults.result.ranked_community_timeline.timeline.instructions`
+Observed special case:
 
-## Parameter semantics
+- `CommunityTweetsTimeline` accepts `rankingMode=Recency`
+- Omitting `rankingMode` still returns a timeline
+- Invalid `rankingMode` can return a plain `Error`
+- Use `Recency` unless future gateway docs say otherwise
 
-- `screenName`: X handle without the leading `@` unless the user explicitly includes it.
-- `restId`: the internal X user or tweet identifier returned by prior calls. Do not guess it.
-- `rawQuery`: the exact X search query string.
-- `listId`: X list identifier.
-- `communityId`: X community identifier.
-- `cursor`: opaque pagination token from the previous response.
-- `rankingMode`: observed on `CommunityTweetsTimeline`; use `Recency`. Omitting it still returns a timeline, but invalid values can produce a non-JSON `Error` response.
+## Input semantics
+
+### `screenName`
+
+- X handle
+- Usually pass it without the leading `@`
+- If the user types `@handle`, strip the `@` before sending
+
+### `restId`
+
+This API uses `restId` for more than one logical type:
+
+- user id for user-centric endpoints: `UserTweets`, `UserTweetsAndReplies`, `Followers`, `Following`, `UserMedia`
+- tweet id for `TweetDetail`
+
+Never guess a `restId`. Get it from:
+
+- `UserByScreenName` for users
+- a tweet URL `/status/<id>` for tweet detail
+- prior response payloads
+
+### `rawQuery`
+
+Pass the exact X search query string. This is not a normalized JSON filter language. It is closer to native X search syntax.
+
+Useful patterns include:
+
+- `from:handle`
+- `to:handle`
+- quoted phrases
+- hashtags
+- `lang:en`
+
+### `cursor`
+
+- Opaque pagination token
+- Comes from the previous response
+- Must be reused byte-for-byte
+- Do not decode, trim, or normalize it
+
+### `listId`
+
+- X list identifier
+- Treat as opaque
+
+### `communityId`
+
+- X community identifier
+- Treat as opaque
 
 ## Request patterns
 
-Base pattern:
+### Base form
 
 ```bash
 curl -sS --get \
@@ -72,9 +112,9 @@ curl -sS --get \
   "https://api.clawdi.com/proxy/twitter/<OPERATION>"
 ```
 
-## Usage
+### Recommended form with query encoding
 
-Prefer `curl --get --data-urlencode` so query values are encoded correctly and query composition is explicit.
+Always prefer `--data-urlencode` for user-provided query values.
 
 ```bash
 curl -sS --get \
@@ -93,117 +133,143 @@ curl -sS --get \
 ```bash
 curl -sS --get \
   -H "Authorization: Bearer $COMPOSIO_MCP_TOKEN" \
-  --data-urlencode "restId=1234567890" \
+  --data-urlencode "restId=1212607092600606722" \
   --data-urlencode "cursor=CURSOR_VALUE" \
   "https://api.clawdi.com/proxy/twitter/UserTweets"
 ```
 
-## Workflow
+```bash
+curl -sS --get \
+  -H "Authorization: Bearer $COMPOSIO_MCP_TOKEN" \
+  --data-urlencode "communityId=1499359436388782087" \
+  --data-urlencode "rankingMode=Recency" \
+  "https://api.clawdi.com/proxy/twitter/CommunityTweetsTimeline"
+```
 
-### User-centric flow
+## Endpoint selection guide
 
-1. If the user gives a handle, call `UserByScreenName` first.
-2. Extract the returned user `restId`.
-3. Reuse that `restId` for `UserTweets`, `UserTweetsAndReplies`, `Followers`, `Following`, or `UserMedia`.
-4. When paginating, pass the returned `cursor` to the next call unchanged.
+### If the user gives a handle
 
-### Tweet-centric flow
+1. Call `UserByScreenName`
+2. Extract `data.user.result.rest_id`
+3. Reuse that `rest_id` for:
+   - `UserTweets`
+   - `UserTweetsAndReplies`
+   - `Followers`
+   - `Following`
+   - `UserMedia`
 
-1. If the user gives a tweet URL, extract the tweet ID from the `/status/<id>` segment.
-2. Call `TweetDetail` with that ID as `restId`.
-3. Use fields from the detail response to answer questions about the tweet, author, media, quoted tweet, or thread context.
+### If the user gives a tweet URL or tweet id
 
-### Search flow
+1. Extract the numeric tweet id from the URL if needed
+2. Call `TweetDetail` with that id as `restId`
+3. Use the returned thread structure to inspect:
+   - the target tweet
+   - replies in the thread
+   - quoted tweet references
+   - media
+   - continuation cursors
 
-1. Use `SearchTimeline` when the task is query-driven rather than user-driven.
-2. Put the user intent into `rawQuery` directly using X search syntax such as `from:handle`, `to:handle`, `lang:en`, quoted phrases, or hashtags.
-3. Preserve the raw JSON unless the user asks for a transformed result set.
+### If the user gives a query
 
-## Capability mapping
+Use `SearchTimeline`.
 
-- Look up a handle: `UserByScreenName`
-- Get recent posts from a user: `UserTweets`
-- Get recent posts including replies: `UserTweetsAndReplies`
-- Inspect a specific post: `TweetDetail`
-- Search public posts: `SearchTimeline`
-- Get a user’s followers: `Followers`
-- Get accounts a user follows: `Following`
-- Get posts from a list: `ListLatestTweetsTimeline`
-- Get posts from a community: `CommunityTweetsTimeline`
-- Get a user’s media posts: `UserMedia`
+Do not first resolve a user unless the query task specifically becomes user-centric after the initial search.
 
-## Observed output families
+### If the task is "show a user's posts"
 
-### User objects
+- use `UserTweets` for tweets only
+- use `UserTweetsAndReplies` for tweets plus replies
+- use `UserMedia` for media-heavy posts
 
-Observed user payloads include:
+### If the task is "who follows whom"
 
-- identity: `rest_id`, `core.name`, `core.screen_name`, `avatar.image_url`
-- profile metadata: `legacy.description`, `location.location`, `professional`, `profile_image_shape`
-- counts and status: `legacy.followers_count`, `legacy.friends_count`, `legacy.statuses_count`, `legacy.media_count`
-- relationship/privacy: `relationship_perspectives`, `privacy`, `dm_permissions`
-- verification-ish fields: `is_blue_verified`, `verification`, `verification_info`
+- use `Followers` to get followers of the target user
+- use `Following` to get accounts the target user follows
 
-`Followers` and `Following` return timeline entries whose `itemContent.itemType` is `TimelineUser`.
+### If the task is list or community centric
 
-### Tweet objects
+- use `ListLatestTweetsTimeline` for list ids
+- use `CommunityTweetsTimeline` for community ids
 
-Observed tweet payloads include:
+## Result roots by endpoint
 
-- core tweet id: `rest_id`
-- author object under `core.user_results.result`
-- raw post fields under `legacy`
-- metrics under `legacy.favorite_count`, `legacy.reply_count`, `legacy.retweet_count`, and `views.count`
-- edit metadata under `edit_control`
-- rendered metadata such as `source`, `grok_analysis_button`, `is_translatable`
+These are the stable roots to start from. Do not assume a flat array anywhere.
 
-Observed special tweet variants across endpoints:
+- `UserByScreenName`: `data.user.result`
+- `UserTweets`: `data.user.result.timeline.timeline.instructions`
+- `UserTweetsAndReplies`: `data.user.result.timeline.timeline.instructions`
+- `UserMedia`: `data.user.result.timeline.timeline.instructions`
+- `Followers`: `data.user.result.timeline.timeline.instructions`
+- `Following`: `data.user.result.timeline.timeline.instructions`
+- `SearchTimeline`: `data.search_by_raw_query.search_timeline.timeline.instructions`
+- `TweetDetail`: `data.threaded_conversation_with_injections_v2.instructions`
+- `ListLatestTweetsTimeline`: `data.list.tweets_timeline.timeline.instructions`
+- `CommunityTweetsTimeline`: `data.communityResults.result.ranked_community_timeline.timeline.instructions`
 
-- quoted tweets: `quoted_status_result`
-- long-form text: `note_tweet`
-- cards/search enrichments: `card`, `quotedRefResult`, `grok_annotations`
-- community-specific metadata: `community_results`, `community_relationship`, `author_community_relationship`
+## Traversal model
 
-### Media
+Most timeline-style endpoints are nested like this:
 
-Observed media variants:
+1. response root
+2. `instructions`
+3. instruction with `type == "TimelineAddEntries"`
+4. `entries`
+5. `content`
+6. one of:
+   - tweet item
+   - user item
+   - cursor item
+   - timeline module containing nested tweet items
 
-- `photo`
-- `video`
-- `animated_gif`
+Never assume:
 
-Media appears under `legacy.entities.media` and `legacy.extended_entities.media`. Videos include `video_info.variants` with multiple bitrate URLs.
+- a top-level `tweets` array
+- a top-level `users` array
+- that every entry is a tweet
+- that every entry is a final content item rather than a wrapper/module/cursor
 
-## Example responses
+## Common content variants
 
-### `UserByScreenName`
+### Tweet item
+
+Typical shape:
 
 ```json
 {
-  "data": {
-    "user": {
-      "result": {
-        "__typename": "User",
-        "rest_id": "1212607092600606722",
-        "core": {
-          "name": "Limichange",
-          "screen_name": "Limichange2",
-          "created_at": "Thu Jan 02 05:30:41 +0000 2020"
-        },
-        "avatar": {
-          "image_url": "https://pbs.twimg.com/profile_images/..._normal.jpg"
-        },
-        "legacy": {
-          "description": "...",
-          "followers_count": 3446,
-          "friends_count": 1060,
-          "statuses_count": 5856,
-          "media_count": 811,
-          "profile_banner_url": "https://pbs.twimg.com/profile_banners/..."
-        },
-        "is_blue_verified": false,
-        "verification": {
-          "verified": false
+  "content": {
+    "entryType": "TimelineTimelineItem",
+    "itemContent": {
+      "__typename": "TimelineTweet",
+      "itemType": "TimelineTweet",
+      "tweetDisplayType": "Tweet",
+      "tweet_results": {
+        "result": {
+          "__typename": "Tweet",
+          "rest_id": "2032415448755822937",
+          "core": {
+            "user_results": {
+              "result": {
+                "__typename": "User",
+                "rest_id": "1212607092600606722",
+                "core": {
+                  "name": "Limichange",
+                  "screen_name": "Limichange2"
+                }
+              }
+            }
+          },
+          "legacy": {
+            "full_text": "native https://t.co/...",
+            "created_at": "Fri Mar 13 11:16:18 +0000 2026",
+            "conversation_id_str": "2032415448755822937",
+            "favorite_count": 4,
+            "reply_count": 3,
+            "retweet_count": 0
+          },
+          "views": {
+            "count": "2834"
+          }
         }
       }
     }
@@ -211,119 +277,56 @@ Media appears under `legacy.entities.media` and `legacy.extended_entities.media`
 }
 ```
 
-### Timeline tweet entry shape
+### User item
 
-This is the common pattern for `UserTweets`, `UserTweetsAndReplies`, `SearchTimeline`, `ListLatestTweetsTimeline`, and `CommunityTweetsTimeline`:
-
-```json
-{
-  "type": "TimelineAddEntries",
-  "entries": [
-    {
-      "content": {
-        "entryType": "TimelineTimelineItem",
-        "itemContent": {
-          "__typename": "TimelineTweet",
-          "itemType": "TimelineTweet",
-          "tweetDisplayType": "Tweet",
-          "tweet_results": {
-            "result": {
-              "__typename": "Tweet",
-              "rest_id": "2032415448755822937",
-              "core": {
-                "user_results": {
-                  "result": {
-                    "__typename": "User",
-                    "rest_id": "1212607092600606722",
-                    "core": {
-                      "name": "Limichange",
-                      "screen_name": "Limichange2"
-                    }
-                  }
-                }
-              },
-              "legacy": {
-                "full_text": "native https://t.co/...",
-                "created_at": "Fri Mar 13 11:16:18 +0000 2026",
-                "conversation_id_str": "2032415448755822937",
-                "favorite_count": 4,
-                "reply_count": 3,
-                "retweet_count": 0,
-                "quoted_status_id_str": "2032414008398233901"
-              },
-              "quoted_status_result": {
-                "result": {
-                  "__typename": "Tweet",
-                  "rest_id": "2032414008398233901"
-                }
-              },
-              "views": {
-                "count": "2834"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "content": {
-        "entryType": "TimelineTimelineCursor",
-        "cursorType": "Bottom",
-        "value": "DAAHCgAB..."
-      }
-    }
-  ]
-}
-```
-
-### `Followers` / `Following` entry shape
+Typical shape from `Followers` / `Following`:
 
 ```json
 {
-  "type": "TimelineAddEntries",
-  "entries": [
-    {
-      "content": {
-        "entryType": "TimelineTimelineItem",
-        "itemContent": {
-          "__typename": "TimelineUser",
-          "itemType": "TimelineUser",
-          "userDisplayType": "User",
-          "user_results": {
-            "result": {
-              "__typename": "User",
-              "rest_id": "1581259092928040961",
-              "core": {
-                "name": "尹珉",
-                "screen_name": "yinmin1987"
-              },
-              "legacy": {
-                "followers_count": 4781,
-                "friends_count": 3871,
-                "media_count": 847,
-                "statuses_count": 5524
-              },
-              "relationship_perspectives": {
-                "following": false,
-                "followed_by": false
-              }
-            }
+  "content": {
+    "entryType": "TimelineTimelineItem",
+    "itemContent": {
+      "__typename": "TimelineUser",
+      "itemType": "TimelineUser",
+      "userDisplayType": "User",
+      "user_results": {
+        "result": {
+          "__typename": "User",
+          "rest_id": "1581259092928040961",
+          "core": {
+            "name": "尹珉",
+            "screen_name": "yinmin1987"
+          },
+          "legacy": {
+            "followers_count": 4781,
+            "friends_count": 3871,
+            "media_count": 847,
+            "statuses_count": 5524
           }
         }
       }
-    },
-    {
-      "content": {
-        "entryType": "TimelineTimelineCursor",
-        "cursorType": "Bottom",
-        "value": "1834014275286553197|2037456451307306941"
-      }
     }
-  ]
+  }
 }
 ```
 
-### `TweetDetail` thread shape
+### Cursor item
+
+Typical shape:
+
+```json
+{
+  "content": {
+    "entryType": "TimelineTimelineCursor",
+    "cursorType": "Bottom",
+    "value": "DAAHCgAB..."
+  }
+}
+```
+
+### Tweet detail thread item
+
+Typical shape:
 
 ```json
 {
@@ -366,35 +369,273 @@ This is the common pattern for `UserTweets`, `UserTweetsAndReplies`, `SearchTime
 }
 ```
 
-## Pagination and traversal
+## Observed object families
 
-- Most timeline endpoints return `Top` and `Bottom` cursors.
-- `TweetDetail` also returns `ShowMore` and `ShowMoreThreads` cursors for deeper thread traversal.
-- Reuse cursor values exactly; do not decode or modify them.
-- For timeline endpoints, continue paging until the user’s goal is satisfied rather than assuming one page is enough.
-- `Followers` and `Following` page over users, not tweets.
+### User object family
 
-## Response handling
+Observed user objects include:
 
-- Treat responses as authoritative JSON from the proxy.
-- Preserve IDs, cursors, and query strings exactly for follow-up calls.
-- If the user asks for analysis, summarize after reading the JSON rather than inventing fields.
-- If a response contains nested instructionally useful IDs, surface them explicitly for later reuse.
-- Expect timeline data to be nested inside `instructions`, `entries`, `items`, and `itemContent`; do not assume a flat `tweets[]` array.
+- identity:
+  - `rest_id`
+  - `core.name`
+  - `core.screen_name`
+  - `avatar.image_url`
+- profile:
+  - `legacy.description`
+  - `location.location`
+  - `professional`
+  - `profile_image_shape`
+- counts:
+  - `legacy.followers_count`
+  - `legacy.friends_count`
+  - `legacy.statuses_count`
+  - `legacy.media_count`
+- relationship/privacy:
+  - `relationship_perspectives`
+  - `privacy`
+  - `dm_permissions`
+- verification-ish fields:
+  - `is_blue_verified`
+  - `verification`
+  - `verification_info`
+
+### Tweet object family
+
+Observed tweet objects include:
+
+- id and author:
+  - `rest_id`
+  - `core.user_results.result`
+- raw tweet payload:
+  - `legacy`
+- metrics:
+  - `legacy.favorite_count`
+  - `legacy.reply_count`
+  - `legacy.retweet_count`
+  - `views.count`
+- rendering/state:
+  - `source`
+  - `is_translatable`
+  - `edit_control`
+  - `grok_analysis_button`
+
+Observed special tweet variants:
+
+- quoted tweets:
+  - `quoted_status_result`
+- long-form note tweets:
+  - `note_tweet`
+- search/list enrichments:
+  - `card`
+  - `quotedRefResult`
+  - `grok_annotations`
+- community-specific fields:
+  - `community_results`
+  - `community_relationship`
+  - `author_community_relationship`
+
+### Media family
+
+Observed media variants:
+
+- `photo`
+- `video`
+- `animated_gif`
+
+Media usually appears under:
+
+- `legacy.entities.media`
+- `legacy.extended_entities.media`
+
+Video payloads can include:
+
+- `media_url_https`
+- `video_info.duration_millis`
+- `video_info.variants[]`
+
+## Endpoint-specific notes
+
+### `UserByScreenName`
+
+Best for:
+
+- turning a handle into a stable `rest_id`
+- getting a profile summary
+- retrieving follower/friend/status/media counts before deeper traversal
+
+Important outputs:
+
+- `rest_id`
+- `core.name`
+- `core.screen_name`
+- `legacy.description`
+- `legacy.followers_count`
+- `legacy.friends_count`
+- `legacy.statuses_count`
+- `legacy.media_count`
+
+### `UserTweets`
+
+Best for:
+
+- recent tweets without reply noise
+
+Observed behavior:
+
+- can include pinned tweet handling
+- can include timeline modules, not just flat tweet items
+- returns `Top` and `Bottom` cursors
+
+### `UserTweetsAndReplies`
+
+Best for:
+
+- understanding how a user is interacting, not just what they broadcast
+
+Observed behavior:
+
+- same general shape as `UserTweets`
+- includes reply/conversation material
+- can contain quoted tweets and note tweets
+
+### `SearchTimeline`
+
+Best for:
+
+- query-driven tasks
+- topical discovery
+- finding recent relevant tweets when you do not already know the author
+
+Observed behavior:
+
+- root differs from user timelines
+- results still use nested timeline entries
+- supports quoted tweets, cards, and search enrichments
+
+### `TweetDetail`
+
+Best for:
+
+- one specific tweet
+- thread traversal
+- finding quoted tweet context
+- getting thread continuation cursors
+
+Observed behavior:
+
+- returns `ShowMore` and `ShowMoreThreads` cursors in addition to entry items
+- structure is thread-centric, not user-centric
+
+### `Followers` and `Following`
+
+Best for:
+
+- relationship inspection
+- community/account graph exploration
+
+Observed behavior:
+
+- page over `TimelineUser`, not `TimelineTweet`
+- still use nested timeline instructions and cursors
+
+### `ListLatestTweetsTimeline`
+
+Best for:
+
+- monitoring a curated list feed
+
+Observed behavior:
+
+- timeline shape is tweet-centric
+- can include cards, quoted tweets, and media
+
+### `CommunityTweetsTimeline`
+
+Best for:
+
+- community feed exploration
+
+Observed behavior:
+
+- community-specific fields exist on tweet objects
+- `rankingMode=Recency` works
+- invalid ranking values can produce non-JSON `Error`
+
+### `UserMedia`
+
+Best for:
+
+- finding a user's media-heavy tweets
+- retrieving video/photo/gif posts
+
+Observed behavior:
+
+- can use `tweetDisplayType = MediaGrid`
+- strong presence of media metadata
+
+## Pagination rules
+
+- Most timeline endpoints return `Top` and `Bottom` cursors
+- `TweetDetail` additionally returns `ShowMore` and `ShowMoreThreads`
+- Reuse cursor values exactly as returned
+- Do not decode or normalize cursor strings
+- Stop paging when:
+  - the user goal is satisfied
+  - the next page no longer contributes relevant results
+  - no new bottom cursor appears
+
+## Extraction recipes
+
+### Recipe: handle -> user id -> recent tweets
+
+1. `UserByScreenName(screenName)`
+2. read `data.user.result.rest_id`
+3. call `UserTweets(restId)`
+4. traverse timeline entries to extract `tweet_results.result`
+
+### Recipe: handle -> followers
+
+1. `UserByScreenName(screenName)`
+2. read `data.user.result.rest_id`
+3. call `Followers(restId)`
+4. traverse timeline entries to extract `user_results.result`
+5. if needed, page with bottom cursor
+
+### Recipe: tweet URL -> thread
+
+1. parse numeric id from `/status/<id>`
+2. call `TweetDetail(restId=<tweet id>)`
+3. extract the primary tweet and any additional thread items
+4. if thread is incomplete, follow `ShowMoreThreads`
+
+### Recipe: search -> author -> deeper user fetch
+
+1. call `SearchTimeline(rawQuery)`
+2. extract tweet items
+3. pick the relevant author from `core.user_results.result`
+4. reuse that author's `rest_id` with `UserTweets` or `Followers` only if needed
 
 ## Error handling
 
-- `400`: the request is malformed or missing the required parameter for that operation. Fix the call instead of retrying unchanged.
-- `401`: the Clawdi-managed client token is missing or invalid.
-- `402`: insufficient credits for the proxy call.
-- `404`: unknown operation name.
-- `5xx`: upstream or proxy failure; report it as service-side.
-- Some upstream validation failures can return plain `Error` instead of structured JSON. Treat that as a caller-visible upstream error.
+- `400`: malformed request or missing required parameter
+- `401`: missing or invalid Clawdi-managed client token
+- `402`: insufficient credits
+- `404`: unsupported operation
+- `5xx`: upstream or proxy failure
+- some upstream validation failures can return plain `Error` instead of structured JSON
 
-## Rules
+For plain `Error`:
 
-- This proxy is read-only. Do not invent posting, liking, or follow-mutation commands.
-- Do not include a `token` query parameter in requests.
-- Do not invent undocumented operations outside the allowlisted set above.
-- Use `UserByScreenName` before timeline/follower/media calls when you only have a handle.
-- Keep IDs and cursors byte-for-byte unchanged when reusing them.
+- treat it as an upstream caller-visible error
+- do not pretend it is valid JSON
+- adjust the request instead of trying to parse it
+
+## Hard rules
+
+- Read-only only. Never invent posting, liking, following, bookmarks, DMs, or moderation commands.
+- Never include a `token` query parameter.
+- Never invent undocumented operations outside the allowlisted set in this manual.
+- Never guess a `restId`.
+- Do not assume a flat top-level array response.
+- Do not mutate cursors.
+- Use `UserByScreenName` first when the input is only a handle and the downstream endpoint needs `restId`.
