@@ -23,7 +23,6 @@ Use it when the task requires reading X users, tweets, replies, media, lists, co
 - Auth header is fixed: `Authorization: Bearer $COMPOSIO_MCP_TOKEN`
 - All requests are `GET`
 - All supported operations are allowlisted by the gateway
-- The upstream `token` query parameter is injected by the backend; never send it yourself
 - The API is read-only from the agent's perspective
 
 If `COMPOSIO_MCP_TOKEN` is absent, this deployment is not provisioned for Clawdi-managed APIs and the skill should not be used.
