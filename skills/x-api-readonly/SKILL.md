@@ -6,19 +6,23 @@ metadata:
     "openclaw":
       {
         "emoji": "🐦",
-        "primaryEnv": "X_API_TOKEN",
-        "requires": { "bins": ["curl"], "env": ["X_API_BASE_URL", "X_API_TOKEN"] },
+        "requires": { "bins": ["curl"], "env": ["COMPOSIO_MCP_TOKEN"] },
       },
   }
 ---
 
-# X API
+# X API Read-Only
 
-Use Clawdi's X proxy for read-only Twitter/X data. Authenticate with `Authorization: Bearer $X_API_TOKEN`. Do not send the upstream `token` query parameter yourself; the backend injects it.
+Use Clawdi's managed X proxy for read-only Twitter/X data.
+
+- Fixed base URL: `https://api.clawdi.com/proxy/twitter`
+- Auth header: `Authorization: Bearer $COMPOSIO_MCP_TOKEN`
+- Do not send the upstream `token` query parameter yourself. The backend injects it.
+- This skill is for Clawdi-managed deployments. If `COMPOSIO_MCP_TOKEN` is absent, the deployment is not provisioned for Clawdi-managed APIs.
 
 ## Operations
 
-The proxy exposes these operations under `$X_API_BASE_URL/{operation}`:
+The proxy exposes these operations:
 
 - `UserByScreenName` with `screenName`
 - `UserTweets` with `restId`
@@ -31,44 +35,106 @@ The proxy exposes these operations under `$X_API_BASE_URL/{operation}`:
 - `CommunityTweetsTimeline` with `communityId`
 - `UserMedia` with `restId`
 
-Optional pagination uses `cursor`.
+Optional pagination uses `cursor`. Forward it unchanged when the previous response includes one.
+
+## Parameter semantics
+
+- `screenName`: X handle without the leading `@` unless the user explicitly includes it.
+- `restId`: the internal X user or tweet identifier returned by prior calls. Do not guess it.
+- `rawQuery`: the exact X search query string.
+- `listId`: X list identifier.
+- `communityId`: X community identifier.
+- `cursor`: opaque pagination token from the previous response.
+
+## Request patterns
+
+Base pattern:
+
+```bash
+curl -sS --get \
+  -H "Authorization: Bearer $COMPOSIO_MCP_TOKEN" \
+  "https://api.clawdi.com/proxy/twitter/<OPERATION>"
+```
 
 ## Usage
 
-Prefer `curl --get --data-urlencode` so query values are encoded correctly.
+Prefer `curl --get --data-urlencode` so query values are encoded correctly and query composition is explicit.
 
 ```bash
 curl -sS --get \
-  -H "Authorization: Bearer $X_API_TOKEN" \
+  -H "Authorization: Bearer $COMPOSIO_MCP_TOKEN" \
   --data-urlencode "screenName=openclaw" \
-  "$X_API_BASE_URL/UserByScreenName"
+  "https://api.clawdi.com/proxy/twitter/UserByScreenName"
 ```
 
 ```bash
 curl -sS --get \
-  -H "Authorization: Bearer $X_API_TOKEN" \
+  -H "Authorization: Bearer $COMPOSIO_MCP_TOKEN" \
   --data-urlencode "rawQuery=from:openclaw AI" \
-  "$X_API_BASE_URL/SearchTimeline"
+  "https://api.clawdi.com/proxy/twitter/SearchTimeline"
 ```
 
 ```bash
 curl -sS --get \
-  -H "Authorization: Bearer $X_API_TOKEN" \
+  -H "Authorization: Bearer $COMPOSIO_MCP_TOKEN" \
   --data-urlencode "restId=1234567890" \
   --data-urlencode "cursor=CURSOR_VALUE" \
-  "$X_API_BASE_URL/UserTweets"
+  "https://api.clawdi.com/proxy/twitter/UserTweets"
 ```
 
 ## Workflow
 
-1. Resolve the user with `UserByScreenName` when you only have a handle.
-2. Reuse the returned `restId` for user timeline, replies, followers, following, and media calls.
-3. Use `TweetDetail` when the user gives a tweet URL or tweet ID.
-4. Keep results as JSON unless the user explicitly asks for transformation or summarization.
+### User-centric flow
+
+1. If the user gives a handle, call `UserByScreenName` first.
+2. Extract the returned user `restId`.
+3. Reuse that `restId` for `UserTweets`, `UserTweetsAndReplies`, `Followers`, `Following`, or `UserMedia`.
+4. When paginating, pass the returned `cursor` to the next call unchanged.
+
+### Tweet-centric flow
+
+1. If the user gives a tweet URL, extract the tweet ID from the `/status/<id>` segment.
+2. Call `TweetDetail` with that ID as `restId`.
+3. Use fields from the detail response to answer questions about the tweet, author, media, or thread context.
+
+### Search flow
+
+1. Use `SearchTimeline` when the task is query-driven rather than user-driven.
+2. Put the user intent into `rawQuery` directly using X search syntax such as `from:handle`, `to:handle`, `lang:en`, quoted phrases, or hashtags.
+3. Preserve the raw JSON unless the user asks for a transformed result set.
+
+## Capability mapping
+
+- Look up a handle: `UserByScreenName`
+- Get recent posts from a user: `UserTweets`
+- Get recent posts including replies: `UserTweetsAndReplies`
+- Inspect a specific post: `TweetDetail`
+- Search public posts: `SearchTimeline`
+- Get a user’s followers: `Followers`
+- Get accounts a user follows: `Following`
+- Get posts from a list: `ListLatestTweetsTimeline`
+- Get posts from a community: `CommunityTweetsTimeline`
+- Get a user’s media posts: `UserMedia`
+
+## Response handling
+
+- Treat responses as authoritative JSON from the proxy.
+- Preserve IDs, cursors, and query strings exactly for follow-up calls.
+- If the user asks for analysis, summarize after reading the JSON rather than inventing fields.
+- If a response contains nested instructionally useful IDs, surface them explicitly for later reuse.
+
+## Error handling
+
+- `400`: the request is malformed or missing the required parameter for that operation. Fix the call instead of retrying unchanged.
+- `401`: the Clawdi-managed client token is missing or invalid.
+- `402`: insufficient credits for the proxy call.
+- `404`: unknown operation name.
+- `5xx`: upstream or proxy failure; report it as service-side.
 
 ## Rules
 
 - This proxy is read-only. Do not invent posting, liking, or follow-mutation commands.
 - Do not include a `token` query parameter in requests.
-- Treat 402 as insufficient credits and surface that clearly.
-- Treat 404 on unknown operations or 400 on missing required params as caller errors and fix the request instead of retrying unchanged.
+- Do not invent undocumented operations outside the allowlisted set above.
+- Use `UserByScreenName` before timeline/follower/media calls when you only have a handle.
+- Keep IDs and cursors byte-for-byte unchanged when reusing them.
