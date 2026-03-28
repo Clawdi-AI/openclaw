@@ -56,6 +56,29 @@ if [ ! -f "$CONFIG_FILE" ]; then
   fi
 fi
 
+# Bootstrap workspace files from OPENCLAW_WORKSPACE_FILES_B64 (first boot only).
+# Skipped if workspace already has a .git dir (indicates gateway already initialized it).
+WORKSPACE_DIR="/root/.openclaw/workspace"
+if [ -n "$OPENCLAW_WORKSPACE_FILES_B64" ] && [ ! -d "$WORKSPACE_DIR/.git" ]; then
+  echo "Decoding workspace files from OPENCLAW_WORKSPACE_FILES_B64..."
+  mkdir -p "$WORKSPACE_DIR"
+  printf '%s' "$OPENCLAW_WORKSPACE_FILES_B64" | base64 -d | node -e "
+    const fs=require('fs'),path=require('path');
+    const ws=process.argv[1];
+    const files=JSON.parse(fs.readFileSync('/dev/stdin','utf8'));
+    for(const[n,c]of Object.entries(files)){
+      const fp=path.resolve(ws,n);
+      if(!fp.startsWith(ws + '/')){
+        throw new Error('Invalid workspace file path: ' + n);
+      }
+      fs.mkdirSync(path.dirname(fp),{recursive:true});
+      fs.writeFileSync(fp,c);
+      console.log('Wrote',fp);
+    }
+  " "$WORKSPACE_DIR"
+  echo "Workspace files written."
+fi
+
 # --- Configure mcporter for Composio MCP proxy ---
 # Reads composio skill config from openclaw.json and writes mcporter config.
 if [ -f "$CONFIG_FILE" ]; then
