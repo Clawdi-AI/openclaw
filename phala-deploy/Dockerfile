@@ -46,7 +46,11 @@ ENV PATH="${HOMEBREW_PREFIX}/bin:${HOMEBREW_PREFIX}/sbin:${PATH}"
 RUN echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /root/.bashrc && \
     echo 'export PATH="/root/.bun/bin:$PATH"' >> /root/.bashrc
 
-# Layer 7: mcporter (MCP client CLI, used by composio skill)
+# Layer 7: uv (fast Python package manager — npm-like experience for Python)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Layer 8: mcporter (MCP client CLI, used by composio skill)
 RUN npm install -g mcporter && \
     rm -rf /root/.npm /tmp/*
 
