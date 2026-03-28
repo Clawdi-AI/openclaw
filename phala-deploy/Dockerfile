@@ -7,9 +7,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg git bash tmux unzip lsof \
-      iptables lsb-release sudo && \
+      iptables lsb-release sudo \
+      python3-pip python3-venv && \
     update-alternatives --set iptables /usr/sbin/iptables-legacy && \
     update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy && \
+    rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Docker static binaries + compose plugin (~80MB vs ~280MB for docker-ce)
