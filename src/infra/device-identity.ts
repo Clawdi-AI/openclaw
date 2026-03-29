@@ -82,6 +82,45 @@ function deriveIdentityFromMasterKey(masterKey: string): DeviceIdentity {
 export function loadOrCreateDeviceIdentity(
   filePath: string = resolveDefaultIdentityPath(),
 ): DeviceIdentity {
+  const masterKey = typeof process.env.MASTER_KEY === "string" ? process.env.MASTER_KEY.trim() : "";
+
+  // When MASTER_KEY is set, the identity must always match the derivation.
+  // A stale device.json (e.g. randomly generated before the MASTER_KEY fix)
+  // would mismatch the pre-seeded paired.json and break RPC auth on CVMs.
+  if (masterKey) {
+    const expected = deriveIdentityFromMasterKey(masterKey);
+    try {
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, "utf8");
+        const parsed = JSON.parse(raw) as StoredIdentity;
+        if (
+          parsed?.version === 1 &&
+          parsed.deviceId === expected.deviceId &&
+          parsed.publicKeyPem === expected.publicKeyPem
+        ) {
+          return expected;
+        }
+      }
+    } catch {
+      // fall through to write
+    }
+    ensureDir(filePath);
+    const stored: StoredIdentity = {
+      version: 1,
+      deviceId: expected.deviceId,
+      publicKeyPem: expected.publicKeyPem,
+      privateKeyPem: expected.privateKeyPem,
+      createdAtMs: Date.now(),
+    };
+    fs.writeFileSync(filePath, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    try {
+      fs.chmodSync(filePath, 0o600);
+    } catch {
+      // best-effort
+    }
+    return expected;
+  }
+
   try {
     if (fs.existsSync(filePath)) {
       const raw = fs.readFileSync(filePath, "utf8");
@@ -121,8 +160,7 @@ export function loadOrCreateDeviceIdentity(
     // fall through to regenerate
   }
 
-  const masterKey = typeof process.env.MASTER_KEY === "string" ? process.env.MASTER_KEY.trim() : "";
-  const identity = masterKey ? deriveIdentityFromMasterKey(masterKey) : generateIdentity();
+  const identity = generateIdentity();
   ensureDir(filePath);
   const stored: StoredIdentity = {
     version: 1,
