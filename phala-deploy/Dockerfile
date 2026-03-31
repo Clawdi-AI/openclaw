@@ -64,6 +64,9 @@ RUN ARCH=$(uname -m) && \
       "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.${TTYD_ARCH}" && \
     chmod +x /usr/local/bin/ttyd
 
+COPY phala-deploy/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
+COPY phala-deploy/supervisor/conf.d/ /etc/supervisor/conf.d/
+
 COPY phala-deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
