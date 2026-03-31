@@ -151,6 +151,43 @@ if [ -x /usr/sbin/sshd ]; then
   echo "SSH daemon started."
 fi
 
+# --- Start File Browser (web file manager + REST API) ---
+# Auth uses the same GATEWAY_AUTH_TOKEN derived from MASTER_KEY.
+if command -v filebrowser >/dev/null 2>&1; then
+  FB_DB="$DATA_DIR/.filebrowser.db"
+  FB_PORT=18791
+  FB_ROOT="$DATA_DIR/openclaw"
+  mkdir -p "$FB_ROOT"
+
+  filebrowser config init --database "$FB_DB" 2>/dev/null || true
+  filebrowser config set --database "$FB_DB" \
+    --root "$FB_ROOT" \
+    --address 0.0.0.0 \
+    --port "$FB_PORT" \
+    --auth.method json \
+    --branding.disableExternal
+
+  FB_PASS="${GATEWAY_AUTH_TOKEN:-admin}"
+  filebrowser users add admin "$FB_PASS" --database "$FB_DB" 2>/dev/null || \
+    filebrowser users update admin --password "$FB_PASS" --database "$FB_DB" 2>/dev/null || true
+
+  filebrowser --database "$FB_DB" &
+  echo "File Browser started on port $FB_PORT."
+else
+  echo "File Browser not installed, skipping."
+fi
+
+# --- Start ttyd (web terminal) ---
+# Auth uses the same GATEWAY_AUTH_TOKEN derived from MASTER_KEY.
+if command -v ttyd >/dev/null 2>&1; then
+  TTYD_PORT=18792
+  TTYD_PASS="${GATEWAY_AUTH_TOKEN:-admin}"
+  ttyd -p "$TTYD_PORT" -W -c "admin:${TTYD_PASS}" bash &
+  echo "ttyd started on port $TTYD_PORT."
+else
+  echo "ttyd not installed, skipping."
+fi
+
 # Start Docker daemon only when explicitly enabled (e.g. Phala CVM).
 # k3s pods don't need Docker — the agent runs directly on the host.
 if [ "${ENABLE_DOCKER:-}" = "1" ]; then
@@ -184,16 +221,49 @@ GATEWAY_RESTART_DELAY="${OPENCLAW_GATEWAY_RESTART_DELAY:-5}"
 GATEWAY_RESTART_MAX_DELAY="${OPENCLAW_GATEWAY_RESTART_MAX_DELAY:-60}"
 GATEWAY_RESET_AFTER="${OPENCLAW_GATEWAY_RESET_AFTER:-600}"
 
+# Gateway log file (accessible via File Browser for diagnosis)
+GATEWAY_LOG_DIR="$DATA_DIR/openclaw/logs"
+GATEWAY_LOG="$GATEWAY_LOG_DIR/gateway.log"
+GATEWAY_STATUS="$DATA_DIR/openclaw/.gateway-status.json"
+mkdir -p "$GATEWAY_LOG_DIR"
+
+# Rotate gateway log if it exceeds 10MB
+rotate_gateway_log() {
+  if [ -f "$GATEWAY_LOG" ]; then
+    log_size=$(stat -c%s "$GATEWAY_LOG" 2>/dev/null || echo 0)
+    if [ "$log_size" -gt 10485760 ]; then
+      mv "$GATEWAY_LOG" "$GATEWAY_LOG.1"
+    fi
+  fi
+}
+
+# Write gateway status file (read by File Browser for health monitoring)
+write_gateway_status() {
+  cat > "$GATEWAY_STATUS" <<STATUSEOF
+{"running":$1,"pid":${2:-0},"exit_code":${3:-0},"restarts":$restart_count,"last_event_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","uptime_seconds":${4:-0}}
+STATUSEOF
+}
+
+restart_count=0
 backoff="$GATEWAY_RESTART_DELAY"
 set +e
 while true; do
   echo "Starting OpenClaw gateway..."
+  rotate_gateway_log
   start_time=$(date +%s)
-  openclaw gateway run --bind lan --port 18789 --force
+
+  # Tee gateway output to log file for diagnosis access via File Browser
+  openclaw gateway run --bind lan --port 18789 --force 2>&1 | tee -a "$GATEWAY_LOG" &
+  gw_pid=$!
+  write_gateway_status true "$gw_pid" 0 0
+
+  wait $gw_pid
   exit_code=$?
   end_time=$(date +%s)
   runtime=$((end_time - start_time))
-  echo "Gateway exited with code ${exit_code}."
+  restart_count=$((restart_count + 1))
+  write_gateway_status false 0 "$exit_code" "$runtime"
+  echo "Gateway exited with code ${exit_code} after ${runtime}s (restart #${restart_count})."
 
   # Kill orphaned openclaw children from the previous run so they don't
   # accumulate across restarts (especially under OOM pressure).

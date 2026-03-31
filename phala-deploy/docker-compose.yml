@@ -10,6 +10,8 @@ services:
     ports:
       - "1022:22"
       - "18789:18789"
+      - "18791:18791"   # File Browser (web file manager + REST API)
+      - "18792:18792"   # ttyd (web terminal)
     volumes:
       - /home/root/.ssh:/root/.ssh:ro
       - openclaw_data:/data
