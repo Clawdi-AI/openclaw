@@ -8,7 +8,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg git bash tmux unzip lsof \
       iptables lsb-release sudo \
-      python3-pip python3-venv && \
+      python3-pip python3-venv supervisor && \
     update-alternatives --set iptables /usr/sbin/iptables-legacy && \
     update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy && \
     rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED && \

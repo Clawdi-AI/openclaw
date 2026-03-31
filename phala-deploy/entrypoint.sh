@@ -20,6 +20,9 @@ if [ -n "$MASTER_KEY" ]; then
   echo "Keys derived."
 fi
 
+# Ensure auth token has a fallback for dev/local use
+export GATEWAY_AUTH_TOKEN="${GATEWAY_AUTH_TOKEN:-admin}"
+
 mkdir -p "$DATA_DIR"
 
 # --- Set up home directory symlinks ---
@@ -142,18 +145,15 @@ if [ -n "$MASTER_KEY" ]; then
   ' "$PAIRED_JSON"
 fi
 
-# Start SSH daemon if installed (full image only)
+# --- Prepare SSH directories ---
 if [ -x /usr/sbin/sshd ]; then
   mkdir -p /var/run/sshd /root/.ssh
   chmod 700 /root/.ssh 2>/dev/null || true
   chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
-  /usr/sbin/sshd
-  echo "SSH daemon started."
 fi
 
-# --- Start File Browser (web file manager + REST API) ---
+# --- Configure File Browser (web file manager + REST API) ---
 # Auth uses the same GATEWAY_AUTH_TOKEN derived from MASTER_KEY.
-# Runs in a supervised restart loop (backgrounded).
 if command -v filebrowser >/dev/null 2>&1; then
   FB_DB="$DATA_DIR/.filebrowser.db"
   FB_PORT=18791
@@ -168,136 +168,132 @@ if command -v filebrowser >/dev/null 2>&1; then
     --auth.method json \
     --branding.disableExternal
 
-  FB_PASS="${GATEWAY_AUTH_TOKEN:-admin}"
-  filebrowser users add admin "$FB_PASS" --database "$FB_DB" 2>/dev/null || \
-    filebrowser users update admin --password "$FB_PASS" --database "$FB_DB" 2>/dev/null || true
+  filebrowser users add admin "$GATEWAY_AUTH_TOKEN" --database "$FB_DB" 2>/dev/null || \
+    filebrowser users update admin --password "$GATEWAY_AUTH_TOKEN" --database "$FB_DB" 2>/dev/null || true
 
-  (
-    while true; do
-      filebrowser --database "$FB_DB"
-      echo "File Browser exited, restarting in 5s..."
-      sleep 5
-    done
-  ) &
-  echo "File Browser started on port $FB_PORT (supervised)."
-else
-  echo "File Browser not installed, skipping."
+  echo "File Browser configured (port $FB_PORT)."
 fi
 
-# --- Start ttyd (web terminal) ---
-# Auth uses the same GATEWAY_AUTH_TOKEN derived from MASTER_KEY.
-# Runs in a supervised restart loop (backgrounded).
-if command -v ttyd >/dev/null 2>&1; then
-  TTYD_PORT=18792
-  TTYD_PASS="${GATEWAY_AUTH_TOKEN:-admin}"
-  (
-    while true; do
-      ttyd -p "$TTYD_PORT" -W -c "admin:${TTYD_PASS}" bash
-      echo "ttyd exited, restarting in 5s..."
-      sleep 5
-    done
-  ) &
-  echo "ttyd started on port $TTYD_PORT (supervised)."
-else
-  echo "ttyd not installed, skipping."
-fi
-
-# Start Docker daemon only when explicitly enabled (e.g. Phala CVM).
-# k3s pods don't need Docker — the agent runs directly on the host.
+# --- Prepare Docker daemon ---
 if [ "${ENABLE_DOCKER:-}" = "1" ]; then
   rm -f /var/run/docker.pid /var/run/containerd/containerd.pid
-  dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs &
-  DOCKERD_PID=$!
+fi
 
-  echo "Waiting for Docker daemon..."
-  DOCKER_WAIT=0
-  while ! docker info >/dev/null 2>&1; do
-    sleep 1
-    DOCKER_WAIT=$((DOCKER_WAIT + 1))
-    if [ $DOCKER_WAIT -ge 30 ]; then
-      echo "Warning: Docker daemon not ready after 30s, continuing without it."
-      break
-    fi
-    if ! kill -0 $DOCKERD_PID 2>/dev/null; then
-      echo "Warning: Docker daemon exited, continuing without it."
-      break
-    fi
-  done
-  if docker info >/dev/null 2>&1; then
-    echo "Docker daemon ready."
-  fi
+# =============================================================================
+# Generate supervisord configuration
+# =============================================================================
+# All long-running processes are managed by supervisord instead of hand-rolled
+# bash loops. This gives us proper signal forwarding, process group management,
+# auto-restart with backoff, log rotation, and `supervisorctl` for inspection.
+# =============================================================================
+
+LOG_DIR="$DATA_DIR/openclaw/logs"
+mkdir -p "$LOG_DIR" /etc/supervisor/conf.d
+
+cat > /etc/supervisor/supervisord.conf <<SUPEOF
+[supervisord]
+nodaemon=true
+logfile=$LOG_DIR/supervisord.log
+logfile_maxbytes=10MB
+logfile_backups=1
+pidfile=/var/run/supervisord.pid
+
+[unix_http_server]
+file=/var/run/supervisor.sock
+
+[supervisorctl]
+serverurl=unix:///var/run/supervisor.sock
+
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+
+[include]
+files = /etc/supervisor/conf.d/*.conf
+SUPEOF
+
+# --- Gateway ---
+# killasgroup/stopasgroup ensures orphaned openclaw children are cleaned up on
+# restart (replaces the old `pkill -9 -x openclaw` hack).
+# startsecs=30: if gateway runs 30s+ it's considered stable; crash loops within
+# 30s trigger supervisord's built-in exponential backoff.
+cat > /etc/supervisor/conf.d/gateway.conf <<SUPEOF
+[program:gateway]
+command=openclaw gateway run --bind lan --port 18789 --force
+autorestart=true
+startsecs=30
+startretries=9999
+stdout_logfile=$LOG_DIR/gateway.log
+stdout_logfile_maxbytes=10MB
+stdout_logfile_backups=1
+redirect_stderr=true
+stopwaitsecs=10
+killasgroup=true
+stopasgroup=true
+SUPEOF
+
+# --- File Browser ---
+if command -v filebrowser >/dev/null 2>&1; then
+  cat > /etc/supervisor/conf.d/filebrowser.conf <<SUPEOF
+[program:filebrowser]
+command=filebrowser --database $DATA_DIR/.filebrowser.db
+autorestart=true
+startsecs=5
+startretries=9999
+stdout_logfile=$LOG_DIR/filebrowser.log
+stdout_logfile_maxbytes=5MB
+stdout_logfile_backups=1
+redirect_stderr=true
+SUPEOF
+fi
+
+# --- ttyd (web terminal) ---
+if command -v ttyd >/dev/null 2>&1; then
+  cat > /etc/supervisor/conf.d/ttyd.conf <<SUPEOF
+[program:ttyd]
+command=ttyd -p 18792 -W -c admin:%(ENV_GATEWAY_AUTH_TOKEN)s bash
+autorestart=true
+startsecs=3
+startretries=9999
+stdout_logfile=$LOG_DIR/ttyd.log
+stdout_logfile_maxbytes=5MB
+stdout_logfile_backups=1
+redirect_stderr=true
+SUPEOF
+fi
+
+# --- SSH daemon (foreground mode) ---
+if [ -x /usr/sbin/sshd ]; then
+  cat > /etc/supervisor/conf.d/sshd.conf <<SUPEOF
+[program:sshd]
+command=/usr/sbin/sshd -D
+autorestart=true
+startsecs=3
+startretries=9999
+stdout_logfile=$LOG_DIR/sshd.log
+stdout_logfile_maxbytes=5MB
+stdout_logfile_backups=1
+redirect_stderr=true
+SUPEOF
+fi
+
+# --- Docker daemon (only when explicitly enabled) ---
+if [ "${ENABLE_DOCKER:-}" = "1" ]; then
+  cat > /etc/supervisor/conf.d/dockerd.conf <<SUPEOF
+[program:dockerd]
+command=dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs
+autorestart=true
+startsecs=10
+startretries=9999
+stdout_logfile=$LOG_DIR/dockerd.log
+stdout_logfile_maxbytes=10MB
+stdout_logfile_backups=1
+redirect_stderr=true
+SUPEOF
 else
   echo "Docker daemon disabled (set ENABLE_DOCKER=1 to enable)."
 fi
 
-# Gateway supervision (keep container alive for SSH even if gateway fails).
-GATEWAY_RESTART_DELAY="${OPENCLAW_GATEWAY_RESTART_DELAY:-5}"
-GATEWAY_RESTART_MAX_DELAY="${OPENCLAW_GATEWAY_RESTART_MAX_DELAY:-60}"
-GATEWAY_RESET_AFTER="${OPENCLAW_GATEWAY_RESET_AFTER:-600}"
+echo "Supervisord configuration generated. Starting services..."
 
-# Gateway log file (accessible via File Browser for diagnosis)
-GATEWAY_LOG_DIR="$DATA_DIR/openclaw/logs"
-GATEWAY_LOG="$GATEWAY_LOG_DIR/gateway.log"
-GATEWAY_STATUS="$DATA_DIR/openclaw/.gateway-status.json"
-mkdir -p "$GATEWAY_LOG_DIR"
-
-# Rotate gateway log if it exceeds 10MB
-rotate_gateway_log() {
-  if [ -f "$GATEWAY_LOG" ]; then
-    log_size=$(stat -c%s "$GATEWAY_LOG" 2>/dev/null || echo 0)
-    if [ "$log_size" -gt 10485760 ]; then
-      mv "$GATEWAY_LOG" "$GATEWAY_LOG.1"
-    fi
-  fi
-}
-
-# Write gateway status file (read by File Browser for health monitoring)
-write_gateway_status() {
-  cat > "$GATEWAY_STATUS" <<STATUSEOF
-{"running":$1,"pid":${2:-0},"exit_code":${3:-0},"restarts":$restart_count,"last_event_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","uptime_seconds":${4:-0}}
-STATUSEOF
-}
-
-restart_count=0
-backoff="$GATEWAY_RESTART_DELAY"
-set +e
-while true; do
-  echo "Starting OpenClaw gateway..."
-  rotate_gateway_log
-  start_time=$(date +%s)
-
-  # Tee gateway output to log file for diagnosis access via File Browser
-  openclaw gateway run --bind lan --port 18789 --force 2>&1 | tee -a "$GATEWAY_LOG" &
-  gw_pid=$!
-  write_gateway_status true "$gw_pid" 0 0
-
-  wait $gw_pid
-  exit_code=$?
-  end_time=$(date +%s)
-  runtime=$((end_time - start_time))
-  restart_count=$((restart_count + 1))
-  write_gateway_status false 0 "$exit_code" "$runtime"
-  echo "Gateway exited with code ${exit_code} after ${runtime}s (restart #${restart_count})."
-
-  # Kill orphaned openclaw children from the previous run so they don't
-  # accumulate across restarts (especially under OOM pressure).
-  pkill -9 -x openclaw 2>/dev/null || true
-
-  if [ "$runtime" -ge "$GATEWAY_RESET_AFTER" ]; then
-    backoff="$GATEWAY_RESTART_DELAY"
-    echo "Gateway ran for ${runtime}s; resetting backoff to ${backoff}s."
-  else
-    if [ "$backoff" -lt 1 ]; then
-      backoff=1
-    fi
-    if [ "$backoff" -lt "$GATEWAY_RESTART_MAX_DELAY" ]; then
-      backoff=$((backoff * 2))
-      if [ "$backoff" -gt "$GATEWAY_RESTART_MAX_DELAY" ]; then
-        backoff="$GATEWAY_RESTART_MAX_DELAY"
-      fi
-    fi
-  fi
-
-  echo "Restarting gateway in ${backoff}s..."
-  sleep "$backoff"
-done
+# Hand off to supervisord as PID 1
+exec supervisord -n -c /etc/supervisor/supervisord.conf
