@@ -54,6 +54,16 @@ ENV PATH="/root/.local/bin:${PATH}"
 RUN npm install -g mcporter && \
     rm -rf /root/.npm /tmp/*
 
+# Layer 9: File Browser (web file manager — REST API + UI)
+RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+
+# Layer 10: ttyd (web terminal over WebSocket)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then TTYD_ARCH="aarch64"; else TTYD_ARCH="x86_64"; fi && \
+    curl -fsSL -o /usr/local/bin/ttyd \
+      "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.${TTYD_ARCH}" && \
+    chmod +x /usr/local/bin/ttyd
+
 COPY phala-deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
