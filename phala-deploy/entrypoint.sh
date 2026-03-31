@@ -174,128 +174,21 @@ if command -v filebrowser >/dev/null 2>&1; then
   echo "File Browser configured (port $FB_PORT)."
 fi
 
-# --- Prepare Docker daemon ---
-if [ "${ENABLE_DOCKER:-}" = "1" ]; then
-  rm -f /var/run/docker.pid /var/run/containerd/containerd.pid
-fi
-
-# =============================================================================
-# Generate supervisord configuration
-# =============================================================================
-# All long-running processes are managed by supervisord instead of hand-rolled
-# bash loops. This gives us proper signal forwarding, process group management,
-# auto-restart with backoff, log rotation, and `supervisorctl` for inspection.
-# =============================================================================
-
-LOG_DIR="$DATA_DIR/openclaw/logs"
-mkdir -p "$LOG_DIR" /etc/supervisor/conf.d
-
-cat > /etc/supervisor/supervisord.conf <<SUPEOF
-[supervisord]
-nodaemon=true
-logfile=$LOG_DIR/supervisord.log
-logfile_maxbytes=10MB
-logfile_backups=1
-pidfile=/var/run/supervisord.pid
-
-[unix_http_server]
-file=/var/run/supervisor.sock
-
-[supervisorctl]
-serverurl=unix:///var/run/supervisor.sock
-
-[rpcinterface:supervisor]
-supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
-
-[include]
-files = /etc/supervisor/conf.d/*.conf
-SUPEOF
-
-# --- Gateway ---
-# killasgroup/stopasgroup ensures orphaned openclaw children are cleaned up on
-# restart (replaces the old `pkill -9 -x openclaw` hack).
-# startsecs=30: if gateway runs 30s+ it's considered stable; crash loops within
-# 30s trigger supervisord's built-in exponential backoff.
-cat > /etc/supervisor/conf.d/gateway.conf <<SUPEOF
-[program:gateway]
-command=openclaw gateway run --bind lan --port 18789 --force
-autorestart=true
-startsecs=30
-startretries=9999
-stdout_logfile=$LOG_DIR/gateway.log
-stdout_logfile_maxbytes=10MB
-stdout_logfile_backups=1
-redirect_stderr=true
-stopwaitsecs=10
-killasgroup=true
-stopasgroup=true
-SUPEOF
-
-# --- File Browser ---
-if command -v filebrowser >/dev/null 2>&1; then
-  cat > /etc/supervisor/conf.d/filebrowser.conf <<SUPEOF
-[program:filebrowser]
-command=filebrowser --database $DATA_DIR/.filebrowser.db
-autorestart=true
-startsecs=5
-startretries=9999
-stdout_logfile=$LOG_DIR/filebrowser.log
-stdout_logfile_maxbytes=5MB
-stdout_logfile_backups=1
-redirect_stderr=true
-SUPEOF
-fi
-
-# --- ttyd (web terminal) ---
-if command -v ttyd >/dev/null 2>&1; then
-  cat > /etc/supervisor/conf.d/ttyd.conf <<SUPEOF
-[program:ttyd]
-command=ttyd -p 18792 -W -c admin:%(ENV_GATEWAY_AUTH_TOKEN)s bash
-autorestart=true
-startsecs=3
-startretries=9999
-stdout_logfile=$LOG_DIR/ttyd.log
-stdout_logfile_maxbytes=5MB
-stdout_logfile_backups=1
-redirect_stderr=true
-SUPEOF
-fi
-
-# --- SSH daemon (only when explicitly enabled) ---
-if [ "${ENABLE_SSH:-}" = "1" ] && [ -x /usr/sbin/sshd ]; then
-  cat > /etc/supervisor/conf.d/sshd.conf <<SUPEOF
-[program:sshd]
-command=/usr/sbin/sshd -D
-autorestart=true
-startsecs=3
-startretries=9999
-stdout_logfile=$LOG_DIR/sshd.log
-stdout_logfile_maxbytes=5MB
-stdout_logfile_backups=1
-redirect_stderr=true
-SUPEOF
-else
+# --- Disable optional services unless explicitly enabled ---
+# Configs are baked into the image; remove the ones that aren't wanted.
+if [ "${ENABLE_SSH:-}" != "1" ]; then
+  rm -f /etc/supervisor/conf.d/sshd.conf
   echo "SSH daemon disabled (set ENABLE_SSH=1 to enable)."
 fi
-
-# --- Docker daemon (only when explicitly enabled) ---
 if [ "${ENABLE_DOCKER:-}" = "1" ]; then
-  cat > /etc/supervisor/conf.d/dockerd.conf <<SUPEOF
-[program:dockerd]
-command=dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs
-autorestart=true
-startsecs=10
-startretries=9999
-stdout_logfile=$LOG_DIR/dockerd.log
-stdout_logfile_maxbytes=10MB
-stdout_logfile_backups=1
-redirect_stderr=true
-SUPEOF
+  rm -f /var/run/docker.pid /var/run/containerd/containerd.pid
 else
+  rm -f /etc/supervisor/conf.d/dockerd.conf
   echo "Docker daemon disabled (set ENABLE_DOCKER=1 to enable)."
 fi
 
-echo "Supervisord configuration generated. Starting services..."
+# Ensure log directory exists (supervisord log paths reference it)
+mkdir -p "$DATA_DIR/openclaw/logs"
 
 # Hand off to supervisord as PID 1
 exec supervisord -n -c /etc/supervisor/supervisord.conf
