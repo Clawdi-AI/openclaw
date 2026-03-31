@@ -146,7 +146,7 @@ if [ -n "$MASTER_KEY" ]; then
 fi
 
 # --- Prepare SSH directories ---
-if [ -x /usr/sbin/sshd ]; then
+if [ "${ENABLE_SSH:-}" = "1" ] && [ -x /usr/sbin/sshd ]; then
   mkdir -p /var/run/sshd /root/.ssh
   chmod 700 /root/.ssh 2>/dev/null || true
   chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
@@ -261,8 +261,8 @@ redirect_stderr=true
 SUPEOF
 fi
 
-# --- SSH daemon (foreground mode) ---
-if [ -x /usr/sbin/sshd ]; then
+# --- SSH daemon (only when explicitly enabled) ---
+if [ "${ENABLE_SSH:-}" = "1" ] && [ -x /usr/sbin/sshd ]; then
   cat > /etc/supervisor/conf.d/sshd.conf <<SUPEOF
 [program:sshd]
 command=/usr/sbin/sshd -D
@@ -274,6 +274,8 @@ stdout_logfile_maxbytes=5MB
 stdout_logfile_backups=1
 redirect_stderr=true
 SUPEOF
+else
+  echo "SSH daemon disabled (set ENABLE_SSH=1 to enable)."
 fi
 
 # --- Docker daemon (only when explicitly enabled) ---
