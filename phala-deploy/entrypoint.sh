@@ -153,6 +153,7 @@ fi
 
 # --- Start File Browser (web file manager + REST API) ---
 # Auth uses the same GATEWAY_AUTH_TOKEN derived from MASTER_KEY.
+# Runs in a supervised restart loop (backgrounded).
 if command -v filebrowser >/dev/null 2>&1; then
   FB_DB="$DATA_DIR/.filebrowser.db"
   FB_PORT=18791
@@ -171,19 +172,32 @@ if command -v filebrowser >/dev/null 2>&1; then
   filebrowser users add admin "$FB_PASS" --database "$FB_DB" 2>/dev/null || \
     filebrowser users update admin --password "$FB_PASS" --database "$FB_DB" 2>/dev/null || true
 
-  filebrowser --database "$FB_DB" &
-  echo "File Browser started on port $FB_PORT."
+  (
+    while true; do
+      filebrowser --database "$FB_DB"
+      echo "File Browser exited, restarting in 5s..."
+      sleep 5
+    done
+  ) &
+  echo "File Browser started on port $FB_PORT (supervised)."
 else
   echo "File Browser not installed, skipping."
 fi
 
 # --- Start ttyd (web terminal) ---
 # Auth uses the same GATEWAY_AUTH_TOKEN derived from MASTER_KEY.
+# Runs in a supervised restart loop (backgrounded).
 if command -v ttyd >/dev/null 2>&1; then
   TTYD_PORT=18792
   TTYD_PASS="${GATEWAY_AUTH_TOKEN:-admin}"
-  ttyd -p "$TTYD_PORT" -W -c "admin:${TTYD_PASS}" bash &
-  echo "ttyd started on port $TTYD_PORT."
+  (
+    while true; do
+      ttyd -p "$TTYD_PORT" -W -c "admin:${TTYD_PASS}" bash
+      echo "ttyd exited, restarting in 5s..."
+      sleep 5
+    done
+  ) &
+  echo "ttyd started on port $TTYD_PORT (supervised)."
 else
   echo "ttyd not installed, skipping."
 fi
