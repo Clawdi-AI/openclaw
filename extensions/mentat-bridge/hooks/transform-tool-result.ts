@@ -2,7 +2,7 @@ import type { MentatClient } from "../client.js";
 import type { MentatBridgeConfig } from "../config.js";
 import type { DocMetaCache, SessionReadTracker } from "../session-state.js";
 import { isWebFetchTool, urlToFilename } from "../source-map.js";
-import { tocTitles } from "../types.js";
+import { buildCompressedSummary, estimateTokens } from "./util.js";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const FETCH_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
@@ -24,11 +24,6 @@ async function fetchRawHtml(url: string): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-/** Rough token estimate: ~4 chars per token. */
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
 }
 
 type PluginApi = {
@@ -143,20 +138,7 @@ export function registerTransformToolResultHook(
     }
 
     // Build compressed replacement result
-    const parts: string[] = [
-      `<mentat-indexed doc_id="${meta.doc_id}" filename="${meta.filename}">`,
-    ];
-    if (meta.brief_intro) {
-      parts.push(`Brief: ${meta.brief_intro}`);
-    }
-    const toc = tocTitles(meta);
-    if (toc.length > 0) {
-      parts.push(`Sections: ${toc.join(", ")}`);
-    }
-    parts.push("Use read_segment(doc_id, section_name) to read specific sections.");
-    parts.push("</mentat-indexed>");
-
-    const compressedText = parts.join("\n");
+    const compressedText = buildCompressedSummary(meta);
     const compressedTokens = estimateTokens(compressedText);
     api.logger.info(
       `mentat-bridge: compressed ${event.toolName} result → ${meta.filename} (~${tokens} → ~${compressedTokens} tokens)`,

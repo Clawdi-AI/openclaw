@@ -39,6 +39,7 @@ export type SearchRequest = {
   collection?: string;
   collections?: string[];
   source?: string;
+  metadata_filter?: Record<string, unknown>;
 };
 
 export type MentatChunkResult = {
