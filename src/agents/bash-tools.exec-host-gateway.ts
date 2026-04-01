@@ -146,6 +146,7 @@ export async function processGatewayAllowlist(
       approvalRunningNoticeMs: params.approvalRunningNoticeMs,
       createApprovalSlug,
       turnSourceChannel: params.turnSourceChannel,
+      turnSourceTo: params.turnSourceTo,
       turnSourceAccountId: params.turnSourceAccountId,
     });
     const registerGatewayApproval = async (approvalId: string) =>

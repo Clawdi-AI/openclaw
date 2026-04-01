@@ -107,6 +107,39 @@ describe("resolveExecApprovalInitiatingSurfaceState", () => {
     });
 
     expect(loadConfigMock).not.toHaveBeenCalled();
+    expect(isDiscordExecApprovalClientEnabledMock).toHaveBeenCalledWith({
+      cfg,
+      accountId: "main",
+      turnSourceChannel: "discord",
+      turnSourceTo: undefined,
+      turnSourceAccountId: "main",
+    });
+  });
+
+  it("passes the active route to discord client enablement checks", () => {
+    isDiscordExecApprovalClientEnabledMock.mockReturnValueOnce(true);
+    const cfg = { channels: {} };
+
+    expect(
+      resolveExecApprovalInitiatingSurfaceState({
+        channel: "discord",
+        accountId: "default",
+        to: "user:4242",
+        cfg: cfg as never,
+      }),
+    ).toEqual({
+      kind: "enabled",
+      channel: "discord",
+      channelLabel: "Discord",
+    });
+
+    expect(isDiscordExecApprovalClientEnabledMock).toHaveBeenCalledWith({
+      cfg,
+      accountId: "default",
+      turnSourceChannel: "discord",
+      turnSourceTo: "user:4242",
+      turnSourceAccountId: "default",
+    });
   });
 
   it("loads config lazily when cfg is omitted and marks unsupported channels", () => {

@@ -34,6 +34,7 @@ function labelForChannel(channel?: string): string {
 export function resolveExecApprovalInitiatingSurfaceState(params: {
   channel?: string | null;
   accountId?: string | null;
+  to?: string | null;
   cfg?: OpenClawConfig;
 }): ExecApprovalInitiatingSurfaceState {
   const channel = normalizeMessageChannel(params.channel);
@@ -49,7 +50,13 @@ export function resolveExecApprovalInitiatingSurfaceState(params: {
       : { kind: "disabled", channel, channelLabel };
   }
   if (channel === "discord") {
-    return isDiscordExecApprovalClientEnabled({ cfg, accountId: params.accountId })
+    return isDiscordExecApprovalClientEnabled({
+      cfg,
+      accountId: params.accountId,
+      turnSourceChannel: channel,
+      turnSourceTo: params.to,
+      turnSourceAccountId: params.accountId,
+    })
       ? { kind: "enabled", channel, channelLabel }
       : { kind: "disabled", channel, channelLabel };
   }

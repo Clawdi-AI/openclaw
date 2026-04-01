@@ -152,6 +152,13 @@ export class FakeDiscordApi {
     current.push(message);
     current.sort((left, right) => Number(left.id) - Number(right.id));
     this.pendingMessagesByChannel.set(channelId, current);
+    this.gatewayFrames.push({
+      op: 0,
+      t: "MESSAGE_CREATE",
+      s: this.gatewaySequence++,
+      d: message,
+    });
+    this.flushGatewayFrames();
   }
 
   enqueueGuildMessage(params: {

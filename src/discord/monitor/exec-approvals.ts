@@ -28,6 +28,10 @@ import { normalizeAccountId, resolveAgentIdFromSessionKey } from "../../routing/
 import type { RuntimeEnv } from "../../runtime.js";
 import { compileSafeRegex, testRegexWithBoundedInput } from "../../security/safe-regex.js";
 import { normalizeMessageChannel } from "../../utils/message-channel.js";
+import {
+  getDiscordExecApprovalApprovers,
+  resolveDiscordExecApprovalSourceUserId,
+} from "../exec-approvals.js";
 import { createDiscordClient, stripUndefinedFields } from "../send.shared.js";
 import { DiscordUiContainer } from "../ui.js";
 
@@ -380,7 +384,13 @@ export class DiscordExecApprovalHandler {
     if (!config.enabled) {
       return false;
     }
-    if (!config.approvers || config.approvers.length === 0) {
+    const sourceUserId = resolveDiscordExecApprovalSourceUserId({
+      accountId: this.opts.accountId,
+      turnSourceChannel: request.request.turnSourceChannel,
+      turnSourceTo: request.request.turnSourceTo,
+      turnSourceAccountId: request.request.turnSourceAccountId,
+    });
+    if (this.getApprovers().length === 0 && !sourceUserId) {
       return false;
     }
 
@@ -435,11 +445,6 @@ export class DiscordExecApprovalHandler {
     const config = this.opts.config;
     if (!config.enabled) {
       logDebug("discord exec approvals: disabled");
-      return;
-    }
-
-    if (!config.approvers || config.approvers.length === 0) {
-      logDebug("discord exec approvals: no approvers configured");
       return;
     }
 
@@ -584,10 +589,21 @@ export class DiscordExecApprovalHandler {
 
     // Send to approver DMs if configured (or as fallback when channel extraction fails)
     if (sendToDm || fallbackToDm) {
-      const approvers = this.opts.config.approvers ?? [];
+      const userIds = new Set<string>();
+      const sourceUserId = resolveDiscordExecApprovalSourceUserId({
+        accountId: this.opts.accountId,
+        turnSourceChannel: request.request.turnSourceChannel,
+        turnSourceTo: request.request.turnSourceTo,
+        turnSourceAccountId: request.request.turnSourceAccountId,
+      });
+      if (sourceUserId) {
+        userIds.add(sourceUserId);
+      }
+      for (const approver of this.getApprovers()) {
+        userIds.add(String(approver));
+      }
 
-      for (const approver of approvers) {
-        const userId = String(approver);
+      for (const userId of userIds) {
         try {
           // Create DM channel
           const dmChannel = (await discordRequest(
@@ -786,7 +802,10 @@ export class DiscordExecApprovalHandler {
 
   /** Return the list of configured approver IDs. */
   getApprovers(): string[] {
-    return this.opts.config.approvers ?? [];
+    return getDiscordExecApprovalApprovers({
+      cfg: this.opts.cfg,
+      accountId: this.opts.accountId,
+    });
   }
 }
 

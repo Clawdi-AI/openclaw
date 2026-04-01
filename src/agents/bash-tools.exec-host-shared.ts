@@ -72,6 +72,7 @@ export type DefaultExecApprovalRequestArgs = {
   approvalRunningNoticeMs: number;
   createApprovalSlug: (approvalId: string) => string;
   turnSourceChannel?: string;
+  turnSourceTo?: string;
   turnSourceAccountId?: string;
 };
 
@@ -208,6 +209,7 @@ export async function resolveApprovalDecisionOrUndefined(params: {
 
 export function resolveExecApprovalUnavailableState(params: {
   turnSourceChannel?: string;
+  turnSourceTo?: string;
   turnSourceAccountId?: string;
   preResolvedDecision: string | null | undefined;
 }): {
@@ -217,6 +219,7 @@ export function resolveExecApprovalUnavailableState(params: {
 } {
   const initiatingSurface = resolveExecApprovalInitiatingSurfaceState({
     channel: params.turnSourceChannel,
+    to: params.turnSourceTo,
     accountId: params.turnSourceAccountId,
   });
   const sentApproverDms =
@@ -242,6 +245,7 @@ export async function createAndRegisterDefaultExecApprovalRequest(params: {
   approvalRunningNoticeMs: number;
   createApprovalSlug: (approvalId: string) => string;
   turnSourceChannel?: string;
+  turnSourceTo?: string;
   turnSourceAccountId?: string;
   register: (approvalId: string) => Promise<ExecApprovalRegistration>;
 }): Promise<RegisteredExecApprovalRequestContext> {
@@ -261,6 +265,7 @@ export async function createAndRegisterDefaultExecApprovalRequest(params: {
   const { initiatingSurface, sentApproverDms, unavailableReason } =
     resolveExecApprovalUnavailableState({
       turnSourceChannel: params.turnSourceChannel,
+      turnSourceTo: params.turnSourceTo,
       turnSourceAccountId: params.turnSourceAccountId,
       preResolvedDecision,
     });
@@ -288,6 +293,7 @@ export function buildDefaultExecApprovalRequestArgs(
     approvalRunningNoticeMs: params.approvalRunningNoticeMs,
     createApprovalSlug: params.createApprovalSlug,
     turnSourceChannel: params.turnSourceChannel,
+    turnSourceTo: params.turnSourceTo,
     turnSourceAccountId: params.turnSourceAccountId,
   };
 }
