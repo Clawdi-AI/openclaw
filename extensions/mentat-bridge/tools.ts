@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import type { MentatClient } from "./client.js";
 import type { MentatBridgeConfig } from "./config.js";
+import type { ActiveSessionTracker } from "./session-state.js";
 
 type PluginApi = {
   registerTool: (tool: unknown, opts?: { name?: string }) => void;
@@ -23,6 +24,7 @@ export function registerMentatTools(
   api: PluginApi,
   client: MentatClient,
   _cfg: MentatBridgeConfig,
+  activeSessionTracker: ActiveSessionTracker,
 ) {
   // 1. search_memory — unified search (replaces memory_recall + memory_search + memory_get)
   api.registerTool(
@@ -487,5 +489,99 @@ export function registerMentatTools(
       },
     },
     { name: "memory_status" },
+  );
+
+  // 8. search_chat_history — search past conversations
+  // Registered as a tool factory so each agent run receives its own ctx.sessionId,
+  // avoiding the singleton ActiveSessionTracker which breaks with concurrent sessions.
+  api.registerTool(
+    (ctx: { sessionId?: string }) => ({
+      name: "search_chat_history",
+      label: "Search Chat History",
+      description:
+        "Search past conversations from other sessions (current session is excluded since it is already in context). Returns doc_ids — use get_doc_meta / read_segment for full content.",
+      parameters: Type.Object({
+        query: Type.String({ description: "Natural language search query" }),
+        top_k: Type.Optional(Type.Number({ description: "Maximum results (default: 5)" })),
+      }),
+      async execute(_toolCallId: string, params: { query: string; top_k?: number }) {
+        if (!client.isHealthy()) return unhealthyResult("search_chat_history");
+
+        const topK = params.top_k ?? 5;
+        // Prefer per-run ctx.sessionId (accurate for concurrent sessions);
+        // fall back to singleton tracker for backward compat.
+        const currentSessionId = ctx.sessionId ?? activeSessionTracker.get();
+
+        api.logger.info(
+          `search_chat_history: currentSessionId=${currentSessionId ?? "NULL"} (ctx=${ctx.sessionId ?? "NULL"}, tracker=${activeSessionTracker.get() ?? "NULL"}), query="${params.query.slice(0, 50)}"`,
+        );
+
+        const searchReq: {
+          query: string;
+          top_k: number;
+          collection: string;
+          metadata_filter?: Record<string, unknown>;
+        } = {
+          query: params.query,
+          top_k: topK,
+          collection: "chat_history",
+        };
+
+        // Exclude current session — it's already in the LLM context
+        if (currentSessionId) {
+          searchReq.metadata_filter = {
+            session_id: { op: "neq", value: currentSessionId },
+          };
+        } else {
+          api.logger.warn(
+            "search_chat_history: no active session ID — cannot exclude current session!",
+          );
+        }
+
+        api.logger.info(`search_chat_history: searchReq=${JSON.stringify(searchReq)}`);
+
+        const results = await client.search(searchReq);
+        if (!results || results.length === 0) {
+          return {
+            content: [
+              { type: "text" as const, text: "No matching conversations found in past sessions." },
+            ],
+            details: { count: 0 },
+          };
+        }
+
+        // Log result session_ids for debugging exclusion
+        if (results.length > 0) {
+          const resultSessionIds = results.map(
+            (r) => r.session_id ?? r.metadata?.session_id ?? "no-session-id",
+          );
+          api.logger.info(
+            `search_chat_history: result session_ids=${JSON.stringify(resultSessionIds)}, currentSessionId=${currentSessionId ?? "NULL"}`,
+          );
+        }
+
+        const text = results
+          .map((r, i) => {
+            // Extract session ID from filename like "abc-123.jsonl@4581"
+            const fnMatch = r.filename?.match(/^([^.]+)\.jsonl@?(\d*)$/);
+            const sessionId = fnMatch?.[1] ?? r.filename ?? "unknown";
+            const shortSession = sessionId.slice(0, 8);
+            const snippet = r.content?.slice(0, 300) ?? r.summary ?? "";
+            return `${i + 1}. session:${shortSession}… (doc: ${r.doc_id.slice(0, 12)})\n${snippet}`;
+          })
+          .join("\n\n");
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Found ${results.length} conversation(s) from past sessions:\n\n${text}`,
+            },
+          ],
+          details: { count: results.length, results },
+        };
+      },
+    }),
+    { name: "search_chat_history" },
   );
 }

@@ -1,6 +1,24 @@
-/** Per-session state tracking for read history and doc-meta cache. */
+/** Per-session state tracking for read history, doc-meta cache, and active session. */
 
 import type { DocMeta } from "./types.js";
+
+/**
+ * Tracks the currently active session ID.
+ * Set on session_start, cleared on session_end.
+ * Used by search_chat_history to scope queries to current session.
+ */
+export class ActiveSessionTracker {
+  private _sessionId: string | null = null;
+  set(id: string) {
+    this._sessionId = id;
+  }
+  get(): string | null {
+    return this._sessionId;
+  }
+  clear() {
+    this._sessionId = null;
+  }
+}
 
 /**
  * Tracks which documents have been read during each session.

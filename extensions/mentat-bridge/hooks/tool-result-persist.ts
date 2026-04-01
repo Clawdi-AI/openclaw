@@ -2,6 +2,7 @@ import type { MentatBridgeConfig } from "../config.js";
 import type { DocMetaCache } from "../session-state.js";
 import { isFileReadTool, isWebFetchTool } from "../source-map.js";
 import type { DocMeta } from "../types.js";
+import { buildCompressedSummary, estimateTokens } from "./util.js";
 
 type PluginApi = {
   on: (
@@ -38,11 +39,6 @@ type ToolResultPersistResult = {
   message?: AgentMessage;
 };
 
-/** Rough token estimate: ~4 chars per token. */
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
 /** Extract text content from an AgentMessage. */
 function extractTextFromMessage(message: AgentMessage): string | null {
   const content = message.content;
@@ -76,26 +72,9 @@ function extractPathFromMessage(message: AgentMessage): string | null {
 
 /** Build a compressed replacement for a large tool result. */
 function compressToolResultMessage(message: AgentMessage, meta: DocMeta): AgentMessage {
-  const parts: string[] = [`<mentat-indexed doc_id="${meta.doc_id}" filename="${meta.filename}">`];
-
-  if (meta.brief_intro) {
-    parts.push(`Brief: ${meta.brief_intro}`);
-  }
-
-  const toc = (meta.toc_entries ?? []).map((e) => e.title);
-  if (toc.length > 0) {
-    parts.push(`Sections: ${toc.join(", ")}`);
-  }
-
-  parts.push("Use read_segment(doc_id, section_name) to read specific sections.");
-  parts.push("</mentat-indexed>");
-
-  const compressedText = parts.join("\n");
-
-  // Preserve message structure, replace content
   return {
     ...message,
-    content: [{ type: "text", text: compressedText }],
+    content: [{ type: "text", text: buildCompressedSummary(meta) }],
   };
 }
 

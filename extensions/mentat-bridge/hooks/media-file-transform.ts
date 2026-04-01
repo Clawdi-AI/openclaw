@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MentatClient } from "../client.js";
 import type { MentatBridgeConfig } from "../config.js";
+import { buildCompressedSummary, estimateTokens } from "./util.js";
 
 type PluginApi = {
   on: (
@@ -23,33 +24,6 @@ type MediaFileTransformEvent = {
 type MediaFileTransformResult = {
   content?: string;
 };
-
-/** Rough token estimate: ~4 chars per token. */
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
-/**
- * Build a compressed summary block from doc metadata.
- */
-function buildSummary(meta: {
-  doc_id: string;
-  brief_intro?: string;
-  toc_entries?: Array<{ title: string }>;
-}): string {
-  const parts: string[] = [`[Indexed in Mentat — doc_id: ${meta.doc_id}]`];
-  if (meta.brief_intro) {
-    parts.push(`Brief: ${meta.brief_intro}`);
-  }
-  const toc = (meta.toc_entries ?? []).map((e) => e.title);
-  if (toc.length > 0) {
-    parts.push(`Sections: ${toc.join(", ")}`);
-  }
-  parts.push(
-    "Use get_doc_meta(doc_id) for structure, then read_segment(doc_id, section) for content.",
-  );
-  return parts.join("\n");
-}
 
 export function registerMediaFileTransformHook(
   api: PluginApi,
@@ -78,7 +52,7 @@ export function registerMediaFileTransformHook(
         const meta = await client.getDocMeta(result.doc_id);
         if (!meta) return undefined;
 
-        const summary = buildSummary(meta);
+        const summary = buildCompressedSummary(meta, { tagStyle: "bracket" });
         api.logger.debug?.(
           `mentat-bridge: indexed full file ${event.filename} via indexFile (doc_id: ${meta.doc_id})`,
         );
@@ -105,7 +79,7 @@ export function registerMediaFileTransformHook(
     const meta = await client.getDocMeta(result.doc_id);
     if (!meta) return undefined;
 
-    const summary = buildSummary(meta);
+    const summary = buildCompressedSummary(meta, { tagStyle: "bracket" });
     api.logger.debug?.(
       `mentat-bridge: compressed channel attachment ${event.filename} (${estimateTokens(event.content)} → ~${estimateTokens(summary)} tokens)`,
     );

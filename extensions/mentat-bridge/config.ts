@@ -6,6 +6,7 @@ export type MentatBridgeConfig = {
   autoCapture: boolean;
   compressResults: boolean;
   compressThresholdTokens: number;
+  chatHistory: boolean;
 };
 
 const DEFAULTS: MentatBridgeConfig = {
@@ -16,6 +17,7 @@ const DEFAULTS: MentatBridgeConfig = {
   autoCapture: false,
   compressResults: true,
   compressThresholdTokens: 2000,
+  chatHistory: true,
 };
 
 const ALLOWED_KEYS = [
@@ -26,6 +28,7 @@ const ALLOWED_KEYS = [
   "autoCapture",
   "compressResults",
   "compressThresholdTokens",
+  "chatHistory",
 ] as const;
 
 function assertAllowedKeys(
@@ -78,6 +81,7 @@ export const mentatBridgeConfigSchema = {
       compressResults:
         typeof cfg.compressResults === "boolean" ? cfg.compressResults : DEFAULTS.compressResults,
       compressThresholdTokens,
+      chatHistory: typeof cfg.chatHistory === "boolean" ? cfg.chatHistory : DEFAULTS.chatHistory,
     };
   },
   uiHints: {

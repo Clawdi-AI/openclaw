@@ -18,10 +18,10 @@ import {
   formatHotContext,
   formatRelevantMemoriesContext,
 } from "./prompt.js";
-import { DocMetaCache, SessionReadTracker } from "./session-state.js";
+import { ActiveSessionTracker, DocMetaCache, SessionReadTracker } from "./session-state.js";
 import { registerMentatTools } from "./tools.js";
 
-async function ensureDefaultCollections(client: MentatClient) {
+async function ensureDefaultCollections(client: MentatClient, chatHistory: boolean) {
   // memory: auto-collect memory_store + memory file changes
   await client.createCollection("memory", {
     metadata: { type: "system", description: "Long-term memory" },
@@ -34,6 +34,41 @@ async function ensureDefaultCollections(client: MentatClient) {
     metadata: { type: "system", description: "Agent-read files" },
     auto_add_sources: ["openclaw:*"],
   });
+
+  // chat_history: append-mode watch on session JSONL files
+  if (chatHistory) {
+    await client.createCollection("chat_history", {
+      metadata: {
+        type: "system",
+        description: "Agent chat history",
+        watch_mode: "append",
+        initial_scan_recent_days: 7,
+        watch_probe_config: {
+          filters: [
+            { field: "type", op: "eq", value: "message" },
+            { field: "message.role", op: "in", value: ["user", "assistant"] },
+          ],
+          text_fields: ["message.content.text"],
+          label_field: "message.role",
+          group_size: 2,
+          timestamp_field: "timestamp",
+          text_strip_patterns: [
+            // Strip OpenClaw metadata preambles injected into user messages:
+            // - <relevant-memories>...</relevant-memories> blocks
+            "<relevant-memories>[\\s\\S]*?</relevant-memories>\\s*",
+            // - "Conversation info (untrusted metadata):\n```json\n{...}\n```\n" blocks
+            "Conversation info \\(untrusted metadata\\):\\s*```json\\s*\\{[\\s\\S]*?\\}\\s*```\\s*",
+            // - "Sender (untrusted metadata):\n```json\n{...}\n```\n" blocks
+            "Sender \\(untrusted metadata\\):\\s*```json\\s*\\{[\\s\\S]*?\\}\\s*```\\s*",
+            // - Timestamp lines like "[Mon 2026-03-30 07:36 UTC]"
+            "\\[\\w{3} \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} \\w+\\]\\s*",
+          ],
+        },
+      },
+      watch_paths: [join(homedir(), ".openclaw", "agents", "main", "sessions")],
+      watch_ignore: ["sessions.json", "sessions.json.bak.*", "*.reset.*", "*.deleted.*", "*.lock"],
+    });
+  }
 }
 
 const mentatBridgePlugin = {
@@ -53,6 +88,7 @@ const mentatBridgePlugin = {
     const client = new MentatClient(cfg.mentatUrl, api.logger);
     const readTracker = new SessionReadTracker();
     const docMetaCache = new DocMetaCache();
+    const activeSessionTracker = new ActiveSessionTracker();
 
     // ── Service lifecycle ──────────────────────────────────────────
 
@@ -61,7 +97,7 @@ const mentatBridgePlugin = {
       async start() {
         await client.start();
         if (client.isHealthy()) {
-          await ensureDefaultCollections(client);
+          await ensureDefaultCollections(client, cfg.chatHistory);
           api.logger.info(`mentat-bridge: started (url: ${cfg.mentatUrl})`);
         } else {
           api.logger.warn(`mentat-bridge: started but server unreachable (url: ${cfg.mentatUrl})`);
@@ -134,7 +170,12 @@ const mentatBridgePlugin = {
 
     // ── Tools (7 tools) ────────────────────────────────────────────
 
-    registerMentatTools(api as Parameters<typeof registerMentatTools>[0], client, cfg);
+    registerMentatTools(
+      api as Parameters<typeof registerMentatTools>[0],
+      client,
+      cfg,
+      activeSessionTracker,
+    );
 
     // ── CLI ─────────────────────────────────────────────────────────
 
@@ -206,6 +247,7 @@ const mentatBridgePlugin = {
       api as Parameters<typeof registerSessionLifecycleHooks>[0],
       client,
       readTracker,
+      activeSessionTracker,
     );
   },
 };

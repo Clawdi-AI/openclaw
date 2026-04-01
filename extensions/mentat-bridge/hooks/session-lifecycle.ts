@@ -1,5 +1,5 @@
 import type { MentatClient } from "../client.js";
-import type { SessionReadTracker } from "../session-state.js";
+import type { ActiveSessionTracker, SessionReadTracker } from "../session-state.js";
 
 type PluginApi = {
   on: (
@@ -40,13 +40,18 @@ export function registerSessionLifecycleHooks(
   api: PluginApi,
   client: MentatClient,
   readTracker: SessionReadTracker,
+  activeSessionTracker: ActiveSessionTracker,
 ) {
-  // session_start: create ephemeral session collection
+  // session_start: create ephemeral session collection + track active session
   api.on("session_start", async (event, _ctx) => {
-    await client.ensureStarted();
-    if (!client.isHealthy()) return;
     const ev = event as SessionStartEvent;
     if (!ev.sessionId) return;
+
+    // Track active session for chat history scope
+    activeSessionTracker.set(ev.sessionId);
+
+    await client.ensureStarted();
+    if (!client.isHealthy()) return;
 
     const collName = `ses_${ev.sessionId}`;
     await client.createCollection(collName, {
@@ -64,6 +69,7 @@ export function registerSessionLifecycleHooks(
     const ev = event as SessionEndEvent;
 
     // Clean up in-memory state
+    activeSessionTracker.clear();
     if (ev.sessionKey) {
       readTracker.clearSession(ev.sessionKey);
     }
