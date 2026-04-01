@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Context, Hono } from "hono";
 import { extractToken, timingSafeTokenEqual } from "../auth";
 
-const LOGS_DIR = "/data/openclaw/logs";
+const LOGS_DIR = "/var/log/supervisor";
 
 const VALID_SOURCES = new Set(["gateway", "controller", "ttyd", "supervisord", "dockerd"]);
 
