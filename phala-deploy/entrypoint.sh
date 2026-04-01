@@ -165,8 +165,9 @@ else
   echo "Docker daemon disabled (set ENABLE_DOCKER=1 to enable)."
 fi
 
-# Ensure log directory exists (supervisord log paths reference it)
-mkdir -p "$DATA_DIR/openclaw/logs"
+# Ensure log directories exist
+mkdir -p "$DATA_DIR/openclaw/logs"   # gateway logs (user-visible, persistent)
+mkdir -p /var/log/supervisor          # internal service logs (not persistent)
 
 # Hand off to supervisord as PID 1
 exec supervisord -n -c /etc/supervisor/supervisord.conf

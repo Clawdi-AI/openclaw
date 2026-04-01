@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Layer 1: System packages (Docker binaries installed below)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg git bash tmux unzip lsof \
+      ca-certificates curl gnupg git bash zsh tmux unzip lsof \
       iptables lsb-release sudo \
       python3-pip python3-venv supervisor && \
     update-alternatives --set iptables /usr/sbin/iptables-legacy && \
@@ -53,6 +53,14 @@ ENV PATH="/root/.local/bin:${PATH}"
 # Layer 8: mcporter (MCP client CLI, used by composio skill)
 RUN npm install -g mcporter && \
     rm -rf /root/.npm /tmp/*
+
+# Layer 8.1: Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code && \
+    rm -rf /root/.npm /tmp/*
+
+# Layer 8.2: Oh My Zsh + set zsh as default shell
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended && \
+    chsh -s $(which zsh) root
 
 # Layer 9: ttyd (headless PTY server — proxied through controller)
 RUN ARCH=$(uname -m) && \
