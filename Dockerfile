@@ -232,6 +232,10 @@ ENV NODE_ENV=production
 # This reduces the attack surface by preventing container escape via root privileges
 USER node
 
+# Pre-install the Clawdi platform plugin (RPCs, Redpill provider, built-in skills).
+ARG CLAWDI_PLUGIN_VERSION="latest"
+RUN node /app/openclaw.mjs plugins install "@clawdi/openclaw-plugin@${CLAWDI_PLUGIN_VERSION}"
+
 # Start gateway server with default config.
 # Binds to loopback (127.0.0.1) by default for security.
 #
