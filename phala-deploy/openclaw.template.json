@@ -138,6 +138,9 @@
     }
   },
   "tools": {
+    "exec": {
+      "ask": "off"
+    },
     "media": {
       "audio": {
         "enabled": true,

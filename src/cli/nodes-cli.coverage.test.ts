@@ -261,6 +261,44 @@ describe("nodes-cli coverage", () => {
     expect(getApprovalRequestCall()).toBeNull();
   });
 
+  it("keeps local configured ask=off authoritative over stricter CLI ask", async () => {
+    localExecApprovalsFile = {
+      version: 1,
+      defaults: {
+        security: "allowlist",
+        ask: "off",
+        askFallback: "deny",
+      },
+      agents: {},
+    };
+    nodeExecApprovalsFile = {
+      version: 1,
+      defaults: {
+        security: "allowlist",
+        askFallback: "deny",
+      },
+      agents: {},
+    };
+
+    const invoke = await runNodesCommand([
+      "nodes",
+      "run",
+      "--node",
+      "mac-1",
+      "--ask",
+      "always",
+      "echo",
+      "hi",
+    ]);
+
+    expect(invoke?.params?.params).toMatchObject({
+      command: ["echo", "hi"],
+      approved: false,
+    });
+    expect(invoke?.params?.params).not.toHaveProperty("approvalDecision");
+    expect(getApprovalRequestCall()).toBeNull();
+  });
+
   it("invokes system.notify with provided fields", async () => {
     const invoke = await runNodesCommand([
       "nodes",

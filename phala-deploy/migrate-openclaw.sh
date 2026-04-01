@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Migrate a running CVM's openclaw.json to the latest config shape.
+# Migrate a running CVM's OpenClaw config and exec approval policy to the latest shape.
 #
-# Downloads openclaw.json from the CVM container, runs each migration
-# script locally, and uploads it back only if something changed.
+# Downloads openclaw.json and exec-approvals.json from the CVM container,
+# runs each migration locally, and uploads files back only if something changed.
 # Each migration checks the config first and skips if already applied.
 #
 # Usage:
@@ -35,20 +35,36 @@ done
 [[ -n "$CVM" ]] || die "usage: migrate-openclaw.sh <CVM>"
 
 REMOTE_CFG="/root/.openclaw/openclaw.json"
-REMOTE_TMP="/tmp/openclaw.json"
-LOCAL_TMP="$(mktemp /tmp/openclaw-migrate-XXXXXX.json)"
-trap 'rm -f "$LOCAL_TMP"' EXIT
+REMOTE_EXEC_APPROVALS="/root/.openclaw/exec-approvals.json"
+REMOTE_CFG_TMP="/tmp/openclaw.json"
+REMOTE_EXEC_APPROVALS_TMP="/tmp/exec-approvals.json"
+LOCAL_CFG_TMP="$(mktemp /tmp/openclaw-migrate-config-XXXXXX.json)"
+LOCAL_EXEC_APPROVALS_TMP="$(mktemp /tmp/openclaw-migrate-exec-approvals-XXXXXX.json)"
+trap 'rm -f "$LOCAL_CFG_TMP" "$LOCAL_EXEC_APPROVALS_TMP"' EXIT
 
 # ── download openclaw.json ──────────────────────────────────────────────────
 
 log "Downloading openclaw.json from CVM ${CVM}..."
-phala ssh "$CVM" -- docker cp "openclaw:${REMOTE_CFG}" "$REMOTE_TMP" \
+phala ssh "$CVM" -- docker cp "openclaw:${REMOTE_CFG}" "$REMOTE_CFG_TMP" \
   || die "docker cp from container failed"
-phala cp "${CVM}:${REMOTE_TMP}" "$LOCAL_TMP" \
+phala cp "${CVM}:${REMOTE_CFG_TMP}" "$LOCAL_CFG_TMP" \
   || die "phala cp download failed"
-ok "Downloaded openclaw.json ($(wc -c < "$LOCAL_TMP") bytes)"
+ok "Downloaded openclaw.json ($(wc -c < "$LOCAL_CFG_TMP") bytes)"
 
-CHECKSUM_BEFORE=$(md5sum "$LOCAL_TMP" | cut -d' ' -f1)
+if phala ssh "$CVM" -- docker exec openclaw test -f "$REMOTE_EXEC_APPROVALS" >/dev/null 2>&1; then
+  log "Downloading exec-approvals.json from CVM ${CVM}..."
+  phala ssh "$CVM" -- docker cp "openclaw:${REMOTE_EXEC_APPROVALS}" "$REMOTE_EXEC_APPROVALS_TMP" \
+    || die "docker cp from container failed"
+  phala cp "${CVM}:${REMOTE_EXEC_APPROVALS_TMP}" "$LOCAL_EXEC_APPROVALS_TMP" \
+    || die "phala cp download failed"
+  ok "Downloaded exec-approvals.json ($(wc -c < "$LOCAL_EXEC_APPROVALS_TMP") bytes)"
+else
+  printf '' > "$LOCAL_EXEC_APPROVALS_TMP"
+  log "exec-approvals.json missing on CVM ${CVM} — will backfill it if migration requires"
+fi
+
+CFG_CHECKSUM_BEFORE=$(md5sum "$LOCAL_CFG_TMP" | cut -d' ' -f1)
+EXEC_APPROVALS_CHECKSUM_BEFORE=$(md5sum "$LOCAL_EXEC_APPROVALS_TMP" | cut -d' ' -f1)
 
 # ── migrations ──────────────────────────────────────────────────────────────
 # Each migration is a self-contained node script that:
@@ -95,7 +111,7 @@ if [[ -n "${COMPOSEIO_ADMIN_API:-}" ]]; then
       console.log("  composio: configured (MCP URL: " + mcpUrl + ")");
     }
     main().catch(e => { console.error("  composio: " + e.message); process.exit(1); });
-  ' "$LOCAL_TMP" || die "composio migration failed"
+  ' "$LOCAL_CFG_TMP" || die "composio migration failed"
 else
   log "Migration: composio — skipped (no COMPOSEIO_ADMIN_API)"
 fi
@@ -119,7 +135,7 @@ if [[ -n "${BRAVE_SEARCH_API_KEY:-}" ]]; then
       console.log("  brave-search: configured (provider: brave)");
     }
     main();
-  ' "$LOCAL_TMP" || die "brave-search migration failed"
+  ' "$LOCAL_CFG_TMP" || die "brave-search migration failed"
 else
   log "Migration: brave-search — skipped (no BRAVE_SEARCH_API_KEY)"
 fi
@@ -199,19 +215,63 @@ if [[ -n "${CODEX_API_ENDPOINT:-}" && -n "${CODEX_API_KEY:-}" ]]; then
     }
 
     main();
-  ' "$LOCAL_TMP" || die "codex-provider migration failed"
+  ' "$LOCAL_CFG_TMP" || die "codex-provider migration failed"
 else
   log "Migration: codex-provider — skipped (CODEX_API_ENDPOINT/CODEX_API_KEY not set)"
 fi
+
+# --- Migration: exec policy floor + exec approvals bootstrap ---
+log "Migration: exec-policy..."
+node -e '
+  const fs = require("fs");
+
+  const [cfgPath, approvalsPath] = process.argv.slice(1);
+  const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+
+  if (!cfg.tools) cfg.tools = {};
+  if (!cfg.tools.exec) cfg.tools.exec = {};
+  let cfgChanged = false;
+  if (typeof cfg.tools.exec.ask !== "string" || !cfg.tools.exec.ask.trim()) {
+    cfg.tools.exec.ask = "off";
+    cfgChanged = true;
+    console.log("  exec-policy: set tools.exec.ask=off");
+  } else {
+    console.log("  exec-policy: tools.exec.ask already set, keeping existing value.");
+  }
+  if (cfgChanged) {
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+  }
+
+  const ask = typeof cfg.tools.exec.ask === "string" ? cfg.tools.exec.ask.trim() : "off";
+  const security =
+    typeof cfg.tools.exec.security === "string" ? cfg.tools.exec.security.trim() : "";
+  const normalizedAsk =
+    ask === "off" || ask === "on-miss" || ask === "always" ? ask : "off";
+  const defaults = { ask: normalizedAsk };
+  if (security === "deny" || security === "allowlist" || security === "full") {
+    defaults.security = security;
+  }
+
+  if (!fs.existsSync(approvalsPath) || !fs.readFileSync(approvalsPath, "utf8").trim()) {
+    fs.writeFileSync(
+      approvalsPath,
+      JSON.stringify({ version: 1, defaults, agents: {} }, null, 2) + "\n",
+    );
+    console.log("  exec-policy: created exec-approvals.json");
+  } else {
+    console.log("  exec-policy: exec-approvals.json already exists, skipping.");
+  }
+  ' "$LOCAL_CFG_TMP" "$LOCAL_EXEC_APPROVALS_TMP" || die "exec-policy migration failed"
 
 # --- (future migrations go here) ---
 
 # ── upload if changed ───────────────────────────────────────────────────────
 
-CHECKSUM_AFTER=$(md5sum "$LOCAL_TMP" | cut -d' ' -f1)
+CFG_CHECKSUM_AFTER=$(md5sum "$LOCAL_CFG_TMP" | cut -d' ' -f1)
+EXEC_APPROVALS_CHECKSUM_AFTER=$(md5sum "$LOCAL_EXEC_APPROVALS_TMP" | cut -d' ' -f1)
 
-if [[ "$CHECKSUM_BEFORE" == "$CHECKSUM_AFTER" ]]; then
-  ok "No changes — config already up to date."
+if [[ "$CFG_CHECKSUM_BEFORE" == "$CFG_CHECKSUM_AFTER" && "$EXEC_APPROVALS_CHECKSUM_BEFORE" == "$EXEC_APPROVALS_CHECKSUM_AFTER" ]]; then
+  ok "No changes — config and exec approvals already up to date."
   exit 0
 fi
 
@@ -221,9 +281,17 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 log "Uploading openclaw.json to CVM..."
-phala cp "$LOCAL_TMP" "${CVM}:${REMOTE_TMP}" \
+phala cp "$LOCAL_CFG_TMP" "${CVM}:${REMOTE_CFG_TMP}" \
   || die "phala cp upload failed"
-phala ssh "$CVM" -- docker cp "${REMOTE_TMP}" "openclaw:${REMOTE_CFG}" \
+phala ssh "$CVM" -- docker cp "${REMOTE_CFG_TMP}" "openclaw:${REMOTE_CFG}" \
   || die "docker cp into container failed"
 
-ok "Done — openclaw.json migrated on CVM ${CVM}"
+if [[ "$EXEC_APPROVALS_CHECKSUM_BEFORE" != "$EXEC_APPROVALS_CHECKSUM_AFTER" ]]; then
+  log "Uploading exec-approvals.json to CVM..."
+  phala cp "$LOCAL_EXEC_APPROVALS_TMP" "${CVM}:${REMOTE_EXEC_APPROVALS_TMP}" \
+    || die "phala cp upload failed"
+  phala ssh "$CVM" -- docker cp "${REMOTE_EXEC_APPROVALS_TMP}" "openclaw:${REMOTE_EXEC_APPROVALS}" \
+    || die "docker cp into container failed"
+fi
+
+ok "Done — OpenClaw config migrated on CVM ${CVM}"

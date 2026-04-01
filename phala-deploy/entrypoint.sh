@@ -56,6 +56,46 @@ if [ ! -f "$CONFIG_FILE" ]; then
   fi
 fi
 
+EXEC_APPROVALS_FILE="/root/.openclaw/exec-approvals.json"
+if [ ! -f "$EXEC_APPROVALS_FILE" ]; then
+  node - "$CONFIG_FILE" "$EXEC_APPROVALS_FILE" <<'EOF'
+const fs = require("fs");
+
+const [configPath, approvalsPath] = process.argv.slice(2);
+let cfg = {};
+try {
+  if (configPath && fs.existsSync(configPath)) {
+    cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  }
+} catch (error) {
+  console.warn(`Warning: failed to read bootstrap config for exec approvals: ${error.message}`);
+}
+
+const configuredAsk = typeof cfg?.tools?.exec?.ask === "string" ? cfg.tools.exec.ask.trim() : "";
+const configuredSecurity =
+  typeof cfg?.tools?.exec?.security === "string" ? cfg.tools.exec.security.trim() : "";
+const ask =
+  configuredAsk === "off" || configuredAsk === "on-miss" || configuredAsk === "always"
+    ? configuredAsk
+    : "off";
+const defaults = { ask };
+if (
+  configuredSecurity === "deny" ||
+  configuredSecurity === "allowlist" ||
+  configuredSecurity === "full"
+) {
+  defaults.security = configuredSecurity;
+}
+
+fs.writeFileSync(
+  approvalsPath,
+  `${JSON.stringify({ version: 1, defaults, agents: {} }, null, 2)}\n`,
+  { mode: 0o600 },
+);
+console.log(`Exec approvals written to ${approvalsPath}`);
+EOF
+fi
+
 # Bootstrap workspace files from OPENCLAW_WORKSPACE_FILES_B64 (first boot only).
 # Skipped if workspace already has a .git dir (indicates gateway already initialized it).
 WORKSPACE_DIR="/root/.openclaw/workspace"

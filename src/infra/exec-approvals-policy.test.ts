@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   maxAsk,
+  mergeConfiguredExecAsk,
   minSecurity,
   normalizeExecAsk,
   normalizeExecHost,
@@ -36,6 +37,12 @@ describe("exec approvals policy helpers", () => {
     expect(maxAsk("off", "always")).toBe("always");
     expect(maxAsk("on-miss", "off")).toBe("on-miss");
     expect(maxAsk("always", "on-miss")).toBe("always");
+  });
+
+  it("mergeConfiguredExecAsk keeps explicit configured ask=off authoritative", () => {
+    expect(mergeConfiguredExecAsk("off", "always")).toBe("off");
+    expect(mergeConfiguredExecAsk("off", "on-miss")).toBe("off");
+    expect(mergeConfiguredExecAsk("on-miss", "always")).toBe("always");
   });
 
   it("requiresExecApproval respects ask mode and allowlist satisfaction", () => {

@@ -554,6 +554,10 @@ export function maxAsk(a: ExecAsk, b: ExecAsk): ExecAsk {
   return order[a] >= order[b] ? a : b;
 }
 
+export function mergeConfiguredExecAsk(configuredAsk: ExecAsk, requestedAsk: ExecAsk): ExecAsk {
+  return configuredAsk === "off" ? "off" : maxAsk(configuredAsk, requestedAsk);
+}
+
 export type ExecApprovalDecision = "allow-once" | "allow-always" | "deny";
 
 export async function requestExecApprovalViaSocket(params: {
