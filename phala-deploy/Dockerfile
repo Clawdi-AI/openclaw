@@ -54,15 +54,20 @@ ENV PATH="/root/.local/bin:${PATH}"
 RUN npm install -g mcporter && \
     rm -rf /root/.npm /tmp/*
 
-# Layer 9: File Browser (web file manager — REST API + UI)
-RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
-
-# Layer 10: ttyd (web terminal over WebSocket)
+# Layer 9: ttyd (headless PTY server — proxied through controller)
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "aarch64" ]; then TTYD_ARCH="aarch64"; else TTYD_ARCH="x86_64"; fi && \
     curl -fsSL -o /usr/local/bin/ttyd \
       "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.${TTYD_ARCH}" && \
     chmod +x /usr/local/bin/ttyd
+
+# Layer 10: Controller (Hono auth proxy + management routes)
+COPY phala-deploy/controller/package.json phala-deploy/controller/bun.lock* /tmp/controller/
+COPY phala-deploy/controller/src/ /tmp/controller/src/
+RUN cd /tmp/controller && \
+    bun install --frozen-lockfile 2>/dev/null || bun install && \
+    bun build src/index.ts --target=node --outfile=/usr/local/bin/controller.js && \
+    rm -rf /tmp/controller
 
 COPY phala-deploy/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
 COPY phala-deploy/supervisor/conf.d/ /etc/supervisor/conf.d/

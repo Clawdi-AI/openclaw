@@ -10,6 +10,10 @@ backup/
 # local tarball artifact (built by build-openclaw.sh)
 openclaw.tgz
 
+# controller build artifacts
+controller/dist/
+controller/node_modules/
+
 # local mux e2e state
 local-mux-e2e/.env.local
 local-mux-e2e/state/

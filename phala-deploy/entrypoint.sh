@@ -152,28 +152,6 @@ if [ "${ENABLE_SSH:-}" = "1" ] && [ -x /usr/sbin/sshd ]; then
   chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
 fi
 
-# --- Configure File Browser (web file manager + REST API) ---
-# Auth uses the same GATEWAY_AUTH_TOKEN derived from MASTER_KEY.
-if command -v filebrowser >/dev/null 2>&1; then
-  FB_DB="$DATA_DIR/.filebrowser.db"
-  FB_PORT=18791
-  FB_ROOT="$DATA_DIR/openclaw"
-  mkdir -p "$FB_ROOT"
-
-  filebrowser config init --database "$FB_DB" 2>/dev/null || true
-  filebrowser config set --database "$FB_DB" \
-    --root "$FB_ROOT" \
-    --address 0.0.0.0 \
-    --port "$FB_PORT" \
-    --auth.method json \
-    --branding.disableExternal
-
-  filebrowser users add admin "$GATEWAY_AUTH_TOKEN" --database "$FB_DB" 2>/dev/null || \
-    filebrowser users update admin --password "$GATEWAY_AUTH_TOKEN" --database "$FB_DB" 2>/dev/null || true
-
-  echo "File Browser configured (port $FB_PORT)."
-fi
-
 # --- Disable optional services unless explicitly enabled ---
 # Configs are baked into the image; remove the ones that aren't wanted.
 if [ "${ENABLE_SSH:-}" != "1" ]; then
