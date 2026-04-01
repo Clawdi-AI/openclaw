@@ -97,7 +97,7 @@ export function registerTransformToolResultHook(
 
     // Re-fetch raw HTML — the tool result only has extracted markdown
     const html = await fetchRawHtml(url);
-    if (!html || html.length <= 200) return;
+    if (!html || html.length <= 50) return;
 
     const sessionCollection = ctx.sessionId ? `ses_${ctx.sessionId}` : undefined;
     const indexRes = await client.indexContent({
@@ -121,8 +121,8 @@ export function registerTransformToolResultHook(
     let meta;
     try {
       meta = await client.getDocMeta(indexRes.doc_id);
-    } catch {
-      // Best-effort — fall through to return original result
+    } catch (err) {
+      api.logger.debug?.(`mentat-bridge: getDocMeta failed for ${indexRes.doc_id}: ${String(err)}`);
     }
 
     if (!meta) return;

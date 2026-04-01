@@ -13,6 +13,34 @@ import {
   isToolWrappedWithBeforeToolCallHook,
   runBeforeToolCallHook,
 } from "./pi-tools.before-tool-call.js";
+
+/**
+ * Run transform_tool_result plugin hook if any handlers are registered.
+ * Returns the transformed result, or the original if no hook fires.
+ */
+async function maybeTransformToolResult(
+  toolName: string,
+  params: Record<string, unknown>,
+  toolCallId: string,
+  result: AgentToolResult<unknown>,
+): Promise<AgentToolResult<unknown>> {
+  const hookRunner = getGlobalHookRunner();
+  if (!hookRunner?.hasHooks("transform_tool_result")) {
+    return result;
+  }
+
+  const transformed = await hookRunner.runTransformToolResult(
+    { toolName, params, toolCallId, result },
+    { toolName, toolCallId },
+  );
+  logDebug(
+    `[tool-adapter] transform_tool_result: tool=${toolName} transformed=${!!transformed?.result}`,
+  );
+  if (transformed?.result) {
+    return transformed.result;
+  }
+  return result;
+}
 import { normalizeToolName } from "./tool-policy.js";
 import { jsonResult } from "./tools/common.js";
 
@@ -168,30 +196,12 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
 
           // Allow plugins to replace the result before it reaches the framework
           // (and therefore before session persistence / LLM context).
-          const hookRunner = getGlobalHookRunner();
-          const hasTransformHook = hookRunner?.hasHooks("transform_tool_result");
-          logDebug(
-            `[tool-adapter] transform_tool_result: tool=${name} hasHook=${hasTransformHook}`,
+          return await maybeTransformToolResult(
+            name,
+            executeParams as Record<string, unknown>,
+            toolCallId,
+            result,
           );
-          if (hasTransformHook && hookRunner) {
-            const transformed = await hookRunner.runTransformToolResult(
-              {
-                toolName: name,
-                params: executeParams as Record<string, unknown>,
-                toolCallId,
-                result,
-              },
-              { toolName: name, toolCallId },
-            );
-            logDebug(
-              `[tool-adapter] transform_tool_result: tool=${name} transformed=${!!transformed?.result}`,
-            );
-            if (transformed?.result) {
-              return transformed.result;
-            }
-          }
-
-          return result;
         } catch (err) {
           if (signal?.aborted) {
             throw err;

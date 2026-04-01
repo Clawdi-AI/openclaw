@@ -33,6 +33,39 @@ import type {
   MediaUnderstandingProvider,
 } from "./types.js";
 
+/**
+ * Run media_file_transform plugin hook if any handlers are registered.
+ * Returns transformed content, or the original blockText if no hook fires.
+ */
+async function maybeTransformMediaFile(params: {
+  filename: string;
+  mime: string;
+  content: string;
+  rawBase64: string;
+  index: number;
+}): Promise<string> {
+  const hookRunner = getGlobalHookRunner();
+  if (!hookRunner?.hasHooks("media_file_transform")) {
+    return params.content;
+  }
+
+  try {
+    const hookResult = await hookRunner.runMediaFileTransform({
+      filename: params.filename,
+      mime: params.mime,
+      content: params.content,
+      rawBase64: params.rawBase64,
+      index: params.index,
+    });
+    if (hookResult?.content) {
+      return hookResult.content;
+    }
+  } catch (err) {
+    logVerbose(`media: media_file_transform hook failed: ${String(err)}`);
+  }
+  return params.content;
+}
+
 export type ApplyMediaUnderstandingResult = {
   outputs: MediaUnderstandingOutput[];
   decisions: MediaUnderstandingDecision[];
@@ -458,25 +491,14 @@ async function extractFileBlocks(params: {
       .trim();
 
     // Allow plugins to transform file content (e.g. compress via RAG indexing).
-    // Pass raw buffer so hooks can process the full file (e.g. index entire PDF
-    // instead of just the page-limited extracted text).
-    const hookRunner = getGlobalHookRunner();
-    const hasHook = hookRunner?.hasHooks("media_file_transform");
-    if (hasHook && hookRunner && text) {
-      try {
-        const hookResult = await hookRunner.runMediaFileTransform({
-          filename: safeName,
-          mime: mimeType,
-          content: blockText,
-          rawBase64: bufferResult.buffer.toString("base64"),
-          index: attachment.index,
-        });
-        if (hookResult?.content) {
-          blockText = hookResult.content;
-        }
-      } catch (err) {
-        logVerbose(`media: media_file_transform hook failed: ${String(err)}`);
-      }
+    if (text) {
+      blockText = await maybeTransformMediaFile({
+        filename: safeName,
+        mime: mimeType,
+        content: blockText,
+        rawBase64: bufferResult.buffer.toString("base64"),
+        index: attachment.index,
+      });
     }
 
     // Escape XML special characters in attributes to prevent injection

@@ -48,7 +48,7 @@ export function registerSessionLifecycleHooks(
     if (!ev.sessionId) return;
 
     // Track active session for chat history scope
-    activeSessionTracker.set(ev.sessionId);
+    activeSessionTracker.set(ev.sessionId, ev.sessionKey);
 
     await client.ensureStarted();
     if (!client.isHealthy()) return;
@@ -69,7 +69,7 @@ export function registerSessionLifecycleHooks(
     const ev = event as SessionEndEvent;
 
     // Clean up in-memory state
-    activeSessionTracker.clear();
+    activeSessionTracker.clear(ev.sessionKey);
     if (ev.sessionKey) {
       readTracker.clearSession(ev.sessionKey);
     }

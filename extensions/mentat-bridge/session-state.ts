@@ -3,20 +3,40 @@
 import type { DocMeta } from "./types.js";
 
 /**
- * Tracks the currently active session ID.
+ * Tracks active session IDs (supports concurrent sessions from multiple channels).
  * Set on session_start, cleared on session_end.
  * Used by search_chat_history to scope queries to current session.
+ *
+ * When only one session is active, `get()` returns it deterministically.
+ * With concurrent sessions, callers should prefer `ctx.sessionId` from the
+ * tool factory and only fall back to this tracker.
  */
 export class ActiveSessionTracker {
-  private _sessionId: string | null = null;
-  set(id: string) {
-    this._sessionId = id;
+  private _sessions = new Map<string, string>(); // sessionKey -> sessionId
+
+  set(sessionId: string, sessionKey?: string) {
+    const key = sessionKey ?? sessionId;
+    this._sessions.set(key, sessionId);
   }
-  get(): string | null {
-    return this._sessionId;
+
+  /** Get session ID by key, or return the sole active session if only one exists. */
+  get(sessionKey?: string): string | null {
+    if (sessionKey) {
+      return this._sessions.get(sessionKey) ?? null;
+    }
+    // If only one session is active, return it unambiguously
+    if (this._sessions.size === 1) {
+      return this._sessions.values().next().value ?? null;
+    }
+    return null;
   }
-  clear() {
-    this._sessionId = null;
+
+  clear(sessionKey?: string) {
+    if (sessionKey) {
+      this._sessions.delete(sessionKey);
+    } else {
+      this._sessions.clear();
+    }
   }
 }
 
