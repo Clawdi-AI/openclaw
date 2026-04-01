@@ -1,6 +1,7 @@
 import http from "node:http";
 import type { Duplex } from "node:stream";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { extractToken, timingSafeTokenEqual } from "./auth";
 import { createHttpProxy, handleWsUpgrade, type ProxyTarget } from "./proxy";
 import { registerFileRoutes } from "./routes/files";
@@ -84,6 +85,16 @@ async function handleHttpRequest(
 // ---------------------------------------------------------------------------
 
 const app = new Hono();
+
+// CORS for /_clawdi/* routes (dashboard calls from different origin)
+app.use(
+  "/_clawdi/*",
+  cors({
+    origin: "*",
+    allowMethods: ["GET", "POST", "OPTIONS"],
+    allowHeaders: ["Authorization", "Content-Type"],
+  }),
+);
 
 // Health — no auth
 registerHealthRoute(app, controllerState);
