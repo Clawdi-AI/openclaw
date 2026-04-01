@@ -230,23 +230,17 @@ Key config fields:
 3. `channels.<channel>.mux` — `enabled: true` and `timeoutMs: 30000`
 4. `plugins.entries.<channel>.enabled` — `true` for each channel
 
-### Config migrations
+### Bootstrap and Backfill
 
-`migrate-openclaw.sh` applies idempotent patches to a running CVM's `openclaw.json`. It downloads the config, runs each migration locally, and uploads it back only if something changed.
+The image now bootstraps both `openclaw.json` and `exec-approvals.json` on container start:
 
-Available migrations:
+- `openclaw.json` is still written from `OPENCLAW_CONFIG_B64` on first boot only
+- `exec-approvals.json` is created automatically whenever it is missing
+- the generated exec approvals defaults inherit `tools.exec.ask` and `tools.exec.security` from `openclaw.json`
 
-| Migration  | Trigger env var       | What it does                                                                            |
-| ---------- | --------------------- | --------------------------------------------------------------------------------------- |
-| `composio` | `COMPOSEIO_ADMIN_API` | Creates a Composio Tool Router session, injects `COMPOSIO_MCP_URL` + `COMPOSIO_API_KEY` |
+That means upgraded CVMs automatically backfill `exec-approvals.json` on the next container restart without any separate migration script.
 
-Usage:
-
-```sh
-COMPOSEIO_ADMIN_API=ak_xxx bash phala-deploy/migrate-openclaw.sh <cvm-name>
-```
-
-After migration, restart the container so the entrypoint writes the mcporter config:
+If you update Composio config manually, restart the container so the entrypoint rewrites the mcporter config:
 
 ```sh
 phala ssh <cvm-name> -- docker restart openclaw
@@ -458,7 +452,6 @@ If your CVM is destroyed (S3 mode only):
 | `docker-compose.yml`             | Compose file for `phala deploy`                                                              |
 | `build-openclaw.sh`              | Build tarball and build/push OpenClaw full + base images                                     |
 | `deploy-openclaw.sh`             | Deploy OpenClaw CVM, wait for health, run smoke tests                                        |
-| `migrate-openclaw.sh`            | Apply config migrations to a running CVM via SSH                                             |
 | `gen-cvm-config.sh`              | Generate `OPENCLAW_CONFIG_B64` from env vars (MASTER_KEY, etc.)                              |
 | `../mux-server/deploy/README.md` | Canonical mux-server deployment guide (prod compose, build, deploy, pairing, access control) |
 | `UPDATE_RUNBOOK.md`              | Detailed update runbook with fallback procedures                                             |
