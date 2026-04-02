@@ -24,3 +24,12 @@ openclaw skills list --eligible
 openclaw skills info <name>
 openclaw skills check
 ```
+
+Examples:
+
+```bash
+openclaw skills info excel-xlsx
+openclaw skills info pdf
+openclaw skills info powerpoint-pptx
+openclaw skills info word-docx
+```
