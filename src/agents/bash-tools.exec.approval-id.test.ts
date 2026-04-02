@@ -379,26 +379,6 @@ describe("exec approvals", () => {
     });
   });
 
-  it("keeps explicit tool ask=off authoritative over stricter per-call ask", async () => {
-    const calls: string[] = [];
-    mockGatewayOkCalls(calls);
-
-    const tool = createExecTool({
-      host: "gateway",
-      ask: "off",
-      security: "full",
-      approvalRunningNoticeMs: 0,
-    });
-
-    const result = await tool.execute("call-tool-ask-off", {
-      command: "echo ok",
-      ask: "always",
-    });
-    expect(result.details.status).toBe("completed");
-    expect(calls).not.toContain("exec.approval.request");
-    expect(calls).not.toContain("exec.approval.waitDecision");
-  });
-
   it("requires approval for elevated ask when allowlist misses", async () => {
     const calls: string[] = [];
     let resolveApproval: (() => void) | undefined;

@@ -8,7 +8,7 @@ import {
   type ExecAsk,
   type ExecSecurity,
   loadExecApprovals,
-  mergeConfiguredExecAsk,
+  maxAsk,
   minSecurity,
   normalizeExecAsk,
   normalizeExecSecurity,
@@ -106,7 +106,7 @@ function resolveNodesRunPolicy(opts: NodesRunOpts, execDefaults: ExecDefaults | 
   }
   return {
     security: minSecurity(configuredSecurity, requestedSecurity ?? configuredSecurity),
-    ask: mergeConfiguredExecAsk(configuredAsk, requestedAsk ?? configuredAsk),
+    ask: maxAsk(configuredAsk, requestedAsk ?? configuredAsk),
   };
 }
 
@@ -180,7 +180,7 @@ async function resolveNodeApprovals(params: {
   return {
     approvals,
     hostSecurity: minSecurity(params.security, approvals.agent.security),
-    hostAsk: mergeConfiguredExecAsk(approvals.agent.ask, params.ask),
+    hostAsk: maxAsk(params.ask, approvals.agent.ask),
     askFallback: approvals.agent.askFallback,
   };
 }

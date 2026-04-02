@@ -1,12 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
-import {
-  type ExecHost,
-  loadExecApprovals,
-  mergeConfiguredExecAsk,
-  minSecurity,
-} from "../infra/exec-approvals.js";
+import { type ExecHost, loadExecApprovals, maxAsk, minSecurity } from "../infra/exec-approvals.js";
 import { resolveExecSafeBinRuntimePolicy } from "../infra/exec-safe-bin-runtime-policy.js";
 import {
   getShellPathFromLoginShell,
@@ -332,7 +327,7 @@ export function createExecTool(
       // Keep local exec defaults in sync with exec-approvals.json when tools.exec.ask is unset.
       const configuredAsk = defaults?.ask ?? loadExecApprovals().defaults?.ask ?? "on-miss";
       const requestedAsk = normalizeExecAsk(params.ask);
-      let ask = mergeConfiguredExecAsk(configuredAsk, requestedAsk ?? configuredAsk);
+      let ask = maxAsk(configuredAsk, requestedAsk ?? configuredAsk);
       const bypassApprovals = elevatedRequested && elevatedMode === "full";
       if (bypassApprovals) {
         ask = "off";
