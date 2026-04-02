@@ -18,6 +18,7 @@ import {
   formatHotContext,
   formatRelevantMemoriesContext,
 } from "./prompt.js";
+import { SessionCleaner } from "./session-cleaner.js";
 import { ActiveSessionTracker, DocMetaCache, SessionReadTracker } from "./session-state.js";
 import { registerMentatTools } from "./tools.js";
 
@@ -35,8 +36,12 @@ async function ensureDefaultCollections(client: MentatClient, chatHistory: boole
     auto_add_sources: ["openclaw:*"],
   });
 
-  // chat_history: append-mode watch on session JSONL files
+  // chat_history: append-mode watch on pre-cleaned session JSONL files.
+  // Raw sessions are cleaned by SessionCleaner into .indexed/ — Mentat
+  // only sees simplified {"role","text","ts"} records, no filtering or
+  // strip patterns needed on the Mentat side.
   if (chatHistory) {
+    const indexedDir = join(homedir(), ".openclaw", "agents", "main", "sessions", ".indexed");
     await client.createCollection("chat_history", {
       metadata: {
         type: "system",
@@ -44,29 +49,14 @@ async function ensureDefaultCollections(client: MentatClient, chatHistory: boole
         watch_mode: "append",
         initial_scan_recent_days: 7,
         watch_probe_config: {
-          filters: [
-            { field: "type", op: "eq", value: "message" },
-            { field: "message.role", op: "in", value: ["user", "assistant"] },
-          ],
-          text_fields: ["message.content.text"],
-          label_field: "message.role",
+          text_fields: ["text"],
+          label_field: "role",
           group_size: 2,
-          timestamp_field: "timestamp",
-          text_strip_patterns: [
-            // Strip OpenClaw metadata preambles injected into user messages:
-            // - <relevant-memories>...</relevant-memories> blocks
-            "<relevant-memories>[\\s\\S]*?</relevant-memories>\\s*",
-            // - "Conversation info (untrusted metadata):\n```json\n{...}\n```\n" blocks
-            "Conversation info \\(untrusted metadata\\):\\s*```json\\s*\\{[\\s\\S]*?\\}\\s*```\\s*",
-            // - "Sender (untrusted metadata):\n```json\n{...}\n```\n" blocks
-            "Sender \\(untrusted metadata\\):\\s*```json\\s*\\{[\\s\\S]*?\\}\\s*```\\s*",
-            // - Timestamp lines like "[Mon 2026-03-30 07:36 UTC]"
-            "\\[\\w{3} \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} \\w+\\]\\s*",
-          ],
+          timestamp_field: "ts",
         },
       },
-      watch_paths: [join(homedir(), ".openclaw", "agents", "main", "sessions")],
-      watch_ignore: ["sessions.json", "sessions.json.bak.*", "*.reset.*", "*.deleted.*", "*.lock"],
+      watch_paths: [indexedDir],
+      watch_ignore: ["_offsets.json"],
     });
   }
 }
@@ -89,6 +79,8 @@ const mentatBridgePlugin = {
     const readTracker = new SessionReadTracker();
     const docMetaCache = new DocMetaCache();
     const activeSessionTracker = new ActiveSessionTracker();
+    const sessionsDir = join(homedir(), ".openclaw", "agents", "main", "sessions");
+    const sessionCleaner = new SessionCleaner(sessionsDir, api.logger);
 
     // ── Service lifecycle ──────────────────────────────────────────
 
@@ -98,12 +90,16 @@ const mentatBridgePlugin = {
         await client.start();
         if (client.isHealthy()) {
           await ensureDefaultCollections(client, cfg.chatHistory);
+          if (cfg.chatHistory) {
+            await sessionCleaner.start();
+          }
           api.logger.info(`mentat-bridge: started (url: ${cfg.mentatUrl})`);
         } else {
           api.logger.warn(`mentat-bridge: started but server unreachable (url: ${cfg.mentatUrl})`);
         }
       },
       stop() {
+        sessionCleaner.stop();
         client.stop();
         api.logger.info("mentat-bridge: stopped");
       },
