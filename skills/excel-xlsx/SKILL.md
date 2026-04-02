@@ -1,6 +1,23 @@
 ---
-name: xlsx
-description: 'Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user wants to: open, read, edit, or fix an existing .xlsx, .xlsm, .csv, or .tsv file (e.g., adding columns, computing formulas, formatting, charting, cleaning messy data); create a new spreadsheet from scratch or from other data sources; or convert between tabular file formats. Trigger especially when the user references a spreadsheet file by name or path — even casually (like "the xlsx in my downloads") — and wants something done to it or produced from it. Also trigger for cleaning or restructuring messy tabular data files (malformed rows, misplaced headers, junk data) into proper spreadsheets. The deliverable must be a spreadsheet file. Do NOT trigger when the primary deliverable is a Word document, HTML report, standalone Python script, database pipeline, or Google Sheets API integration, even if tabular data is involved.'
+name: excel-xlsx
+description: Use when creating, editing, recalculating, validating, or converting spreadsheet files (`.xlsx`, `.xlsm`, `.csv`, `.tsv`) where formula integrity and workbook semantics must be preserved.
+metadata:
+  {
+    "openclaw":
+      {
+        "requires": { "bins": ["python3"] },
+        "install":
+          [
+            {
+              "id": "python-brew",
+              "kind": "brew",
+              "formula": "python",
+              "bins": ["python3"],
+              "label": "Install Python (brew)",
+            },
+          ],
+      },
+  }
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
@@ -80,7 +97,7 @@ A user may ask you to create, edit, or analyze the contents of an .xlsx file. Yo
 
 ## Important Requirements
 
-**LibreOffice Required for Formula Recalculation**: You can assume LibreOffice is installed for recalculating formula values using the `scripts/recalc.py` script. The script automatically configures LibreOffice on first run, including in sandboxed environments where Unix sockets are restricted (handled by `scripts/office/soffice.py`)
+**LibreOffice Required for Formula Recalculation**: You can assume LibreOffice is installed for recalculating formula values using the `{baseDir}/scripts/recalc.py` script. The script automatically configures LibreOffice on first run, including in sandboxed environments where Unix sockets are restricted (handled by `{baseDir}/scripts/office/soffice.py`)
 
 ## Reading and analyzing data
 
@@ -147,9 +164,9 @@ This applies to ALL calculations - totals, percentages, ratios, differences, etc
 2. **Create/Load**: Create new workbook or load existing file
 3. **Modify**: Add/edit data, formulas, and formatting
 4. **Save**: Write to file
-5. **Recalculate formulas (MANDATORY IF USING FORMULAS)**: Use the scripts/recalc.py script
+5. **Recalculate formulas (MANDATORY IF USING FORMULAS)**: Use the {baseDir}/scripts/recalc.py script
    ```bash
-   python scripts/recalc.py output.xlsx
+   python {baseDir}/scripts/recalc.py output.xlsx
    ```
 6. **Verify and fix any errors**:
    - The script returns JSON with error details
@@ -219,16 +236,16 @@ wb.save('modified.xlsx')
 
 ## Recalculating formulas
 
-Excel files created or modified by openpyxl contain formulas as strings but not calculated values. Use the provided `scripts/recalc.py` script to recalculate formulas:
+Excel files created or modified by openpyxl contain formulas as strings but not calculated values. Use the provided `{baseDir}/scripts/recalc.py` script to recalculate formulas:
 
 ```bash
-python scripts/recalc.py <excel_file> [timeout_seconds]
+python {baseDir}/scripts/recalc.py <excel_file> [timeout_seconds]
 ```
 
 Example:
 
 ```bash
-python scripts/recalc.py output.xlsx 30
+python {baseDir}/scripts/recalc.py output.xlsx 30
 ```
 
 The script:
@@ -264,7 +281,7 @@ Quick checks to ensure formulas work correctly:
 - [ ] **Verify dependencies**: Check all cells referenced in formulas exist
 - [ ] **Test edge cases**: Include zero, negative, and very large values
 
-### Interpreting scripts/recalc.py Output
+### Interpreting {baseDir}/scripts/recalc.py Output
 
 The script returns JSON with error details:
 
@@ -296,7 +313,7 @@ The script returns JSON with error details:
 - Use `data_only=True` to read calculated values: `load_workbook('file.xlsx', data_only=True)`
 - **Warning**: If opened with `data_only=True` and saved, formulas are replaced with values and permanently lost
 - For large files: Use `read_only=True` for reading or `write_only=True` for writing
-- Formulas are preserved but not evaluated - use scripts/recalc.py to update values
+- Formulas are preserved but not evaluated - use {baseDir}/scripts/recalc.py to update values
 
 ### Working with pandas
 

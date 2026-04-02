@@ -1,6 +1,23 @@
 ---
-name: docx
-description: "Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx files). Triggers include: any mention of 'Word doc', 'word document', '.docx', or requests to produce professional documents with formatting like tables of contents, headings, page numbers, or letterheads. Also use when extracting or reorganizing content from .docx files, inserting or replacing images in documents, performing find-and-replace in Word files, working with tracked changes or comments, or converting content into a polished Word document. If the user asks for a 'report', 'memo', 'letter', 'template', or similar deliverable as a Word or .docx file, use this skill. Do NOT use for PDFs, spreadsheets, Google Docs, or general coding tasks unrelated to document generation."
+name: word-docx
+description: Use when creating, reading, editing, validating, or transforming Microsoft Word `.docx` files, including tracked changes, comments, OOXML-level edits, and template-preserving document workflows.
+metadata:
+  {
+    "openclaw":
+      {
+        "requires": { "bins": ["python3"] },
+        "install":
+          [
+            {
+              "id": "python-brew",
+              "kind": "brew",
+              "formula": "python",
+              "bins": ["python3"],
+              "label": "Install Python (brew)",
+            },
+          ],
+      },
+  }
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
@@ -23,7 +40,7 @@ A .docx file is a ZIP archive containing XML files.
 Legacy `.doc` files must be converted before editing:
 
 ```bash
-python scripts/office/soffice.py --headless --convert-to docx document.doc
+python {baseDir}/scripts/office/soffice.py --headless --convert-to docx document.doc
 ```
 
 ### Reading Content
@@ -33,13 +50,13 @@ python scripts/office/soffice.py --headless --convert-to docx document.doc
 pandoc --track-changes=all document.docx -o output.md
 
 # Raw XML access
-python scripts/office/unpack.py document.docx unpacked/
+python {baseDir}/scripts/office/unpack.py document.docx unpacked/
 ```
 
 ### Converting to Images
 
 ```bash
-python scripts/office/soffice.py --headless --convert-to pdf document.docx
+python {baseDir}/scripts/office/soffice.py --headless --convert-to pdf document.docx
 pdftoppm -jpeg -r 150 document.pdf page
 ```
 
@@ -48,7 +65,7 @@ pdftoppm -jpeg -r 150 document.pdf page
 To produce a clean document with all tracked changes accepted (requires LibreOffice):
 
 ```bash
-python scripts/accept_changes.py input.docx output.docx
+python {baseDir}/scripts/accept_changes.py input.docx output.docx
 ```
 
 ---
@@ -113,7 +130,7 @@ Packer.toBuffer(doc).then((buffer) => fs.writeFileSync("doc.docx", buffer));
 After creating the file, validate it. If validation fails, unpack, fix the XML, and repack.
 
 ```bash
-python scripts/office/validate.py doc.docx
+python {baseDir}/scripts/office/validate.py doc.docx
 ```
 
 ### Page Size
@@ -510,7 +527,7 @@ sections: [
 ### Step 1: Unpack
 
 ```bash
-python scripts/office/unpack.py document.docx unpacked/
+python {baseDir}/scripts/office/unpack.py document.docx unpacked/
 ```
 
 Extracts XML, pretty-prints, merges adjacent runs, and converts smart quotes to XML entities (`&#x201C;` etc.) so they survive editing. Use `--merge-runs false` to skip run merging.
@@ -540,9 +557,9 @@ Edit files in `unpacked/word/`. See XML Reference below for patterns.
 **Adding comments:** Use `comment.py` to handle boilerplate across multiple XML files (text must be pre-escaped XML):
 
 ```bash
-python scripts/comment.py unpacked/ 0 "Comment text with &amp; and &#x2019;"
-python scripts/comment.py unpacked/ 1 "Reply text" --parent 0  # reply to comment 0
-python scripts/comment.py unpacked/ 0 "Text" --author "Custom Author"  # custom author name
+python {baseDir}/scripts/comment.py unpacked/ 0 "Comment text with &amp; and &#x2019;"
+python {baseDir}/scripts/comment.py unpacked/ 1 "Reply text" --parent 0  # reply to comment 0
+python {baseDir}/scripts/comment.py unpacked/ 0 "Text" --author "Custom Author"  # custom author name
 ```
 
 Then add markers to document.xml (see Comments in XML Reference).
@@ -550,7 +567,7 @@ Then add markers to document.xml (see Comments in XML Reference).
 ### Step 3: Pack
 
 ```bash
-python scripts/office/pack.py unpacked/ output.docx --original document.docx
+python {baseDir}/scripts/office/pack.py unpacked/ output.docx --original document.docx
 ```
 
 Validates with auto-repair, condenses XML, and creates DOCX. Use `--validate false` to skip.
@@ -716,5 +733,5 @@ After running `comment.py` (see Step 2), add markers to document.xml. For replie
 
 - **pandoc**: Text extraction
 - **docx**: `npm install -g docx` (new documents)
-- **LibreOffice**: PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
+- **LibreOffice**: PDF conversion (auto-configured for sandboxed environments via `{baseDir}/scripts/office/soffice.py`)
 - **Poppler**: `pdftoppm` for images

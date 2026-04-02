@@ -1,6 +1,23 @@
 ---
 name: pdf
-description: Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms, encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs to make them searchable. If the user mentions a .pdf file or asks to produce one, use this skill.
+description: Use when extracting, editing, generating, validating, filling, or converting PDF documents, including table extraction, OCR workflows, and form-field automation.
+metadata:
+  {
+    "openclaw":
+      {
+        "requires": { "bins": ["python3"] },
+        "install":
+          [
+            {
+              "id": "python-brew",
+              "kind": "brew",
+              "formula": "python",
+              "bins": ["python3"],
+              "label": "Install Python (brew)",
+            },
+          ],
+      },
+  }
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
@@ -8,7 +25,7 @@ license: Proprietary. LICENSE.txt has complete terms
 
 ## Overview
 
-This guide covers essential PDF processing operations using Python libraries and command-line tools. For advanced features, JavaScript libraries, and detailed examples, see REFERENCE.md. If you need to fill out a PDF form, read FORMS.md and follow its instructions.
+This guide covers essential PDF processing operations using Python libraries and command-line tools. For advanced features, JavaScript libraries, and detailed examples, see `reference.md`. If you need to fill out a PDF form, read `forms.md` and follow its instructions.
 
 ## Quick Start
 

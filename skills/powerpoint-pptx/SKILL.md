@@ -1,6 +1,23 @@
 ---
-name: pptx
-description: 'Use this skill any time a .pptx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, or presentations; reading, parsing, or extracting text from any .pptx file (even if the extracted content will be used elsewhere, like in an email or summary); editing, modifying, or updating existing presentations; combining or splitting slide files; working with templates, layouts, speaker notes, or comments. Trigger whenever the user mentions "deck," "slides," "presentation," or references a .pptx filename, regardless of what they plan to do with the content afterward. If a .pptx file needs to be opened, created, or touched, use this skill.'
+name: powerpoint-pptx
+description: Use when creating, editing, analyzing, validating, or packaging PowerPoint `.pptx` presentations, including template-driven slide workflows, layout QA, and OOXML-level operations.
+metadata:
+  {
+    "openclaw":
+      {
+        "requires": { "bins": ["python3"] },
+        "install":
+          [
+            {
+              "id": "python-brew",
+              "kind": "brew",
+              "formula": "python",
+              "bins": ["python3"],
+              "label": "Install Python (brew)",
+            },
+          ],
+      },
+  }
 license: Proprietary. LICENSE.txt has complete terms
 ---
 
@@ -23,10 +40,10 @@ license: Proprietary. LICENSE.txt has complete terms
 python -m markitdown presentation.pptx
 
 # Visual overview
-python scripts/thumbnail.py presentation.pptx
+python {baseDir}/scripts/thumbnail.py presentation.pptx
 
 # Raw XML
-python scripts/office/unpack.py presentation.pptx unpacked/
+python {baseDir}/scripts/office/unpack.py presentation.pptx unpacked/
 ```
 
 ---
@@ -212,7 +229,7 @@ Report ALL issues found, including minor ones.
 Convert presentations to individual slide images for visual inspection:
 
 ```bash
-python scripts/office/soffice.py --headless --convert-to pdf output.pptx
+python {baseDir}/scripts/office/soffice.py --headless --convert-to pdf output.pptx
 pdftoppm -jpeg -r 150 output.pdf slide
 ```
 
@@ -231,5 +248,5 @@ pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
 - `pip install "markitdown[pptx]"` - text extraction
 - `pip install Pillow` - thumbnail grids
 - `npm install -g pptxgenjs` - creating from scratch
-- LibreOffice (`soffice`) - PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
+- LibreOffice (`soffice`) - PDF conversion (auto-configured for sandboxed environments via `{baseDir}/scripts/office/soffice.py`)
 - Poppler (`pdftoppm`) - PDF to images
