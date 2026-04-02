@@ -42,4 +42,14 @@ describe("bundled Anthropic skill imports", () => {
     mustExist(root, "powerpoint-pptx/scripts/thumbnail.py");
     mustExist(root, "powerpoint-pptx/scripts/office/validate.py");
   });
+
+  it("includes xlsx office toolchain under excel-xlsx", () => {
+    const skillsDir = resolveBundledSkillsDir({ cwd: process.cwd() });
+    expect(skillsDir).toBeTruthy();
+
+    const root = skillsDir as string;
+    mustExist(root, "excel-xlsx/SKILL.md");
+    mustExist(root, "excel-xlsx/scripts/recalc.py");
+    mustExist(root, "excel-xlsx/scripts/office/validate.py");
+  });
 });
