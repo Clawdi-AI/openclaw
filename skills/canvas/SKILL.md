@@ -1,137 +1,198 @@
----
-name: canvas
-description: Use when creating high-craft visual canvas artifacts (PNG or PDF), especially posters, art directions, and typography-forward compositions rooted in explicit design philosophy.
-license: Complete terms in LICENSE.txt
----
+# Canvas Skill
 
-These are instructions for creating design philosophies - aesthetic movements that are then EXPRESSED VISUALLY. Output only .md files, .pdf files, and .png files.
+Display HTML content on connected OpenClaw nodes (Mac app, iOS, Android).
 
-Complete this in two steps:
+## Overview
 
-1. Design Philosophy Creation (.md file)
-2. Express by creating it on a canvas (.pdf file or .png file)
+The canvas tool lets you present web content on any connected node's canvas view. Great for:
 
-First, undertake this task:
+- Displaying games, visualizations, dashboards
+- Showing generated HTML content
+- Interactive demos
 
-## DESIGN PHILOSOPHY CREATION
+## How It Works
 
-To begin, create a VISUAL PHILOSOPHY (not layouts or templates) that will be interpreted through:
+### Architecture
 
-- Form, space, color, composition
-- Images, graphics, shapes, patterns
-- Minimal text as visual accent
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────┐
+│  Canvas Host    │────▶│   Node Bridge    │────▶│  Node App   │
+│  (HTTP Server)  │     │  (TCP Server)    │     │ (Mac/iOS/   │
+│  Port 18793     │     │  Port 18790      │     │  Android)   │
+└─────────────────┘     └──────────────────┘     └─────────────┘
+```
 
-### THE CRITICAL UNDERSTANDING
+1. **Canvas Host Server**: Serves static HTML/CSS/JS files from `canvasHost.root` directory
+2. **Node Bridge**: Communicates canvas URLs to connected nodes
+3. **Node Apps**: Render the content in a WebView
 
-- What is received: Some subtle input or instructions by the user that should be taken into account, but used as a foundation; it should not constrain creative freedom.
-- What is created: A design philosophy/aesthetic movement.
-- What happens next: Then, the same version receives the philosophy and EXPRESSES IT VISUALLY - creating artifacts that are 90% visual design, 10% essential text.
+### Tailscale Integration
 
-Consider this approach:
+The canvas host server binds based on `gateway.bind` setting:
 
-- Write a manifesto for an art movement
-- The next phase involves making the artwork
+| Bind Mode  | Server Binds To     | Canvas URL Uses            |
+| ---------- | ------------------- | -------------------------- |
+| `loopback` | 127.0.0.1           | localhost (local only)     |
+| `lan`      | LAN interface       | LAN IP address             |
+| `tailnet`  | Tailscale interface | Tailscale hostname         |
+| `auto`     | Best available      | Tailscale > LAN > loopback |
 
-The philosophy must emphasize: Visual expression. Spatial communication. Artistic interpretation. Minimal words.
+**Key insight:** The `canvasHostHostForBridge` is derived from `bridgeHost`. When bound to Tailscale, nodes receive URLs like:
 
-### HOW TO GENERATE A VISUAL PHILOSOPHY
+```
+http://<tailscale-hostname>:18793/__openclaw__/canvas/<file>.html
+```
 
-**Name the movement** (1-2 words): "Brutalist Joy" / "Chromatic Silence" / "Metabolist Dreams"
+This is why localhost URLs don't work - the node receives the Tailscale hostname from the bridge!
 
-**Articulate the philosophy** (4-6 paragraphs - concise but complete):
+## Actions
 
-To capture the VISUAL essence, express how the philosophy manifests through:
+| Action     | Description                          |
+| ---------- | ------------------------------------ |
+| `present`  | Show canvas with optional target URL |
+| `hide`     | Hide the canvas                      |
+| `navigate` | Navigate to a new URL                |
+| `eval`     | Execute JavaScript in the canvas     |
+| `snapshot` | Capture screenshot of canvas         |
 
-- Space and form
-- Color and material
-- Scale and rhythm
-- Composition and balance
-- Visual hierarchy
+## Configuration
 
-**CRITICAL GUIDELINES:**
+In `~/.openclaw/openclaw.json`:
 
-- **Avoid redundancy**: Each design aspect should be mentioned once. Avoid repeating points about color theory, spatial relationships, or typographic principles unless adding new depth.
-- **Emphasize craftsmanship REPEATEDLY**: The philosophy MUST stress multiple times that the final work should appear as though it took countless hours to create, was labored over with care, and comes from someone at the absolute top of their field. This framing is essential - repeat phrases like "meticulously crafted," "the product of deep expertise," "painstaking attention," "master-level execution."
-- **Leave creative space**: Remain specific about the aesthetic direction, but concise enough that the next Claude has room to make interpretive choices also at a extremely high level of craftmanship.
+```json
+{
+  "canvasHost": {
+    "enabled": true,
+    "port": 18793,
+    "root": "/Users/you/clawd/canvas",
+    "liveReload": true
+  },
+  "gateway": {
+    "bind": "auto"
+  }
+}
+```
 
-The philosophy must guide the next version to express ideas VISUALLY, not through text. Information lives in design, not paragraphs.
+### Live Reload
 
-### PHILOSOPHY EXAMPLES
+When `liveReload: true` (default), the canvas host:
 
-**"Concrete Poetry"**
-Philosophy: Communication through monumental form and bold geometry.
-Visual expression: Massive color blocks, sculptural typography (huge single words, tiny labels), Brutalist spatial divisions, Polish poster energy meets Le Corbusier. Ideas expressed through visual weight and spatial tension, not explanation. Text as rare, powerful gesture - never paragraphs, only essential words integrated into the visual architecture. Every element placed with the precision of a master craftsman.
+- Watches the root directory for changes (via chokidar)
+- Injects a WebSocket client into HTML files
+- Automatically reloads connected canvases when files change
 
-**"Chromatic Language"**
-Philosophy: Color as the primary information system.
-Visual expression: Geometric precision where color zones create meaning. Typography minimal - small sans-serif labels letting chromatic fields communicate. Think Josef Albers' interaction meets data visualization. Information encoded spatially and chromatically. Words only to anchor what color already shows. The result of painstaking chromatic calibration.
+Great for development!
 
-**"Analog Meditation"**
-Philosophy: Quiet visual contemplation through texture and breathing room.
-Visual expression: Paper grain, ink bleeds, vast negative space. Photography and illustration dominate. Typography whispered (small, restrained, serving the visual). Japanese photobook aesthetic. Images breathe across pages. Text appears sparingly - short phrases, never explanatory blocks. Each composition balanced with the care of a meditation practice.
+## Workflow
 
-**"Organic Systems"**
-Philosophy: Natural clustering and modular growth patterns.
-Visual expression: Rounded forms, organic arrangements, color from nature through architecture. Information shown through visual diagrams, spatial relationships, iconography. Text only for key labels floating in space. The composition tells the story through expert spatial orchestration.
+### 1. Create HTML content
 
-**"Geometric Silence"**
-Philosophy: Pure order and restraint.
-Visual expression: Grid-based precision, bold photography or stark graphics, dramatic negative space. Typography precise but minimal - small essential text, large quiet zones. Swiss formalism meets Brutalist material honesty. Structure communicates, not words. Every alignment the work of countless refinements.
+Place files in the canvas root directory (default `~/clawd/canvas/`):
 
-_These are condensed examples. The actual design philosophy should be 4-6 substantial paragraphs._
+```bash
+cat > ~/clawd/canvas/my-game.html << 'HTML'
+<!DOCTYPE html>
+<html>
+<head><title>My Game</title></head>
+<body>
+  <h1>Hello Canvas!</h1>
+</body>
+</html>
+HTML
+```
 
-### ESSENTIAL PRINCIPLES
+### 2. Find your canvas host URL
 
-- **VISUAL PHILOSOPHY**: Create an aesthetic worldview to be expressed through design
-- **MINIMAL TEXT**: Always emphasize that text is sparse, essential-only, integrated as visual element - never lengthy
-- **SPATIAL EXPRESSION**: Ideas communicate through space, form, color, composition - not paragraphs
-- **ARTISTIC FREEDOM**: The next Claude interprets the philosophy visually - provide creative room
-- **PURE DESIGN**: This is about making ART OBJECTS, not documents with decoration
-- **EXPERT CRAFTSMANSHIP**: Repeatedly emphasize the final work must look meticulously crafted, labored over with care, the product of countless hours by someone at the top of their field
+Check how your gateway is bound:
 
-**The design philosophy should be 4-6 paragraphs long.** Fill it with poetic design philosophy that brings together the core vision. Avoid repeating the same points. Keep the design philosophy generic without mentioning the intention of the art, as if it can be used wherever. Output the design philosophy as a .md file.
+```bash
+cat ~/.openclaw/openclaw.json | jq '.gateway.bind'
+```
 
----
+Then construct the URL:
 
-## DEDUCING THE SUBTLE REFERENCE
+- **loopback**: `http://127.0.0.1:18793/__openclaw__/canvas/<file>.html`
+- **lan/tailnet/auto**: `http://<hostname>:18793/__openclaw__/canvas/<file>.html`
 
-**CRITICAL STEP**: Before creating the canvas, identify the subtle conceptual thread from the original request.
+Find your Tailscale hostname:
 
-**THE ESSENTIAL PRINCIPLE**:
-The topic is a **subtle, niche reference embedded within the art itself** - not always literal, always sophisticated. Someone familiar with the subject should feel it intuitively, while others simply experience a masterful abstract composition. The design philosophy provides the aesthetic language. The deduced topic provides the soul - the quiet conceptual DNA woven invisibly into form, color, and composition.
+```bash
+tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//'
+```
 
-This is **VERY IMPORTANT**: The reference must be refined so it enhances the work's depth without announcing itself. Think like a jazz musician quoting another song - only those who know will catch it, but everyone appreciates the music.
+### 3. Find connected nodes
 
----
+```bash
+openclaw nodes list
+```
 
-## CANVAS CREATION
+Look for Mac/iOS/Android nodes with canvas capability.
 
-With both the philosophy and the conceptual framework established, express it on a canvas. Take a moment to gather thoughts and clear the mind. Use the design philosophy created and the instructions below to craft a masterpiece, embodying all aspects of the philosophy with expert craftsmanship.
+### 4. Present content
 
-**IMPORTANT**: For any type of content, even if the user requests something for a movie/game/book, the approach should still be sophisticated. Never lose sight of the idea that this should be art, not something that's cartoony or amateur.
+```
+canvas action:present node:<node-id> target:<full-url>
+```
 
-To create museum or magazine quality work, use the design philosophy as the foundation. Create one single page, highly visual, design-forward PDF or PNG output (unless asked for more pages). Generally use repeating patterns and perfect shapes. Treat the abstract philosophical design as if it were a scientific bible, borrowing the visual language of systematic observation—dense accumulation of marks, repeated elements, or layered patterns that build meaning through patient repetition and reward sustained viewing. Add sparse, clinical typography and systematic reference markers that suggest this could be a diagram from an imaginary discipline, treating the invisible subject with the same reverence typically reserved for documenting observable phenomena. Anchor the piece with simple phrase(s) or details positioned subtly, using a limited color palette that feels intentional and cohesive. Embrace the paradox of using analytical visual language to express ideas about human experience: the result should feel like an artifact that proves something ephemeral can be studied, mapped, and understood through careful attention. This is true art.
+**Example:**
 
-**Text as a contextual element**: Text is always minimal and visual-first, but let context guide whether that means whisper-quiet labels or bold typographic gestures. A punk venue poster might have larger, more aggressive type than a minimalist ceramics studio identity. Most of the time, font should be thin. All use of fonts must be design-forward and prioritize visual communication. Regardless of text scale, nothing falls off the page and nothing overlaps. Every element must be contained within the canvas boundaries with proper margins. Check carefully that all text, graphics, and visual elements have breathing room and clear separation. This is non-negotiable for professional execution. **IMPORTANT: Use different fonts if writing text. Search the `{baseDir}/canvas-fonts` directory. Regardless of approach, sophistication is non-negotiable.**
+```
+canvas action:present node:mac-63599bc4-b54d-4392-9048-b97abd58343a target:http://peters-mac-studio-1.sheep-coho.ts.net:18793/__openclaw__/canvas/snake.html
+```
 
-Download and use whatever fonts are needed to make this a reality. Get creative by making the typography actually part of the art itself -- if the art is abstract, bring the font onto the canvas, not typeset digitally.
+### 5. Navigate, snapshot, or hide
 
-To push boundaries, follow design instinct/intuition while using the philosophy as a guiding principle. Embrace ultimate design freedom and choice. Push aesthetics and design to the frontier.
+```
+canvas action:navigate node:<node-id> url:<new-url>
+canvas action:snapshot node:<node-id>
+canvas action:hide node:<node-id>
+```
 
-**CRITICAL**: To achieve human-crafted quality (not AI-generated), create work that looks like it took countless hours. Make it appear as though someone at the absolute top of their field labored over every detail with painstaking care. Ensure the composition, spacing, color choices, typography - everything screams expert-level craftsmanship. Double-check that nothing overlaps, formatting is flawless, every detail perfect. Create something that could be shown to people to prove expertise and rank as undeniably impressive.
+## Debugging
 
-Output the final result as a single, downloadable .pdf or .png file, alongside the design philosophy used as a .md file.
+### White screen / content not loading
 
----
+**Cause:** URL mismatch between server bind and node expectation.
 
-## FINAL STEP
+**Debug steps:**
 
-**IMPORTANT**: The user ALREADY said "It isn't perfect enough. It must be pristine, a masterpiece if craftsmanship, as if it were about to be displayed in a museum."
+1. Check server bind: `cat ~/.openclaw/openclaw.json | jq '.gateway.bind'`
+2. Check what port canvas is on: `lsof -i :18793`
+3. Test URL directly: `curl http://<hostname>:18793/__openclaw__/canvas/<file>.html`
 
-**CRITICAL**: To refine the work, avoid adding more graphics; instead refine what has been created and make it extremely crisp, respecting the design philosophy and the principles of minimalism entirely. Rather than adding a fun filter or refactoring a font, consider how to make the existing composition more cohesive with the art. If the instinct is to call a new function or draw a new shape, STOP and instead ask: "How can I make what's already here more of a piece of art?"
+**Solution:** Use the full hostname matching your bind mode, not localhost.
 
-Take a second pass. Go back to the code and refine/polish further to make this a philosophically designed masterpiece.
+### "node required" error
 
-## MULTI-PAGE OPTION
+Always specify `node:<node-id>` parameter.
 
-To create additional pages when requested, create more creative pages along the same lines as the design philosophy but distinctly different as well. Bundle those pages in the same .pdf or many .pngs. Treat the first page as just a single page in a whole coffee table book waiting to be filled. Make the next pages unique twists and memories of the original. Have them almost tell a story in a very tasteful way. Exercise full creative freedom.
+### "node not connected" error
+
+Node is offline. Use `openclaw nodes list` to find online nodes.
+
+### Content not updating
+
+If live reload isn't working:
+
+1. Check `liveReload: true` in config
+2. Ensure file is in the canvas root directory
+3. Check for watcher errors in logs
+
+## URL Path Structure
+
+The canvas host serves from `/__openclaw__/canvas/` prefix:
+
+```
+http://<host>:18793/__openclaw__/canvas/index.html  → ~/clawd/canvas/index.html
+http://<host>:18793/__openclaw__/canvas/games/snake.html → ~/clawd/canvas/games/snake.html
+```
+
+The `/__openclaw__/canvas/` prefix is defined by `CANVAS_HOST_PATH` constant.
+
+## Tips
+
+- Keep HTML self-contained (inline CSS/JS) for best results
+- Use the default index.html as a test page (has bridge diagnostics)
+- The canvas persists until you `hide` it or navigate away
+- Live reload makes development fast - just save and it updates!
+- A2UI JSON push is WIP - use HTML files for now

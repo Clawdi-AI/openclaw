@@ -38,7 +38,7 @@ def run_soffice(args: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 
-_SHIM_SO = Path(tempfile.gettempdir()) / "lo_socket_shim.so"
+_SHIM_SO: Path | None = None
 
 
 def _needs_shim() -> bool:
@@ -51,17 +51,34 @@ def _needs_shim() -> bool:
 
 
 def _ensure_shim() -> Path:
-    if _SHIM_SO.exists():
+    global _SHIM_SO
+    if _SHIM_SO and _SHIM_SO.exists():
         return _SHIM_SO
 
-    src = Path(tempfile.gettempdir()) / "lo_socket_shim.c"
-    src.write_text(_SHIM_SOURCE)
-    subprocess.run(
-        ["gcc", "-shared", "-fPIC", "-o", str(_SHIM_SO), str(src), "-ldl"],
-        check=True,
-        capture_output=True,
-    )
-    src.unlink()
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".c",
+        prefix="lo_socket_shim_",
+        delete=False,
+    ) as src_handle:
+        src_handle.write(_SHIM_SOURCE)
+        src = Path(src_handle.name)
+
+    out_fd, out_path = tempfile.mkstemp(suffix=".so", prefix="lo_socket_shim_")
+    os.close(out_fd)
+    shim = Path(out_path)
+
+    try:
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", "-o", str(shim), str(src), "-ldl"],
+            check=True,
+            capture_output=True,
+        )
+        shim.chmod(0o700)
+    finally:
+        src.unlink(missing_ok=True)
+
+    _SHIM_SO = shim
     return _SHIM_SO
 
 

@@ -71,6 +71,7 @@ that up as `<workspace>/skills` on the next session.
 Recent bundled skills include richer document and visual workflows:
 
 - `excel-xlsx` — spreadsheet generation/editing/recalculation with bundled helper scripts.
+- `canvas-design` — visual canvas/art direction workflow with bundled font assets.
 - `pdf` (`skills/pdf`) — full PDF processing workflow with bundled Python scripts.
 - `pdf-extract` — lightweight extraction-focused PDF helper.
 - `powerpoint-pptx` — deck generation/editing with bundled Office/PPTX helper scripts.

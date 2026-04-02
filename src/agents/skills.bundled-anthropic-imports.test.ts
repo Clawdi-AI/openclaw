@@ -53,14 +53,14 @@ describe("bundled Anthropic skill imports", () => {
     mustExist(root, "excel-xlsx/scripts/office/validate.py");
   });
 
-  it("includes canvas-design font assets under canvas", () => {
+  it("includes canvas-design font assets under canvas-design", () => {
     const skillsDir = resolveBundledSkillsDir({ cwd: process.cwd() });
     expect(skillsDir).toBeTruthy();
 
     const root = skillsDir as string;
-    mustExist(root, "canvas/SKILL.md");
-    mustExist(root, "canvas/LICENSE.txt");
-    mustExist(root, "canvas/canvas-fonts/ArsenalSC-Regular.ttf");
-    mustExist(root, "canvas/canvas-fonts/WorkSans-Regular.ttf");
+    mustExist(root, "canvas-design/SKILL.md");
+    mustExist(root, "canvas-design/LICENSE.txt");
+    mustExist(root, "canvas-design/canvas-fonts/ArsenalSC-Regular.ttf");
+    mustExist(root, "canvas-design/canvas-fonts/WorkSans-Regular.ttf");
   });
 });
