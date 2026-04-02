@@ -1,14 +1,8 @@
 import { loadConfig, type OpenClawConfig } from "../config/config.js";
 import { listEnabledDiscordAccounts } from "../discord/accounts.js";
-import {
-  getDiscordExecApprovalApprovers,
-  isDiscordExecApprovalClientEnabled,
-} from "../discord/exec-approvals.js";
+import { isDiscordExecApprovalClientEnabled } from "../discord/exec-approvals.js";
 import { listEnabledTelegramAccounts } from "../telegram/accounts.js";
-import {
-  getTelegramExecApprovalApprovers,
-  isTelegramExecApprovalClientEnabled,
-} from "../telegram/exec-approvals.js";
+import { isTelegramExecApprovalClientEnabled } from "../telegram/exec-approvals.js";
 import { INTERNAL_MESSAGE_CHANNEL, normalizeMessageChannel } from "../utils/message-channel.js";
 
 export type ExecApprovalInitiatingSurfaceState =
@@ -34,7 +28,6 @@ function labelForChannel(channel?: string): string {
 export function resolveExecApprovalInitiatingSurfaceState(params: {
   channel?: string | null;
   accountId?: string | null;
-  to?: string | null;
   cfg?: OpenClawConfig;
 }): ExecApprovalInitiatingSurfaceState {
   const channel = normalizeMessageChannel(params.channel);
@@ -50,39 +43,27 @@ export function resolveExecApprovalInitiatingSurfaceState(params: {
       : { kind: "disabled", channel, channelLabel };
   }
   if (channel === "discord") {
-    return isDiscordExecApprovalClientEnabled({
-      cfg,
-      accountId: params.accountId,
-      turnSourceChannel: channel,
-      turnSourceTo: params.to,
-      turnSourceAccountId: params.accountId,
-    })
+    return isDiscordExecApprovalClientEnabled({ cfg, accountId: params.accountId })
       ? { kind: "enabled", channel, channelLabel }
       : { kind: "disabled", channel, channelLabel };
   }
   return { kind: "unsupported", channel, channelLabel };
 }
 
-export function hasConfiguredExecApprovalDmRoute(cfg: OpenClawConfig): boolean {
-  for (const account of listEnabledDiscordAccounts(cfg)) {
+function hasExecApprovalDmRoute(
+  accounts: Array<{
+    config: {
+      execApprovals?: {
+        enabled?: boolean;
+        approvers?: unknown[];
+        target?: string;
+      };
+    };
+  }>,
+): boolean {
+  for (const account of accounts) {
     const execApprovals = account.config.execApprovals;
-    if (
-      !execApprovals?.enabled ||
-      getDiscordExecApprovalApprovers({ cfg, accountId: account.accountId }).length === 0
-    ) {
-      continue;
-    }
-    const target = execApprovals.target ?? "dm";
-    if (target === "dm" || target === "both") {
-      return true;
-    }
-  }
-  for (const account of listEnabledTelegramAccounts(cfg)) {
-    const execApprovals = account.config.execApprovals;
-    if (
-      !execApprovals?.enabled ||
-      getTelegramExecApprovalApprovers({ cfg, accountId: account.accountId }).length === 0
-    ) {
+    if (!execApprovals?.enabled || (execApprovals.approvers?.length ?? 0) === 0) {
       continue;
     }
     const target = execApprovals.target ?? "dm";
@@ -91,4 +72,11 @@ export function hasConfiguredExecApprovalDmRoute(cfg: OpenClawConfig): boolean {
     }
   }
   return false;
+}
+
+export function hasConfiguredExecApprovalDmRoute(cfg: OpenClawConfig): boolean {
+  return (
+    hasExecApprovalDmRoute(listEnabledDiscordAccounts(cfg)) ||
+    hasExecApprovalDmRoute(listEnabledTelegramAccounts(cfg))
+  );
 }

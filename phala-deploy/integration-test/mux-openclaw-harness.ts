@@ -68,7 +68,6 @@ type StartHarnessParams = {
   channel?: "telegram" | "discord" | "whatsapp";
   chatId: string;
   claimedSessionKey: string;
-  skipInitialClaim?: boolean;
   pairingRouteKey?: string;
   llmReplyText: string;
   resolutionMode: "session-first" | "target-first";
@@ -382,37 +381,6 @@ async function claimMuxPairing(params: {
   }
 }
 
-async function issueMuxPairingToken(params: {
-  muxPort: number;
-  openclawId: string;
-  sessionKey?: string;
-  ttlSec?: number;
-}): Promise<string> {
-  const response = await fetch(`http://127.0.0.1:${params.muxPort}/v1/admin/pairings/token`, {
-    method: "POST",
-    headers: {
-      Authorization: "Bearer integration-admin-token",
-      "Content-Type": "application/json; charset=utf-8",
-    },
-    signal: AbortSignal.timeout(5_000),
-    body: JSON.stringify({
-      openclawId: params.openclawId,
-      ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
-      ...(typeof params.ttlSec === "number" ? { ttlSec: params.ttlSec } : {}),
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(
-      `failed to issue mux pairing token (${response.status}): ${await response.text()}`,
-    );
-  }
-  const body = (await response.json()) as { token?: unknown };
-  if (typeof body.token !== "string" || !body.token.trim()) {
-    throw new Error("mux pairing token response missing token");
-  }
-  return body.token;
-}
-
 function resetIntegrationRuntimeState(): void {
   __resetMuxRuntimeAuthCacheForTest();
   __resetMuxJwksCacheForTest();
@@ -434,7 +402,6 @@ export type MuxOpenClawHarness = {
   openclawId: string;
   readSessionStore: (agentId?: string) => Record<string, unknown>;
   waitForSessionStoreEntry: (key: string, agentId?: string) => Promise<Record<string, unknown>>;
-  issuePairingToken: (params?: { sessionKey?: string; ttlSec?: number }) => Promise<string>;
   readRecentLogs: () => { gateway: string; muxServer: string };
   restartGateway: () => Promise<void>;
   close: () => Promise<void>;
@@ -558,12 +525,10 @@ export async function startMuxOpenClawHarness(
       await stopChildProcess(muxServer.process);
     });
 
-    if (!params.skipInitialClaim) {
-      await claimMuxPairing({
-        muxPort,
-        claimedSessionKey: params.claimedSessionKey,
-      });
-    }
+    await claimMuxPairing({
+      muxPort,
+      claimedSessionKey: params.claimedSessionKey,
+    });
 
     const readSessionStore = (agentId = "main") => {
       clearSessionStoreCacheForTest();
@@ -593,13 +558,6 @@ export async function startMuxOpenClawHarness(
           `timed out waiting for session store entry ${key} (agent ${agentId})`,
         );
       },
-      issuePairingToken: async (tokenParams) =>
-        await issueMuxPairingToken({
-          muxPort,
-          openclawId,
-          sessionKey: tokenParams?.sessionKey,
-          ttlSec: tokenParams?.ttlSec,
-        }),
       readRecentLogs: () => ({
         gateway: gateway.logs.join("").slice(-12_000),
         muxServer: (() => {

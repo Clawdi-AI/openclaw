@@ -476,7 +476,6 @@ export function buildTelegramInboundEnvelope(params: {
   media: unknown;
   attachments: MuxInboundAttachment[];
   wasMentioned?: boolean;
-  pairing?: { kind: "post-pair" };
 }): MuxInboundEnvelope {
   const raw = {
     update: params.rawUpdate,
@@ -505,7 +504,6 @@ export function buildTelegramInboundEnvelope(params: {
       chatId: params.chatId,
       topicId: params.topicId ?? null,
       routeKey: params.routeKey,
-      ...(params.pairing ? { pairing: params.pairing } : {}),
       updateId: params.updateId,
       telegram: {
         media: params.media,
@@ -598,7 +596,6 @@ export function buildDiscordInboundEnvelope(params: {
   media: unknown;
   attachments: MuxInboundAttachment[];
   wasMentioned?: boolean;
-  pairing?: { kind: "post-pair" };
 }): MuxInboundEnvelope {
   const raw = {
     message: params.rawMessage,
@@ -626,7 +623,6 @@ export function buildDiscordInboundEnvelope(params: {
       channelId: params.channelId,
       guildId: params.guildId,
       routeKey: params.routeKey,
-      ...(params.pairing ? { pairing: params.pairing } : {}),
       discord: {
         media: params.media,
         rawMessage: params.rawMessage,
@@ -656,7 +652,6 @@ export function buildWhatsAppInboundEnvelope(params: {
   rawMessage: unknown;
   media: unknown;
   attachments: MuxInboundAttachment[];
-  pairing?: { kind: "post-pair" };
 }): MuxInboundEnvelope {
   const raw = {
     message: params.rawMessage,
@@ -682,7 +677,6 @@ export function buildWhatsAppInboundEnvelope(params: {
       messageId: params.messageId,
       chatJid: params.chatJid,
       routeKey: params.routeKey,
-      ...(params.pairing ? { pairing: params.pairing } : {}),
       whatsapp: {
         media: params.media,
         rawMessage: params.rawMessage,

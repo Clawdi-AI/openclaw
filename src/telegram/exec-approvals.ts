@@ -1,10 +1,13 @@
 import type { ReplyPayload } from "../auto-reply/types.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { TelegramExecApprovalConfig } from "../config/types.telegram.js";
-import { resolveEffectiveExecApprovalApprovers } from "../infra/exec-approval-approvers.js";
 import { getExecApprovalReplyMetadata } from "../infra/exec-approval-reply.js";
 import { resolveTelegramAccount } from "./accounts.js";
 import { resolveTelegramTargetChatType } from "./targets.js";
+
+function normalizeApproverId(value: string | number): string {
+  return String(value).trim();
+}
 
 export function resolveTelegramExecApprovalConfig(params: {
   cfg: OpenClawConfig;
@@ -17,11 +20,9 @@ export function getTelegramExecApprovalApprovers(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
 }): string[] {
-  return resolveEffectiveExecApprovalApprovers({
-    channel: "telegram",
-    accountId: params.accountId,
-    configuredApprovers: resolveTelegramExecApprovalConfig(params)?.approvers,
-  });
+  return (resolveTelegramExecApprovalConfig(params)?.approvers ?? [])
+    .map(normalizeApproverId)
+    .filter(Boolean);
 }
 
 export function isTelegramExecApprovalClientEnabled(params: {

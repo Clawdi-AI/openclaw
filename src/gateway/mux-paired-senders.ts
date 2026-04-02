@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -78,29 +77,6 @@ async function readStore(filePath: string): Promise<MuxPairedSendersStore> {
   return value;
 }
 
-function readStoreSync(filePath: string): MuxPairedSendersStore {
-  try {
-    const raw = readFileSync(filePath, "utf8");
-    const parsed = JSON.parse(raw) as Partial<MuxPairedSendersStore>;
-    if (!parsed || parsed.version !== 1 || typeof parsed.routes !== "object" || !parsed.routes) {
-      return { version: 1, routes: {} };
-    }
-    return {
-      version: 1,
-      routes: Object.fromEntries(
-        Object.entries(parsed.routes).map(([routeKey, senders]) => [
-          routeKey,
-          Array.isArray(senders)
-            ? senders.filter((sender): sender is string => typeof sender === "string")
-            : [],
-        ]),
-      ),
-    };
-  } catch {
-    return { version: 1, routes: {} };
-  }
-}
-
 function normalizeRouteKey(routeKey: string): string {
   return routeKey.trim();
 }
@@ -170,24 +146,4 @@ export async function readMuxPairedSenders(params: {
     const store = await readStore(filePath);
     return store.routes[routeKey] ?? [];
   });
-}
-
-export function listMuxPairedSendersSync(params: {
-  channel: MuxPairingChannel;
-  accountId?: string | null;
-  env?: NodeJS.ProcessEnv;
-}): string[] {
-  const accountId = normalizeAccountId(params.accountId);
-  const filePath = resolveStorePath(params.channel, accountId, params.env);
-  const store = readStoreSync(filePath);
-  const senders = new Set<string>();
-  for (const routeSenders of Object.values(store.routes)) {
-    for (const senderId of routeSenders) {
-      const normalized = normalizeSenderId(senderId);
-      if (normalized) {
-        senders.add(normalized);
-      }
-    }
-  }
-  return [...senders];
 }

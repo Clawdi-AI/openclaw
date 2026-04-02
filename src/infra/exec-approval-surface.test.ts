@@ -2,10 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const loadConfigMock = vi.hoisted(() => vi.fn());
 const listEnabledDiscordAccountsMock = vi.hoisted(() => vi.fn());
-const getDiscordExecApprovalApproversMock = vi.hoisted(() => vi.fn());
 const isDiscordExecApprovalClientEnabledMock = vi.hoisted(() => vi.fn());
 const listEnabledTelegramAccountsMock = vi.hoisted(() => vi.fn());
-const getTelegramExecApprovalApproversMock = vi.hoisted(() => vi.fn());
 const isTelegramExecApprovalClientEnabledMock = vi.hoisted(() => vi.fn());
 const normalizeMessageChannelMock = vi.hoisted(() => vi.fn());
 
@@ -18,8 +16,6 @@ vi.mock("../discord/accounts.js", () => ({
 }));
 
 vi.mock("../discord/exec-approvals.js", () => ({
-  getDiscordExecApprovalApprovers: (...args: unknown[]) =>
-    getDiscordExecApprovalApproversMock(...args),
   isDiscordExecApprovalClientEnabled: (...args: unknown[]) =>
     isDiscordExecApprovalClientEnabledMock(...args),
 }));
@@ -29,8 +25,6 @@ vi.mock("../telegram/accounts.js", () => ({
 }));
 
 vi.mock("../telegram/exec-approvals.js", () => ({
-  getTelegramExecApprovalApprovers: (...args: unknown[]) =>
-    getTelegramExecApprovalApproversMock(...args),
   isTelegramExecApprovalClientEnabled: (...args: unknown[]) =>
     isTelegramExecApprovalClientEnabledMock(...args),
 }));
@@ -49,10 +43,8 @@ describe("resolveExecApprovalInitiatingSurfaceState", () => {
   beforeEach(() => {
     loadConfigMock.mockReset();
     listEnabledDiscordAccountsMock.mockReset();
-    getDiscordExecApprovalApproversMock.mockReset();
     isDiscordExecApprovalClientEnabledMock.mockReset();
     listEnabledTelegramAccountsMock.mockReset();
-    getTelegramExecApprovalApproversMock.mockReset();
     isTelegramExecApprovalClientEnabledMock.mockReset();
     normalizeMessageChannelMock.mockReset();
     normalizeMessageChannelMock.mockImplementation((value?: string | null) =>
@@ -107,39 +99,6 @@ describe("resolveExecApprovalInitiatingSurfaceState", () => {
     });
 
     expect(loadConfigMock).not.toHaveBeenCalled();
-    expect(isDiscordExecApprovalClientEnabledMock).toHaveBeenCalledWith({
-      cfg,
-      accountId: "main",
-      turnSourceChannel: "discord",
-      turnSourceTo: undefined,
-      turnSourceAccountId: "main",
-    });
-  });
-
-  it("passes the active route to discord client enablement checks", () => {
-    isDiscordExecApprovalClientEnabledMock.mockReturnValueOnce(true);
-    const cfg = { channels: {} };
-
-    expect(
-      resolveExecApprovalInitiatingSurfaceState({
-        channel: "discord",
-        accountId: "default",
-        to: "user:4242",
-        cfg: cfg as never,
-      }),
-    ).toEqual({
-      kind: "enabled",
-      channel: "discord",
-      channelLabel: "Discord",
-    });
-
-    expect(isDiscordExecApprovalClientEnabledMock).toHaveBeenCalledWith({
-      cfg,
-      accountId: "default",
-      turnSourceChannel: "discord",
-      turnSourceTo: "user:4242",
-      turnSourceAccountId: "default",
-    });
   });
 
   it("loads config lazily when cfg is omitted and marks unsupported channels", () => {
@@ -169,18 +128,16 @@ describe("resolveExecApprovalInitiatingSurfaceState", () => {
 describe("hasConfiguredExecApprovalDmRoute", () => {
   beforeEach(() => {
     listEnabledDiscordAccountsMock.mockReset();
-    getDiscordExecApprovalApproversMock.mockReset();
     listEnabledTelegramAccountsMock.mockReset();
-    getTelegramExecApprovalApproversMock.mockReset();
   });
 
   it("returns true when any enabled account routes approvals to DM or both", () => {
     listEnabledDiscordAccountsMock.mockReturnValueOnce([
       {
-        accountId: "discord",
         config: {
           execApprovals: {
             enabled: true,
+            approvers: ["a"],
             target: "channel",
           },
         },
@@ -188,17 +145,15 @@ describe("hasConfiguredExecApprovalDmRoute", () => {
     ]);
     listEnabledTelegramAccountsMock.mockReturnValueOnce([
       {
-        accountId: "tg",
         config: {
           execApprovals: {
             enabled: true,
+            approvers: ["a"],
             target: "both",
           },
         },
       },
     ]);
-    getDiscordExecApprovalApproversMock.mockReturnValueOnce(["a"]);
-    getTelegramExecApprovalApproversMock.mockReturnValueOnce(["a"]);
 
     expect(hasConfiguredExecApprovalDmRoute({} as never)).toBe(true);
   });
@@ -206,10 +161,10 @@ describe("hasConfiguredExecApprovalDmRoute", () => {
   it("returns false when exec approvals are disabled or have no DM route", () => {
     listEnabledDiscordAccountsMock.mockReturnValueOnce([
       {
-        accountId: "discord",
         config: {
           execApprovals: {
             enabled: false,
+            approvers: ["a"],
             target: "dm",
           },
         },
@@ -217,27 +172,24 @@ describe("hasConfiguredExecApprovalDmRoute", () => {
     ]);
     listEnabledTelegramAccountsMock.mockReturnValueOnce([
       {
-        accountId: "tg-disabled",
         config: {
           execApprovals: {
             enabled: true,
+            approvers: [],
             target: "dm",
           },
         },
       },
       {
-        accountId: "tg-channel",
         config: {
           execApprovals: {
             enabled: true,
+            approvers: ["a"],
             target: "channel",
           },
         },
       },
     ]);
-    getDiscordExecApprovalApproversMock.mockReturnValueOnce(["a"]);
-    getTelegramExecApprovalApproversMock.mockReturnValueOnce([]);
-    getTelegramExecApprovalApproversMock.mockReturnValueOnce(["a"]);
 
     expect(hasConfiguredExecApprovalDmRoute({} as never)).toBe(false);
   });

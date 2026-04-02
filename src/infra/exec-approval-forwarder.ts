@@ -5,12 +5,10 @@ import type {
   ExecApprovalForwardingConfig,
   ExecApprovalForwardTarget,
 } from "../config/types.approvals.js";
-import { getDiscordExecApprovalApprovers } from "../discord/exec-approvals.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { normalizeAccountId, parseAgentSessionKey } from "../routing/session-key.js";
 import { compileSafeRegex, testRegexWithBoundedInput } from "../security/safe-regex.js";
 import { buildTelegramExecApprovalButtons } from "../telegram/approval-buttons.js";
-import { getTelegramExecApprovalApprovers } from "../telegram/exec-approvals.js";
 import { sendTypingTelegram } from "../telegram/send.js";
 import {
   isDeliverableMessageChannel,
@@ -154,10 +152,7 @@ function shouldSkipDiscordForwarding(
   }
   const account = resolveChannelAccountConfig(discord.accounts, target.accountId);
   const execApprovals = account?.execApprovals ?? discord.execApprovals;
-  return Boolean(
-    execApprovals?.enabled &&
-    getDiscordExecApprovalApprovers({ cfg, accountId: target.accountId }).length > 0,
-  );
+  return Boolean(execApprovals?.enabled && (execApprovals.approvers?.length ?? 0) > 0);
 }
 
 function shouldSkipTelegramForwarding(params: {
@@ -199,10 +194,7 @@ function shouldSkipTelegramForwarding(params: {
         | undefined)
     : undefined;
   const execApprovals = account?.execApprovals ?? telegramConfig.execApprovals;
-  return Boolean(
-    execApprovals?.enabled &&
-    getTelegramExecApprovalApprovers({ cfg: params.cfg, accountId }).length > 0,
-  );
+  return Boolean(execApprovals?.enabled && (execApprovals.approvers?.length ?? 0) > 0);
 }
 
 function formatApprovalCommand(command: string): { inline: boolean; text: string } {

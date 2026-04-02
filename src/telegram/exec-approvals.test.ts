@@ -1,12 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
-const resolveEffectiveExecApprovalApproversMock = vi.hoisted(() => vi.fn());
-
-vi.mock("../infra/exec-approval-approvers.js", () => ({
-  resolveEffectiveExecApprovalApprovers: (...args: unknown[]) =>
-    resolveEffectiveExecApprovalApproversMock(...args),
-}));
-
 import {
   isTelegramExecApprovalApprover,
   isTelegramExecApprovalClientEnabled,
@@ -29,14 +22,6 @@ function buildConfig(
 }
 
 describe("telegram exec approvals", () => {
-  beforeEach(() => {
-    resolveEffectiveExecApprovalApproversMock.mockReset();
-    resolveEffectiveExecApprovalApproversMock.mockImplementation(
-      (params: { configuredApprovers?: Array<string | number> }) =>
-        (params.configuredApprovers ?? []).map(String),
-    );
-  });
-
   it("requires enablement and at least one approver", () => {
     expect(isTelegramExecApprovalClientEnabled({ cfg: buildConfig() })).toBe(false);
     expect(
@@ -56,15 +41,6 @@ describe("telegram exec approvals", () => {
     expect(isTelegramExecApprovalApprover({ cfg, senderId: "123" })).toBe(true);
     expect(isTelegramExecApprovalApprover({ cfg, senderId: "456" })).toBe(true);
     expect(isTelegramExecApprovalApprover({ cfg, senderId: "789" })).toBe(false);
-  });
-
-  it("treats paired identities as effective approvers", () => {
-    resolveEffectiveExecApprovalApproversMock.mockReturnValueOnce(["321"]);
-    resolveEffectiveExecApprovalApproversMock.mockReturnValueOnce(["321"]);
-
-    const cfg = buildConfig({ enabled: true, approvers: [] });
-    expect(isTelegramExecApprovalClientEnabled({ cfg })).toBe(true);
-    expect(isTelegramExecApprovalApprover({ cfg, senderId: "321" })).toBe(true);
   });
 
   it("defaults target to dm", () => {

@@ -4386,7 +4386,6 @@ async function sendPostPairingSyntheticInbound(params: {
       rawUpdate: {},
       media: null,
       attachments: [],
-      pairing: { kind: "post-pair" },
     });
   } else if (params.channel === "discord") {
     payload = buildDiscordInboundEnvelope({
@@ -4404,7 +4403,6 @@ async function sendPostPairingSyntheticInbound(params: {
       rawMessage: {},
       media: null,
       attachments: [],
-      pairing: { kind: "post-pair" },
     });
   } else {
     payload = buildWhatsAppInboundEnvelope({
@@ -4421,7 +4419,6 @@ async function sendPostPairingSyntheticInbound(params: {
       rawMessage: {},
       media: null,
       attachments: [],
-      pairing: { kind: "post-pair" },
     });
   }
 

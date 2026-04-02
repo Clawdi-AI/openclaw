@@ -104,7 +104,15 @@ function isHandlerConfigured(params: { cfg: OpenClawConfig; accountId: string })
     cfg: params.cfg,
     accountId: params.accountId,
   });
-  return Boolean(config?.enabled);
+  if (!config?.enabled) {
+    return false;
+  }
+  return (
+    getTelegramExecApprovalApprovers({
+      cfg: params.cfg,
+      accountId: params.accountId,
+    }).length > 0
+  );
 }
 
 function resolveRequestSessionTarget(params: {

@@ -235,8 +235,8 @@ Key config fields:
 The image now bootstraps both `openclaw.json` and `exec-approvals.json` on container start:
 
 - `openclaw.json` is still written from `OPENCLAW_CONFIG_B64` on first boot only
-- `exec-approvals.json` is created automatically whenever it is missing
-- the generated exec approvals defaults inherit `tools.exec.ask` and `tools.exec.security` from `openclaw.json`
+- `exec-approvals.json` is created automatically whenever it is missing with a minimal default policy
+- the bootstrap file defaults to `defaults.ask: "off"` and leaves later policy changes to `openclaw approvals ...` or direct file edits
 
 That means upgraded CVMs automatically backfill `exec-approvals.json` on the next container restart without any separate migration script.
 
