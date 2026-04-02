@@ -30,4 +30,16 @@ describe("bundled Anthropic skill imports", () => {
     mustExist(root, "word-docx/scripts/office/validate.py");
     mustExist(root, "word-docx/scripts/templates/comments.xml");
   });
+
+  it("includes pptx toolchain under powerpoint-pptx", () => {
+    const skillsDir = resolveBundledSkillsDir({ cwd: process.cwd() });
+    expect(skillsDir).toBeTruthy();
+
+    const root = skillsDir as string;
+    mustExist(root, "powerpoint-pptx/SKILL.md");
+    mustExist(root, "powerpoint-pptx/editing.md");
+    mustExist(root, "powerpoint-pptx/pptxgenjs.md");
+    mustExist(root, "powerpoint-pptx/scripts/thumbnail.py");
+    mustExist(root, "powerpoint-pptx/scripts/office/validate.py");
+  });
 });
