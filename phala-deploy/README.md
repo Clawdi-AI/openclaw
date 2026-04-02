@@ -236,7 +236,7 @@ The image now bootstraps both `openclaw.json` and `exec-approvals.json` on conta
 
 - `openclaw.json` is still written from `OPENCLAW_CONFIG_B64` on first boot only
 - `exec-approvals.json` is created automatically whenever it is missing with a minimal default policy
-- the bootstrap file defaults to `defaults.ask: "off"` and leaves later policy changes to `openclaw approvals ...` or direct file edits
+- the bootstrap file defaults to `defaults.security: "full"`, `defaults.ask: "off"`, and `defaults.askFallback: "full"`, and leaves later policy changes to `openclaw approvals ...` or direct file edits
 
 That means upgraded CVMs automatically backfill `exec-approvals.json` on the next container restart without any separate migration script.
 

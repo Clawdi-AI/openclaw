@@ -62,7 +62,9 @@ if [ ! -f "$EXEC_APPROVALS_FILE" ]; then
 {
   "version": 1,
   "defaults": {
-    "ask": "off"
+    "security": "full",
+    "ask": "off",
+    "askFallback": "full"
   },
   "agents": {}
 }
