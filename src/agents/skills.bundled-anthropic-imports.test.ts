@@ -18,4 +18,16 @@ describe("bundled Anthropic skill imports", () => {
     mustExist(root, "pdf/forms.md");
     mustExist(root, "pdf/scripts/fill_fillable_fields.py");
   });
+
+  it("includes docx office toolchain under word-docx", () => {
+    const skillsDir = resolveBundledSkillsDir({ cwd: process.cwd() });
+    expect(skillsDir).toBeTruthy();
+
+    const root = skillsDir as string;
+    mustExist(root, "word-docx/SKILL.md");
+    mustExist(root, "word-docx/scripts/accept_changes.py");
+    mustExist(root, "word-docx/scripts/comment.py");
+    mustExist(root, "word-docx/scripts/office/validate.py");
+    mustExist(root, "word-docx/scripts/templates/comments.xml");
+  });
 });
