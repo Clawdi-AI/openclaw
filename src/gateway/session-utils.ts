@@ -161,6 +161,10 @@ export function deriveSessionTitle(
     return entry.displayName.trim();
   }
 
+  if (entry.label?.trim()) {
+    return entry.label.trim();
+  }
+
   if (entry.subject?.trim()) {
     return entry.subject.trim();
   }
