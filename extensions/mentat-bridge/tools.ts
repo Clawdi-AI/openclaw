@@ -104,7 +104,7 @@ export function registerMentatTools(
             if (params.toc_only) {
               return `${i + 1}. [${r.doc_id}] ${r.filename} — ${r.section ?? "full doc"}`;
             }
-            const snippet = r.content?.slice(0, 300) ?? r.summary ?? "";
+            const snippet = r.content ?? r.summary ?? "";
             return `${i + 1}. [${r.doc_id}] ${r.filename}${r.section ? ` > ${r.section}` : ""}\n   ${snippet}`;
           })
           .join("\n");
@@ -520,11 +520,13 @@ export function registerMentatTools(
           query: string;
           top_k: number;
           collection: string;
+          hybrid: boolean;
           metadata_filter?: Record<string, unknown>;
         } = {
           query: params.query,
           top_k: topK,
           collection: "chat_history",
+          hybrid: true,
         };
 
         // Exclude current session — it's already in the LLM context
@@ -540,8 +542,8 @@ export function registerMentatTools(
 
         api.logger.info(`search_chat_history: searchReq=${JSON.stringify(searchReq)}`);
 
-        const results = await client.search(searchReq);
-        if (!results || results.length === 0) {
+        const rawResults = await client.search(searchReq);
+        if (!rawResults || rawResults.length === 0) {
           return {
             content: [
               { type: "text" as const, text: "No matching conversations found in past sessions." },
@@ -550,15 +552,32 @@ export function registerMentatTools(
           };
         }
 
-        // Log result session_ids for debugging exclusion
-        if (results.length > 0) {
-          const resultSessionIds = results.map(
-            (r) => r.session_id ?? r.metadata?.session_id ?? "no-session-id",
-          );
-          api.logger.info(
-            `search_chat_history: result session_ids=${JSON.stringify(resultSessionIds)}, currentSessionId=${currentSessionId ?? "NULL"}`,
-          );
+        // Filter out low-relevance results.  With hybrid search the best
+        // hits have score ≈ 0; pure-vector scores use cosine distance (0–2).
+        // A threshold of 1.5 drops clearly irrelevant noise while keeping
+        // borderline matches for the LLM to judge.
+        const SCORE_THRESHOLD = 1.5;
+        const results = rawResults.filter((r) => r.score <= SCORE_THRESHOLD);
+
+        if (results.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "No matching conversations found in past sessions (results below relevance threshold).",
+              },
+            ],
+            details: { count: 0 },
+          };
         }
+
+        // Log result session_ids for debugging exclusion
+        const resultSessionIds = results.map(
+          (r) => r.session_id ?? r.metadata?.session_id ?? "no-session-id",
+        );
+        api.logger.info(
+          `search_chat_history: ${rawResults.length} raw → ${results.length} after threshold, session_ids=${JSON.stringify(resultSessionIds)}, currentSessionId=${currentSessionId ?? "NULL"}`,
+        );
 
         const text = results
           .map((r, i) => {
@@ -566,8 +585,8 @@ export function registerMentatTools(
             const fnMatch = r.filename?.match(/^([^.]+)\.jsonl@?(\d*)$/);
             const sessionId = fnMatch?.[1] ?? r.filename ?? "unknown";
             const shortSession = sessionId.slice(0, 8);
-            const snippet = r.content?.slice(0, 300) ?? r.summary ?? "";
-            return `${i + 1}. session:${shortSession}… (doc: ${r.doc_id.slice(0, 12)})\n${snippet}`;
+            const snippet = r.content ?? r.summary ?? "";
+            return `${i + 1}. session:${shortSession}… (doc: ${r.doc_id.slice(0, 12)}) [score: ${r.score.toFixed(4)}]\n${snippet}`;
           })
           .join("\n\n");
 
