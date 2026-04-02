@@ -220,6 +220,15 @@ export class MentatClient {
     return true;
   }
 
+  /** Remove all docs for a session from a collection and purge from vecdb. */
+  async deleteSession(collection: string, sessionId: string): Promise<string[]> {
+    const res = await this.request<{ removed_doc_ids: string[] }>(
+      "DELETE",
+      `/collections/${encodeURIComponent(collection)}/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return res?.removed_doc_ids ?? [];
+  }
+
   // ── Stats ────────────────────────────────────────────────────────
 
   async getStats(): Promise<StatsResponse | null> {
