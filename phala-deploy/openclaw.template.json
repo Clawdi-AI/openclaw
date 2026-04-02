@@ -139,6 +139,8 @@
   },
   "tools": {
     "exec": {
+      "host": "gateway",
+      "security": "full",
       "ask": "off"
     },
     "media": {
