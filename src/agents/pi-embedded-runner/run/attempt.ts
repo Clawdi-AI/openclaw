@@ -2670,6 +2670,33 @@ export async function runEmbeddedAttempt(
         });
         anthropicPayloadLogger?.recordUsage(messagesSnapshot, promptError);
 
+        // Auto-generate session title on first exchange (fire-and-forget)
+        const autoTitleSessionKey = params.sessionKey;
+        const autoTitleConfig = params.config;
+        if (
+          autoTitleSessionKey &&
+          params.trigger === "user" &&
+          !aborted &&
+          !promptError &&
+          autoTitleConfig
+        ) {
+          import("../../session-auto-title.js")
+            .then(({ maybeGenerateSessionTitle }) =>
+              maybeGenerateSessionTitle({
+                success: true,
+                trigger: params.trigger,
+                sessionKey: autoTitleSessionKey,
+                sessionId: sessionIdUsed,
+                agentId: hookAgentId ?? params.agentId ?? "main",
+                messages: messagesSnapshot,
+                config: autoTitleConfig,
+              }),
+            )
+            .catch((err) => {
+              log.warn(`session-auto-title failed: ${err}`);
+            });
+        }
+
         // Run agent_end hooks to allow plugins to analyze the conversation
         // This is fire-and-forget, so we don't await
         // Run even on compaction timeout so plugins can log/cleanup

@@ -660,6 +660,33 @@ describe("deriveSessionTitle", () => {
     } as SessionEntry;
     expect(deriveSessionTitle(entry)).toBe("Actual Subject");
   });
+
+  test("prefers label over subject and firstUserMessage", () => {
+    const entry = {
+      sessionId: "abc123",
+      label: "API Design Discussion",
+      subject: "General",
+    } as SessionEntry;
+    expect(deriveSessionTitle(entry, "Hello there")).toBe("API Design Discussion");
+  });
+
+  test("displayName wins over label", () => {
+    const entry = {
+      sessionId: "abc123",
+      displayName: "Manual Name",
+      label: "Auto Title",
+    } as SessionEntry;
+    expect(deriveSessionTitle(entry)).toBe("Manual Name");
+  });
+
+  test("ignores empty label and falls through to subject", () => {
+    const entry = {
+      sessionId: "abc123",
+      label: "   ",
+      subject: "Fallback Subject",
+    } as SessionEntry;
+    expect(deriveSessionTitle(entry)).toBe("Fallback Subject");
+  });
 });
 
 describe("listSessionsFromStore search", () => {
