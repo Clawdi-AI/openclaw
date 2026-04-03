@@ -9,7 +9,7 @@ services:
     privileged: true
     ports:
       - "1022:22"
-      - "18789:18789"
+      - "18789:18789"   # Controller (proxies to all internal services)
     volumes:
       - /home/root/.ssh:/root/.ssh:ro
       - openclaw_data:/data
