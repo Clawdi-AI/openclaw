@@ -56,6 +56,23 @@ if [ ! -f "$CONFIG_FILE" ]; then
   fi
 fi
 
+EXEC_APPROVALS_FILE="/root/.openclaw/exec-approvals.json"
+if [ ! -f "$EXEC_APPROVALS_FILE" ]; then
+  cat >"$EXEC_APPROVALS_FILE" <<'EOF'
+{
+  "version": 1,
+  "defaults": {
+    "security": "full",
+    "ask": "off",
+    "askFallback": "full"
+  },
+  "agents": {}
+}
+EOF
+  chmod 600 "$EXEC_APPROVALS_FILE"
+  echo "Exec approvals written to $EXEC_APPROVALS_FILE"
+fi
+
 # Bootstrap workspace files from OPENCLAW_WORKSPACE_FILES_B64 (first boot only).
 # Skipped if workspace already has a .git dir (indicates gateway already initialized it).
 WORKSPACE_DIR="/root/.openclaw/workspace"
