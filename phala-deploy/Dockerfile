@@ -54,11 +54,7 @@ ENV PATH="/root/.local/bin:${PATH}"
 RUN npm install -g mcporter && \
     rm -rf /root/.npm /tmp/*
 
-# Layer 8.1: Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code && \
-    rm -rf /root/.npm /tmp/*
-
-# Layer 8.2: Set zsh as default shell
+# Set zsh as default shell
 RUN chsh -s $(which zsh) root
 
 # Layer 9: ttyd (headless PTY server — proxied through controller)
