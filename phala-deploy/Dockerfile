@@ -6,9 +6,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Layer 1: System packages (Docker binaries installed below)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg git bash tmux unzip lsof \
+      ca-certificates curl gnupg git bash zsh tmux unzip lsof \
       iptables lsb-release sudo \
-      python3-pip python3-venv && \
+      python3-pip python3-venv supervisor && \
     update-alternatives --set iptables /usr/sbin/iptables-legacy && \
     update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy && \
     rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED && \
@@ -53,6 +53,27 @@ ENV PATH="/root/.local/bin:${PATH}"
 # Layer 8: mcporter (MCP client CLI, used by composio skill)
 RUN npm install -g mcporter && \
     rm -rf /root/.npm /tmp/*
+
+# Set zsh as default shell
+RUN chsh -s $(which zsh) root
+
+# Layer 9: ttyd (headless PTY server — proxied through controller)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then TTYD_ARCH="aarch64"; else TTYD_ARCH="x86_64"; fi && \
+    curl -fsSL -o /usr/local/bin/ttyd \
+      "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.${TTYD_ARCH}" && \
+    chmod +x /usr/local/bin/ttyd
+
+# Layer 10: Controller (Hono auth proxy + management routes)
+COPY phala-deploy/controller/package.json phala-deploy/controller/bun.lock* /tmp/controller/
+COPY phala-deploy/controller/src/ /tmp/controller/src/
+RUN cd /tmp/controller && \
+    bun install --frozen-lockfile 2>/dev/null || bun install && \
+    bun build src/index.ts --target=node --outfile=/usr/local/bin/controller.js && \
+    rm -rf /tmp/controller
+
+COPY phala-deploy/supervisor/supervisord.conf /etc/supervisor/supervisord.conf
+COPY phala-deploy/supervisor/conf.d/ /etc/supervisor/conf.d/
 
 COPY phala-deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

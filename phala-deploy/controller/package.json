@@ -1,0 +1,16 @@
+{
+  "name": "clawdi-controller",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/index.ts --target=node --outfile=dist/controller.js",
+    "dev": "bun run --watch src/index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -20,6 +20,9 @@ if [ -n "$MASTER_KEY" ]; then
   echo "Keys derived."
 fi
 
+# Ensure auth token has a fallback for dev/local use
+export GATEWAY_AUTH_TOKEN="${GATEWAY_AUTH_TOKEN:-admin}"
+
 mkdir -p "$DATA_DIR"
 
 # --- Set up home directory symlinks ---
@@ -159,78 +162,28 @@ if [ -n "$MASTER_KEY" ]; then
   ' "$PAIRED_JSON"
 fi
 
-# Start SSH daemon if installed (full image only)
-if [ -x /usr/sbin/sshd ]; then
+# --- Prepare SSH directories ---
+if [ "${ENABLE_SSH:-}" = "1" ] && [ -x /usr/sbin/sshd ]; then
   mkdir -p /var/run/sshd /root/.ssh
   chmod 700 /root/.ssh 2>/dev/null || true
   chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
-  /usr/sbin/sshd
-  echo "SSH daemon started."
 fi
 
-# Start Docker daemon only when explicitly enabled (e.g. Phala CVM).
-# k3s pods don't need Docker — the agent runs directly on the host.
+# --- Disable optional services unless explicitly enabled ---
+# Configs are baked into the image; remove the ones that aren't wanted.
+if [ "${ENABLE_SSH:-}" != "1" ]; then
+  rm -f /etc/supervisor/conf.d/sshd.conf
+  echo "SSH daemon disabled (set ENABLE_SSH=1 to enable)."
+fi
 if [ "${ENABLE_DOCKER:-}" = "1" ]; then
   rm -f /var/run/docker.pid /var/run/containerd/containerd.pid
-  dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs &
-  DOCKERD_PID=$!
-
-  echo "Waiting for Docker daemon..."
-  DOCKER_WAIT=0
-  while ! docker info >/dev/null 2>&1; do
-    sleep 1
-    DOCKER_WAIT=$((DOCKER_WAIT + 1))
-    if [ $DOCKER_WAIT -ge 30 ]; then
-      echo "Warning: Docker daemon not ready after 30s, continuing without it."
-      break
-    fi
-    if ! kill -0 $DOCKERD_PID 2>/dev/null; then
-      echo "Warning: Docker daemon exited, continuing without it."
-      break
-    fi
-  done
-  if docker info >/dev/null 2>&1; then
-    echo "Docker daemon ready."
-  fi
 else
+  rm -f /etc/supervisor/conf.d/dockerd.conf
   echo "Docker daemon disabled (set ENABLE_DOCKER=1 to enable)."
 fi
 
-# Gateway supervision (keep container alive for SSH even if gateway fails).
-GATEWAY_RESTART_DELAY="${OPENCLAW_GATEWAY_RESTART_DELAY:-5}"
-GATEWAY_RESTART_MAX_DELAY="${OPENCLAW_GATEWAY_RESTART_MAX_DELAY:-60}"
-GATEWAY_RESET_AFTER="${OPENCLAW_GATEWAY_RESET_AFTER:-600}"
+# Ensure log directory exists (all service logs go here, non-persistent)
+mkdir -p /var/log/supervisor
 
-backoff="$GATEWAY_RESTART_DELAY"
-set +e
-while true; do
-  echo "Starting OpenClaw gateway..."
-  start_time=$(date +%s)
-  openclaw gateway run --bind lan --port 18789 --force
-  exit_code=$?
-  end_time=$(date +%s)
-  runtime=$((end_time - start_time))
-  echo "Gateway exited with code ${exit_code}."
-
-  # Kill orphaned openclaw children from the previous run so they don't
-  # accumulate across restarts (especially under OOM pressure).
-  pkill -9 -x openclaw 2>/dev/null || true
-
-  if [ "$runtime" -ge "$GATEWAY_RESET_AFTER" ]; then
-    backoff="$GATEWAY_RESTART_DELAY"
-    echo "Gateway ran for ${runtime}s; resetting backoff to ${backoff}s."
-  else
-    if [ "$backoff" -lt 1 ]; then
-      backoff=1
-    fi
-    if [ "$backoff" -lt "$GATEWAY_RESTART_MAX_DELAY" ]; then
-      backoff=$((backoff * 2))
-      if [ "$backoff" -gt "$GATEWAY_RESTART_MAX_DELAY" ]; then
-        backoff="$GATEWAY_RESTART_MAX_DELAY"
-      fi
-    fi
-  fi
-
-  echo "Restarting gateway in ${backoff}s..."
-  sleep "$backoff"
-done
+# Hand off to supervisord as PID 1
+exec supervisord -n -c /etc/supervisor/supervisord.conf
