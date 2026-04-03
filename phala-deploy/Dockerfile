@@ -54,8 +54,9 @@ ENV PATH="/root/.local/bin:${PATH}"
 RUN npm install -g mcporter && \
     rm -rf /root/.npm /tmp/*
 
-# Set zsh as default shell
-RUN chsh -s $(which zsh) root
+# Oh My Zsh + set zsh as default shell
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended && \
+    chsh -s $(which zsh) root
 
 # Layer 9: ttyd (headless PTY server — proxied through controller)
 RUN ARCH=$(uname -m) && \
