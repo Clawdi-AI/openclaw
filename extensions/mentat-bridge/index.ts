@@ -19,7 +19,12 @@ import {
   formatRelevantMemoriesContext,
 } from "./prompt.js";
 import { SessionCleaner } from "./session-cleaner.js";
-import { ActiveSessionTracker, DocMetaCache, SessionReadTracker } from "./session-state.js";
+import {
+  ActiveSessionTracker,
+  ContinuationBriefStore,
+  DocMetaCache,
+  SessionReadTracker,
+} from "./session-state.js";
 import { registerMentatTools } from "./tools.js";
 
 async function ensureDefaultCollections(client: MentatClient, chatHistory: boolean) {
@@ -80,6 +85,7 @@ const mentatBridgePlugin = {
     const docMetaCache = new DocMetaCache();
     const activeSessionTracker = new ActiveSessionTracker();
     const sessionsDir = join(homedir(), ".openclaw", "agents", "main", "sessions");
+    const continuationStore = new ContinuationBriefStore(join(sessionsDir, ".continuation"));
     const sessionCleaner = new SessionCleaner(sessionsDir, api.logger);
 
     // ── Service lifecycle ──────────────────────────────────────────
@@ -116,8 +122,27 @@ const mentatBridgePlugin = {
         // Static: Mentat two-step retrieval protocol instructions (cached by providers)
         const skillPrompt = await fetchSkillPrompt(client);
 
-        // Dynamic: auto-recall relevant memories for current prompt
+        // Dynamic: session continuation context (injected once after reset)
         let prependContext: string | undefined;
+
+        if (ctx.sessionKey && continuationStore.has(ctx.sessionKey)) {
+          const continuation = continuationStore.consume(ctx.sessionKey);
+          if (continuation) {
+            prependContext = [
+              "<session-continuation>",
+              `This session continues a previous conversation (session ID: ${continuation.resumedFrom}) in this channel/thread that was reset.`,
+              "Here are the last messages from the previous session for context:",
+              "",
+              continuation.brief,
+              "",
+              `Use \`search_chat_history\` and \`read_chat_history\` (session_id="${continuation.resumedFrom}") tools to look up more context from the previous session if needed.`,
+              "</session-continuation>",
+            ].join("\n");
+            api.logger.info(`mentat-bridge: injected continuation context for ${ctx.sessionKey}`);
+          }
+        }
+
+        // Dynamic: auto-recall relevant memories for current prompt
 
         if (cfg.autoRecall && event.prompt && event.prompt.length >= 5) {
           const results = await client.search({
@@ -126,13 +151,14 @@ const mentatBridgePlugin = {
             collection: "memory",
           });
           if (results && results.length > 0) {
-            prependContext = formatRelevantMemoriesContext(
+            const memoriesCtx = formatRelevantMemoriesContext(
               results.map((r) => ({
                 text: r.content ?? r.summary ?? r.filename,
                 source: r.source,
                 score: r.score,
               })),
             );
+            prependContext = prependContext ? `${prependContext}\n\n${memoriesCtx}` : memoriesCtx;
             api.logger.info(
               `mentat-bridge: auto-recall → ${results.length} memories (scores: ${results.map((r) => r.score.toFixed(2)).join(", ")})`,
             );
@@ -166,11 +192,14 @@ const mentatBridgePlugin = {
 
     // ── Tools (7 tools) ────────────────────────────────────────────
 
+    const indexedDir = join(sessionsDir, ".indexed");
+
     registerMentatTools(
       api as Parameters<typeof registerMentatTools>[0],
       client,
       cfg,
       activeSessionTracker,
+      indexedDir,
     );
 
     // ── CLI ─────────────────────────────────────────────────────────
@@ -244,6 +273,8 @@ const mentatBridgePlugin = {
       client,
       readTracker,
       activeSessionTracker,
+      continuationStore,
+      indexedDir,
     );
   },
 };
