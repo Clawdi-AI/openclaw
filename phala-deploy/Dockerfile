@@ -58,9 +58,8 @@ RUN npm install -g mcporter && \
 RUN npm install -g @anthropic-ai/claude-code && \
     rm -rf /root/.npm /tmp/*
 
-# Layer 8.2: Oh My Zsh + set zsh as default shell
-RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended && \
-    chsh -s $(which zsh) root
+# Layer 8.2: Set zsh as default shell
+RUN chsh -s $(which zsh) root
 
 # Layer 9: ttyd (headless PTY server — proxied through controller)
 RUN ARCH=$(uname -m) && \
