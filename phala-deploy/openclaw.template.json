@@ -138,6 +138,11 @@
     }
   },
   "tools": {
+    "exec": {
+      "host": "gateway",
+      "security": "full",
+      "ask": "off"
+    },
     "media": {
       "audio": {
         "enabled": true,
