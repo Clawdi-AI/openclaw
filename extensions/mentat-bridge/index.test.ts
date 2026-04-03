@@ -265,6 +265,32 @@ describe("session-state", () => {
   });
 });
 
+describe("session-cleaner", () => {
+  test("retains indexed history after raw transcript is archived", async () => {
+    const { mkdirSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { SessionCleaner } = await import("./session-cleaner.js");
+
+    const tmpDir = join("/tmp", `mentat-cleaner-${Date.now()}`);
+    const indexedDir = join(tmpDir, ".indexed");
+    mkdirSync(indexedDir, { recursive: true });
+
+    const indexedPath = join(indexedDir, "archived-session.jsonl");
+    writeFileSync(indexedPath, '{"role":"user","text":"kept","ts":"2026-04-03T03:45:00.000Z"}\n');
+    writeFileSync(
+      join(tmpDir, "archived-session.jsonl.reset.2026-04-03T03-45-08.819Z"),
+      '{"type":"message"}\n',
+    );
+
+    const cleaner = new SessionCleaner(tmpDir);
+    await (cleaner as unknown as { scanAll: () => Promise<void> }).scanAll();
+
+    expect(existsSync(indexedPath)).toBe(true);
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════
 // 4. Unit: Prompt Utilities
 // ═══════════════════════════════════════════════════════════════════════
@@ -650,14 +676,30 @@ describe("tools", () => {
       autoCapture: false,
       compressResults: true,
       compressThresholdTokens: 2000,
+      chatHistory: true,
     };
   }
 
-  test("registers 7 tools", async () => {
+  async function callRegisterTools(
+    api: ReturnType<typeof createMockApi>["api"],
+    client: unknown,
+    cfg?: ReturnType<typeof defaultConfig>,
+  ) {
+    const { ActiveSessionTracker } = await import("./session-state.js");
     const { registerMentatTools } = await import("./tools.js");
+    registerMentatTools(
+      api,
+      client as never,
+      cfg ?? defaultConfig(),
+      new ActiveSessionTracker(),
+      "/tmp/test-indexed",
+    );
+  }
+
+  test("registers 9 tools", async () => {
     const { api, tools } = createMockApi();
-    registerMentatTools(api, createMockClient() as never, defaultConfig());
-    expect(tools).toHaveLength(7);
+    await callRegisterTools(api, createMockClient());
+    expect(tools).toHaveLength(9);
     const names = tools.map((t) => t.opts.name);
     expect(names).toContain("search_memory");
     expect(names).toContain("memory_store");
@@ -669,10 +711,9 @@ describe("tools", () => {
   });
 
   test("all tools return unhealthyResult when server is down", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient(false);
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     for (const name of [
       "search_memory",
@@ -695,13 +736,12 @@ describe("tools", () => {
   });
 
   test("search_memory returns formatted results", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.search.mockResolvedValue([
       { doc_id: "d1", filename: "test.md", section: "intro", content: "hello world", score: 0.9 },
     ]);
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("search_memory").execute("c1", { query: "hello" })) as {
       content: Array<{ text: string }>;
@@ -712,13 +752,12 @@ describe("tools", () => {
   });
 
   test("search_memory with toc_only", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.search.mockResolvedValue([
       { doc_id: "d1", filename: "test.md", section: "intro", score: 0.9 },
     ]);
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("search_memory").execute("c1", {
       query: "hello",
@@ -731,7 +770,6 @@ describe("tools", () => {
   });
 
   test("search_memory with grouped=true uses searchGrouped", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.searchGrouped.mockResolvedValue([
       {
@@ -742,7 +780,7 @@ describe("tools", () => {
       },
     ]);
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("search_memory").execute("c1", {
       query: "hello",
@@ -758,11 +796,10 @@ describe("tools", () => {
   });
 
   test("search_memory returns empty message when no results", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.search.mockResolvedValue([]);
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("search_memory").execute("c1", { query: "nothing" })) as {
       content: Array<{ text: string }>;
@@ -773,7 +810,6 @@ describe("tools", () => {
   });
 
   test("memory_store indexes content via client", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.indexContent.mockResolvedValue({
       doc_id: "mem-1",
@@ -781,7 +817,7 @@ describe("tools", () => {
       status: "completed",
     });
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("memory_store").execute("c1", {
       text: "User prefers dark mode",
@@ -800,11 +836,10 @@ describe("tools", () => {
   });
 
   test("memory_forget by doc_id", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.removeDocFromCollections.mockResolvedValue(true);
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("memory_forget").execute("c1", { doc_id: "d1" })) as {
       details: { action: string };
@@ -814,14 +849,13 @@ describe("tools", () => {
   });
 
   test("memory_forget by query with single result auto-deletes", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.search.mockResolvedValue([
       { doc_id: "d1", filename: "mem.md", content: "dark mode", score: 0.95 },
     ]);
     client.removeDocFromCollections.mockResolvedValue(true);
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("memory_forget").execute("c1", { query: "dark mode" })) as {
       details: { action: string; doc_id: string };
@@ -831,14 +865,13 @@ describe("tools", () => {
   });
 
   test("memory_forget by query with multiple results lists candidates", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.search.mockResolvedValue([
       { doc_id: "d1", filename: "a.md", content: "dark mode", score: 0.7 },
       { doc_id: "d2", filename: "b.md", content: "dark theme", score: 0.6 },
     ]);
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("memory_forget").execute("c1", { query: "dark" })) as {
       details: { action: string; candidates: unknown[] };
@@ -848,10 +881,9 @@ describe("tools", () => {
   });
 
   test("memory_forget with no params returns error", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("memory_forget").execute("c1", {})) as {
       details: { error: string };
@@ -860,7 +892,6 @@ describe("tools", () => {
   });
 
   test("get_doc_meta returns formatted metadata", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.getDocMeta.mockResolvedValue({
       doc_id: "d1",
@@ -875,7 +906,7 @@ describe("tools", () => {
       processing_status: "completed",
     });
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("get_doc_meta").execute("c1", { doc_id: "d1" })) as {
       content: Array<{ text: string }>;
@@ -888,7 +919,6 @@ describe("tools", () => {
   });
 
   test("read_segment returns content with summary", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.readSegment.mockResolvedValue({
       doc_id: "d1",
@@ -907,7 +937,7 @@ describe("tools", () => {
       expanded: false,
     });
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("read_segment").execute("c1", {
       doc_id: "d1",
@@ -920,11 +950,10 @@ describe("tools", () => {
   });
 
   test("index_file by path", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.indexFile.mockResolvedValue({ doc_id: "x1", filename: "app.ts", status: "processing" });
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("index_file").execute("c1", { path: "/src/app.ts" })) as {
       content: Array<{ text: string }>;
@@ -935,7 +964,6 @@ describe("tools", () => {
   });
 
   test("index_file by content+filename", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.indexContent.mockResolvedValue({
       doc_id: "x2",
@@ -943,7 +971,7 @@ describe("tools", () => {
       status: "completed",
     });
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("index_file").execute("c1", {
       content: "Some note",
@@ -955,10 +983,9 @@ describe("tools", () => {
   });
 
   test("index_file with missing params returns error", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("index_file").execute("c1", {})) as {
       details: { error: string };
@@ -967,11 +994,10 @@ describe("tools", () => {
   });
 
   test("memory_status shows progress", async () => {
-    const { registerMentatTools } = await import("./tools.js");
     const client = createMockClient();
     client.getStatus.mockResolvedValue({ doc_id: "d1", status: "processing", progress: 0.5 });
     const { api, getTool } = createMockApi();
-    registerMentatTools(api, client as never, defaultConfig());
+    await callRegisterTools(api, client);
 
     const result = (await getTool("memory_status").execute("c1", { doc_id: "d1" })) as {
       content: Array<{ text: string }>;
@@ -1772,9 +1798,20 @@ describe("hooks", () => {
   });
 
   describe("session-lifecycle", () => {
+    async function makeLifecycleArgs() {
+      const { SessionReadTracker, ActiveSessionTracker, ContinuationBriefStore } =
+        await import("./session-state.js");
+      return {
+        readTracker: new SessionReadTracker(),
+        activeSessionTracker: new ActiveSessionTracker(),
+        continuationStore: new ContinuationBriefStore("/tmp/test-continuation"),
+        indexedDir: "/tmp/test-indexed",
+      };
+    }
+
     test("session_start creates session collection", async () => {
       const { registerSessionLifecycleHooks } = await import("./hooks/session-lifecycle.js");
-      const { SessionReadTracker } = await import("./session-state.js");
+      const args = await makeLifecycleArgs();
 
       const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
       const api = {
@@ -1785,11 +1822,19 @@ describe("hooks", () => {
       };
       const client = {
         isHealthy: vi.fn(() => true),
+        ensureStarted: vi.fn(async () => {}),
         createCollection: vi.fn(async () => ({ name: "ses_abc", doc_count: 0 })),
         triggerGc: vi.fn(async () => ({ deleted: [] })),
       };
 
-      registerSessionLifecycleHooks(api, client as never, new SessionReadTracker());
+      registerSessionLifecycleHooks(
+        api,
+        client as never,
+        args.readTracker,
+        args.activeSessionTracker,
+        args.continuationStore,
+        args.indexedDir,
+      );
 
       await handlers.get("session_start")!({ sessionId: "abc", sessionKey: "sk1" }, {});
       expect(client.createCollection).toHaveBeenCalledWith(
@@ -1802,7 +1847,7 @@ describe("hooks", () => {
 
     test("session_end clears tracker and triggers GC", async () => {
       const { registerSessionLifecycleHooks } = await import("./hooks/session-lifecycle.js");
-      const { SessionReadTracker } = await import("./session-state.js");
+      const args = await makeLifecycleArgs();
 
       const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
       const api = {
@@ -1815,22 +1860,28 @@ describe("hooks", () => {
         isHealthy: vi.fn(() => true),
         triggerGc: vi.fn(async () => ({ deleted: [] })),
       };
-      const tracker = new SessionReadTracker();
-      tracker.trackRead("sk1", "d1");
+      args.readTracker.trackRead("sk1", "d1");
 
-      registerSessionLifecycleHooks(api, client as never, tracker);
+      registerSessionLifecycleHooks(
+        api,
+        client as never,
+        args.readTracker,
+        args.activeSessionTracker,
+        args.continuationStore,
+        args.indexedDir,
+      );
 
-      await handlers.get("session_end")(
+      await handlers.get("session_end")!(
         { sessionId: "abc", sessionKey: "sk1", messageCount: 10 },
         {},
       );
-      expect(tracker.hasReads("sk1")).toBe(false);
+      expect(args.readTracker.hasReads("sk1")).toBe(false);
       expect(client.triggerGc).toHaveBeenCalled();
     });
 
     test("subagent_spawning creates child collection with short TTL", async () => {
       const { registerSessionLifecycleHooks } = await import("./hooks/session-lifecycle.js");
-      const { SessionReadTracker } = await import("./session-state.js");
+      const args = await makeLifecycleArgs();
 
       const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
       const api = {
@@ -1841,10 +1892,18 @@ describe("hooks", () => {
       };
       const client = {
         isHealthy: vi.fn(() => true),
+        ensureStarted: vi.fn(async () => {}),
         createCollection: vi.fn(async () => ({ name: "ses_child1", doc_count: 0 })),
       };
 
-      registerSessionLifecycleHooks(api, client as never, new SessionReadTracker());
+      registerSessionLifecycleHooks(
+        api,
+        client as never,
+        args.readTracker,
+        args.activeSessionTracker,
+        args.continuationStore,
+        args.indexedDir,
+      );
 
       const result = await handlers.get("subagent_spawning")!(
         { childSessionKey: "child1", agentId: "agent1", mode: "run" },
@@ -1865,7 +1924,7 @@ describe("hooks", () => {
 
     test("subagent_spawning returns ok when unhealthy", async () => {
       const { registerSessionLifecycleHooks } = await import("./hooks/session-lifecycle.js");
-      const { SessionReadTracker } = await import("./session-state.js");
+      const args = await makeLifecycleArgs();
 
       const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
       const api = {
@@ -1876,10 +1935,18 @@ describe("hooks", () => {
       };
       const client = {
         isHealthy: vi.fn(() => false),
+        ensureStarted: vi.fn(async () => {}),
         createCollection: vi.fn(),
       };
 
-      registerSessionLifecycleHooks(api, client as never, new SessionReadTracker());
+      registerSessionLifecycleHooks(
+        api,
+        client as never,
+        args.readTracker,
+        args.activeSessionTracker,
+        args.continuationStore,
+        args.indexedDir,
+      );
 
       const result = await handlers.get("subagent_spawning")!(
         { childSessionKey: "child1", agentId: "agent1", mode: "run" },
@@ -1888,6 +1955,237 @@ describe("hooks", () => {
       expect(result).toEqual({ status: "ok" });
       expect(client.createCollection).not.toHaveBeenCalled();
     });
+
+    test("session_start with resumedFrom stores continuation brief", async () => {
+      const { writeFileSync, mkdirSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { registerSessionLifecycleHooks } = await import("./hooks/session-lifecycle.js");
+      const args = await makeLifecycleArgs();
+
+      // Create a fake indexed JSONL for the previous session
+      const tmpIndexed = join("/tmp", `test-indexed-${Date.now()}`);
+      mkdirSync(tmpIndexed, { recursive: true });
+      const prevSessionId = "prev-session-001";
+      const lines = [
+        '{"role":"user","text":"hello","ts":"2026-04-01T10:00:00.000Z"}',
+        '{"role":"assistant","text":"hi there","ts":"2026-04-01T10:00:01.000Z"}',
+      ];
+      writeFileSync(join(tmpIndexed, `${prevSessionId}.jsonl`), lines.join("\n") + "\n");
+
+      const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+      const api = {
+        on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+          handlers.set(name, handler);
+        },
+        logger: { info: vi.fn(), debug: vi.fn() },
+      };
+      const client = {
+        isHealthy: vi.fn(() => true),
+        ensureStarted: vi.fn(async () => {}),
+        createCollection: vi.fn(async () => ({ name: "ses_new", doc_count: 0 })),
+      };
+
+      registerSessionLifecycleHooks(
+        api,
+        client as never,
+        args.readTracker,
+        args.activeSessionTracker,
+        args.continuationStore,
+        tmpIndexed,
+      );
+
+      await handlers.get("session_start")!(
+        {
+          sessionId: "new-session-001",
+          sessionKey: "sk1",
+          resumedFrom: prevSessionId,
+        },
+        {},
+      );
+
+      // Continuation brief should be stored
+      expect(args.continuationStore.has("sk1")).toBe(true);
+      const result = args.continuationStore.consume("sk1");
+      expect(result).toBeDefined();
+      expect(result!.brief).toContain("hello");
+      expect(result!.brief).toContain("hi there");
+      expect(result!.resumedFrom).toBe(prevSessionId);
+      // After consume, should be gone
+      expect(args.continuationStore.has("sk1")).toBe(false);
+    });
+
+    test("session_start without resumedFrom does not store brief", async () => {
+      const { registerSessionLifecycleHooks } = await import("./hooks/session-lifecycle.js");
+      const args = await makeLifecycleArgs();
+
+      const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+      const api = {
+        on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+          handlers.set(name, handler);
+        },
+        logger: { info: vi.fn(), debug: vi.fn() },
+      };
+      const client = {
+        isHealthy: vi.fn(() => true),
+        ensureStarted: vi.fn(async () => {}),
+        createCollection: vi.fn(async () => ({ name: "ses_abc", doc_count: 0 })),
+      };
+
+      registerSessionLifecycleHooks(
+        api,
+        client as never,
+        args.readTracker,
+        args.activeSessionTracker,
+        args.continuationStore,
+        args.indexedDir,
+      );
+
+      await handlers.get("session_start")!({ sessionId: "abc", sessionKey: "sk1" }, {});
+      expect(args.continuationStore.has("sk1")).toBe(false);
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 8a. ContinuationBriefStore persistence
+// ═══════════════════════════════════════════════════════════════════════
+
+describe("ContinuationBriefStore", () => {
+  test("persists to disk and survives re-instantiation", async () => {
+    const { mkdirSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { ContinuationBriefStore } = await import("./session-state.js");
+
+    const tmpDir = join("/tmp", `test-cont-store-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+
+    const store1 = new ContinuationBriefStore(tmpDir);
+    store1.set("key1", "brief content", "prev-session-id");
+    expect(store1.has("key1")).toBe(true);
+
+    // New instance pointing to same dir should see the persisted data
+    const store2 = new ContinuationBriefStore(tmpDir);
+    expect(store2.has("key1")).toBe(true);
+    const result = store2.consume("key1");
+    expect(result).toBeDefined();
+    expect(result!.brief).toBe("brief content");
+    expect(result!.resumedFrom).toBe("prev-session-id");
+    // Consumed — should be gone
+    expect(store2.has("key1")).toBe(false);
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 8b. read_chat_history tool
+// ═══════════════════════════════════════════════════════════════════════
+
+describe("read_chat_history tool", () => {
+  test("reads last N messages from session JSONL", async () => {
+    const { writeFileSync, mkdirSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { registerMentatTools } = await import("./tools.js");
+    const { ActiveSessionTracker } = await import("./session-state.js");
+
+    const tmpIndexed = join("/tmp", `test-read-hist-${Date.now()}`);
+    mkdirSync(tmpIndexed, { recursive: true });
+
+    const sessionId = "test-session-read";
+    const lines = Array.from({ length: 20 }, (_, i) =>
+      JSON.stringify({
+        role: i % 2 === 0 ? "user" : "assistant",
+        text: `msg-${i}`,
+        ts: `2026-04-01T10:${String(i).padStart(2, "0")}:00.000Z`,
+      }),
+    );
+    writeFileSync(join(tmpIndexed, `${sessionId}.jsonl`), lines.join("\n") + "\n");
+
+    const tools: { tool: unknown; opts: { name: string } }[] = [];
+    const api = {
+      registerTool: (tool: unknown, opts: unknown) => {
+        tools.push({ tool: tool as never, opts: opts as { name: string } });
+      },
+      logger: { info: vi.fn(), warn: vi.fn() },
+    };
+    const client = { isHealthy: vi.fn(() => true) };
+
+    registerMentatTools(
+      api,
+      client as never,
+      {
+        mentatUrl: "http://localhost:7832",
+        enabled: true,
+        autoIndex: true,
+        autoRecall: true,
+        autoCapture: false,
+        compressResults: true,
+        compressThresholdTokens: 2000,
+        chatHistory: true,
+      },
+      new ActiveSessionTracker(),
+      tmpIndexed,
+    );
+
+    const readTool = tools.find((t) => t.opts.name === "read_chat_history")!;
+    const execute = (
+      readTool.tool as { execute: (id: string, params: unknown) => Promise<unknown> }
+    ).execute;
+    const result = (await execute("call1", { session_id: sessionId, last_n: 5 })) as {
+      content: { text: string }[];
+      details: { total: number; returned: number };
+    };
+
+    expect(result.details.total).toBe(20);
+    expect(result.details.returned).toBe(5);
+    expect(result.content[0].text).toContain("msg-15");
+    expect(result.content[0].text).toContain("msg-19");
+    expect(result.content[0].text).not.toContain("msg-14");
+
+    rmSync(tmpIndexed, { recursive: true, force: true });
+  });
+
+  test("returns not found for missing session", async () => {
+    const { registerMentatTools } = await import("./tools.js");
+    const { ActiveSessionTracker } = await import("./session-state.js");
+
+    const tools: { tool: unknown; opts: { name: string } }[] = [];
+    const api = {
+      registerTool: (tool: unknown, opts: unknown) => {
+        tools.push({ tool: tool as never, opts: opts as { name: string } });
+      },
+      logger: { info: vi.fn(), warn: vi.fn() },
+    };
+    const client = { isHealthy: vi.fn(() => true) };
+
+    registerMentatTools(
+      api,
+      client as never,
+      {
+        mentatUrl: "http://localhost:7832",
+        enabled: true,
+        autoIndex: true,
+        autoRecall: true,
+        autoCapture: false,
+        compressResults: true,
+        compressThresholdTokens: 2000,
+        chatHistory: true,
+      },
+      new ActiveSessionTracker(),
+      "/tmp/nonexistent-indexed-dir",
+    );
+
+    const readTool = tools.find((t) => t.opts.name === "read_chat_history")!;
+    const execute = (
+      readTool.tool as { execute: (id: string, params: unknown) => Promise<unknown> }
+    ).execute;
+    const result = (await execute("call1", { session_id: "no-such-session" })) as {
+      content: { text: string }[];
+      details: { error: string };
+    };
+
+    expect(result.details.error).toBe("not_found");
+    expect(result.content[0].text).toContain("not found");
   });
 });
 

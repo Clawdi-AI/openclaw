@@ -1,5 +1,11 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { MentatClient } from "../client.js";
-import type { ActiveSessionTracker, SessionReadTracker } from "../session-state.js";
+import type {
+  ActiveSessionTracker,
+  ContinuationBriefStore,
+  SessionReadTracker,
+} from "../session-state.js";
 
 type PluginApi = {
   on: (
@@ -36,11 +42,42 @@ type SubagentContext = {
   requesterSessionKey?: string;
 };
 
+const CONTINUATION_BRIEF_LINES = 10;
+
+/** Read the last N lines from an indexed session JSONL file. */
+function readLastMessages(indexedDir: string, sessionId: string, lastN: number): string | null {
+  const filePath = join(indexedDir, `${sessionId}.jsonl`);
+  let content: string;
+  try {
+    content = readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+
+  const lines = content.split("\n").filter((l) => l.trim());
+  if (lines.length === 0) return null;
+
+  const selected = lines.slice(-lastN);
+  const messages: string[] = [];
+  for (const line of selected) {
+    try {
+      const rec = JSON.parse(line) as { role: string; text: string; ts: string };
+      const time = rec.ts ? new Date(rec.ts).toLocaleString() : "";
+      messages.push(`[${rec.role}] ${time}\n${rec.text}`);
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return messages.length > 0 ? messages.join("\n\n") : null;
+}
+
 export function registerSessionLifecycleHooks(
   api: PluginApi,
   client: MentatClient,
   readTracker: SessionReadTracker,
   activeSessionTracker: ActiveSessionTracker,
+  continuationStore: ContinuationBriefStore,
+  indexedDir: string,
 ) {
   // session_start: create ephemeral session collection + track active session
   api.on("session_start", async (event, _ctx) => {
@@ -49,6 +86,19 @@ export function registerSessionLifecycleHooks(
 
     // Track active session for chat history scope
     activeSessionTracker.set(ev.sessionId, ev.sessionKey);
+
+    // Detect session reset: if resumedFrom is set, this session continues
+    // a previous one (daily/idle reset). Read the previous session's last
+    // messages and store as a continuation brief for before_prompt_build.
+    if (ev.resumedFrom && ev.sessionKey) {
+      const brief = readLastMessages(indexedDir, ev.resumedFrom, CONTINUATION_BRIEF_LINES);
+      if (brief) {
+        continuationStore.set(ev.sessionKey, brief, ev.resumedFrom);
+        api.logger.info(
+          `mentat-bridge: continuation brief stored for ${ev.sessionKey} (resumed from ${ev.resumedFrom.slice(0, 8)}…)`,
+        );
+      }
+    }
 
     await client.ensureStarted();
     if (!client.isHealthy()) return;

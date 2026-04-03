@@ -2,6 +2,9 @@
  * Session Cleaner — pre-processes raw OpenClaw session JSONL files into
  * a cleaned `.indexed/` shadow directory that Mentat indexes directly.
  *
+ * Indexed files are retained after raw transcripts are reset/archived so
+ * historical chat search/read tools can continue to resolve old session IDs.
+ *
  * Cleaning rules (all filtering/stripping lives here, not in Mentat's probe):
  *   - Keep: user messages (text stripped of injected metadata preambles)
  *   - Keep: assistant messages that are regular text responses
@@ -15,15 +18,7 @@
  *   {"role":"user","text":"cleaned text","ts":"2026-03-30T07:36:00.000Z"}
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-  readdirSync,
-  statSync,
-  unlinkSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { join, basename } from "node:path";
 
@@ -291,13 +286,10 @@ export class SessionCleaner {
       return;
     }
 
-    // Collect active raw session filenames (not archived/ignored)
-    const activeRawFiles = new Set<string>();
     let anyProcessed = false;
     for (const entry of entries) {
       if (!entry.endsWith(".jsonl")) continue;
       if (matchesIgnore(entry)) continue;
-      activeRawFiles.add(entry);
 
       const rawPath = join(this.rawDir, entry);
       try {
@@ -308,43 +300,8 @@ export class SessionCleaner {
       }
     }
 
-    // Remove orphaned .indexed/ files whose raw source was archived/deleted
-    this.cleanOrphans(activeRawFiles);
-
     if (anyProcessed) {
       this.saveOffsets();
-    }
-  }
-
-  /**
-   * Delete .indexed/ files that no longer have an active raw source.
-   * When the raw file is renamed to .reset.xxx or deleted, the cleaned
-   * version should be removed so Mentat's watcher fires Change.deleted
-   * and purges the vecdb entries.
-   */
-  private cleanOrphans(activeRawFiles: Set<string>): void {
-    let indexedEntries: string[];
-    try {
-      indexedEntries = readdirSync(this.indexedDir);
-    } catch {
-      return;
-    }
-
-    for (const entry of indexedEntries) {
-      if (!entry.endsWith(".jsonl")) continue;
-      if (activeRawFiles.has(entry)) continue;
-
-      // This indexed file has no active raw source — remove it
-      const indexedPath = join(this.indexedDir, entry);
-      try {
-        unlinkSync(indexedPath);
-        // Also clean up the offset entry for the (now-gone) raw file
-        const rawPath = join(this.rawDir, entry);
-        delete this.offsets[rawPath];
-        this.logger.info(`session-cleaner: removed orphan ${entry} (raw source archived/deleted)`);
-      } catch (err) {
-        this.logger.warn(`session-cleaner: failed to remove orphan ${entry}: ${err}`);
-      }
     }
   }
 

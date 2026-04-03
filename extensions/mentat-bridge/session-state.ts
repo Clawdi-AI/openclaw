@@ -1,5 +1,7 @@
 /** Per-session state tracking for read history, doc-meta cache, and active session. */
 
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { DocMeta } from "./types.js";
 
 /**
@@ -68,6 +70,52 @@ export class SessionReadTracker {
 
   clearSession(sessionKey: string): void {
     this.sessions.delete(sessionKey);
+  }
+}
+
+/**
+ * Stores continuation briefs for sessions that were reset (daily/idle).
+ * When a session starts with `resumedFrom`, the previous session's last
+ * messages are stored here keyed by sessionKey. The before_prompt_build
+ * hook consumes (and removes) the brief on first injection.
+ *
+ * Briefs are persisted to disk so they survive agent restarts.
+ * Each brief is a separate file: `<dir>/<safe-key>.json`.
+ */
+export class ContinuationBriefStore {
+  private readonly dir: string;
+
+  constructor(dir: string) {
+    this.dir = dir;
+    mkdirSync(dir, { recursive: true });
+  }
+
+  set(sessionKey: string, brief: string, resumedFrom: string): void {
+    const filePath = this.filePath(sessionKey);
+    writeFileSync(filePath, JSON.stringify({ sessionKey, brief, resumedFrom, ts: Date.now() }));
+  }
+
+  /** Consume the brief — returns it and removes from store. */
+  consume(sessionKey: string): { brief: string; resumedFrom: string } | undefined {
+    const filePath = this.filePath(sessionKey);
+    try {
+      const raw = readFileSync(filePath, "utf-8");
+      unlinkSync(filePath);
+      const data = JSON.parse(raw) as { brief: string; resumedFrom: string };
+      return { brief: data.brief, resumedFrom: data.resumedFrom };
+    } catch {
+      return undefined;
+    }
+  }
+
+  has(sessionKey: string): boolean {
+    return existsSync(this.filePath(sessionKey));
+  }
+
+  private filePath(sessionKey: string): string {
+    // Encode sessionKey to a safe filename (replace non-alphanumeric with _)
+    const safe = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_");
+    return join(this.dir, `${safe}.json`);
   }
 }
 

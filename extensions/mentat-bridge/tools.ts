@@ -1,3 +1,4 @@
+import { readFileSync, statSync } from "node:fs";
 import { Type } from "@sinclair/typebox";
 import type { MentatClient } from "./client.js";
 import type { MentatBridgeConfig } from "./config.js";
@@ -25,6 +26,7 @@ export function registerMentatTools(
   client: MentatClient,
   _cfg: MentatBridgeConfig,
   activeSessionTracker: ActiveSessionTracker,
+  indexedDir: string,
 ) {
   // 1. search_memory — unified search (replaces memory_recall + memory_search + memory_get)
   api.registerTool(
@@ -602,5 +604,82 @@ export function registerMentatTools(
       },
     }),
     { name: "search_chat_history" },
+  );
+
+  // 9. read_chat_history — read raw messages from a past session
+  api.registerTool(
+    {
+      name: "read_chat_history",
+      label: "Read Chat History",
+      description:
+        "Read messages from a past session's chat history. Returns the last N messages (user + assistant) in chronological order. Use search_chat_history first to find relevant session IDs.",
+      parameters: Type.Object({
+        session_id: Type.String({
+          description:
+            "Session ID (from search_chat_history results, e.g. '61d0ad51-2b14-4796-8238-5f6f7dfcfbb7')",
+        }),
+        last_n: Type.Optional(
+          Type.Number({
+            description: "Number of recent messages to return (default: 50, max: 200)",
+          }),
+        ),
+      }),
+      async execute(_toolCallId: string, params: { session_id: string; last_n?: number }) {
+        const lastN = Math.min(Math.max(params.last_n ?? 50, 1), 200);
+        const filePath = `${indexedDir}/${params.session_id}.jsonl`;
+
+        let content: string;
+        try {
+          const stat = statSync(filePath);
+          if (!stat.isFile()) {
+            return {
+              content: [{ type: "text" as const, text: `Session ${params.session_id} not found.` }],
+              details: { error: "not_found" },
+            };
+          }
+          content = readFileSync(filePath, "utf-8");
+        } catch {
+          return {
+            content: [{ type: "text" as const, text: `Session ${params.session_id} not found.` }],
+            details: { error: "not_found" },
+          };
+        }
+
+        const lines = content.split("\n").filter((l) => l.trim());
+        const total = lines.length;
+        const selected = lines.slice(-lastN);
+
+        const messages: string[] = [];
+        for (const line of selected) {
+          try {
+            const rec = JSON.parse(line) as { role: string; text: string; ts: string };
+            const time = rec.ts ? new Date(rec.ts).toLocaleString() : "";
+            messages.push(`[${rec.role}] ${time}\n${rec.text}`);
+          } catch {
+            // skip malformed lines
+          }
+        }
+
+        if (messages.length === 0) {
+          return {
+            content: [
+              { type: "text" as const, text: `Session ${params.session_id} has no messages.` },
+            ],
+            details: { total: 0 },
+          };
+        }
+
+        const header =
+          selected.length < total
+            ? `Showing last ${selected.length} of ${total} messages:`
+            : `All ${total} messages:`;
+
+        return {
+          content: [{ type: "text" as const, text: `${header}\n\n${messages.join("\n\n")}` }],
+          details: { total, returned: selected.length },
+        };
+      },
+    },
+    { name: "read_chat_history" },
   );
 }
