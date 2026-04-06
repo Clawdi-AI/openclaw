@@ -66,19 +66,6 @@ By default, `clawhub` installs into `./skills` under your current working
 directory (or falls back to the configured OpenClaw workspace). OpenClaw picks
 that up as `<workspace>/skills` on the next session.
 
-## Bundled examples (documents + canvas)
-
-Recent bundled skills include richer document and visual workflows:
-
-- `excel-xlsx` — spreadsheet generation/editing/recalculation with bundled helper scripts.
-- `canvas-design` — visual canvas/art direction workflow with bundled font assets.
-- `pdf` (`skills/pdf`) — full PDF processing workflow with bundled Python scripts.
-- `pdf-extract` — lightweight extraction-focused PDF helper.
-- `powerpoint-pptx` — deck generation/editing with bundled Office/PPTX helper scripts.
-- `word-docx` — Word document creation/editing with bundled Office/DOCX helper scripts.
-
-For script-based skills, instructions should reference `{baseDir}` so helpers resolve from the skill folder reliably.
-
 ## Security notes
 
 - Treat third-party skills as **untrusted code**. Read them before enabling.
