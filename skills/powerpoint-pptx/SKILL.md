@@ -1,103 +1,252 @@
 ---
-name: Powerpoint / PPTX
-slug: powerpoint-pptx
-version: 1.0.1
-homepage: https://clawic.com/skills/powerpoint-pptx
-description: "Create, inspect, and edit Microsoft PowerPoint presentations and PPTX decks with reliable layouts, templates, placeholders, notes, charts, and visual QA. Use when (1) the task is about PowerPoint or `.pptx`; (2) layouts, placeholders, notes, charts, comments, or template fidelity matter; (3) the deck must render cleanly after edits."
-changelog: Rebalanced the skill toward template inventory, layout mapping, and higher-signal QA after a stricter external audit.
+name: powerpoint-pptx
+description: Use when creating, editing, analyzing, validating, or packaging PowerPoint `.pptx` presentations, including template-driven slide workflows, layout QA, and OOXML-level operations.
 metadata:
-  { "clawdbot": { "emoji": "📊", "requires": { "bins": [] }, "os": ["linux", "darwin", "win32"] } }
+  {
+    "openclaw":
+      {
+        "requires": { "bins": ["python3"] },
+        "install":
+          [
+            {
+              "id": "python-brew",
+              "kind": "brew",
+              "formula": "python",
+              "bins": ["python3"],
+              "label": "Install Python (brew)",
+            },
+          ],
+      },
+  }
+license: Proprietary. LICENSE.txt has complete terms
 ---
 
-## When to Use
+# PPTX Skill
 
-Use when the main artifact is a Microsoft PowerPoint presentation or `.pptx` deck, especially when layouts, templates, placeholders, notes, comments, charts, extraction, editing, or final visual quality matter.
+## Quick Reference
 
-## Core Rules
+| Task                         | Guide                                    |
+| ---------------------------- | ---------------------------------------- |
+| Read/analyze content         | `python -m markitdown presentation.pptx` |
+| Edit or create from template | Read [editing.md](editing.md)            |
+| Create from scratch          | Read [pptxgenjs.md](pptxgenjs.md)        |
 
-### 1. Choose the workflow before touching the deck
+---
 
-- Reading text, editing an existing deck, rebuilding from a template, and creating from scratch are different jobs with different failure modes.
-- For text extraction or inspection, read the deck before editing it.
-- Text extraction plus thumbnail-style visual inspection is safer than editing from shape assumptions alone.
-- For template-driven work, inventory the deck before replacing content.
-- For deep edits, remember a `.pptx` file is OOXML with separate parts for slides, layouts, masters, media, notes, and comments.
-- If a template exists, template fidelity beats generic slide-design instincts.
-- Reusing or duplicating a good existing slide is often safer than rebuilding it and hoping the theme still matches.
+## Reading Content
 
-### 2. Inventory the deck before replacing content
+```bash
+# Text extraction
+python -m markitdown presentation.pptx
 
-- Count the reusable layouts, real placeholders, notes, comments, media, and recurring typography or color patterns first.
-- Placeholder indexes and layout indexes are not portable assumptions.
-- Inspect the actual slide or template before targeting title, body, chart, or image shapes.
-- Speaker notes, comments, and linked assets can live outside the visible slide surface.
-- A missing or wrong placeholder target can silently land content in the wrong box or wrong layer.
-- Master and layout settings can override local slide edits, so the visible problem is not always on the slide you are editing.
+# Visual overview
+python {baseDir}/scripts/thumbnail.py presentation.pptx
 
-### 3. Match content to the actual placeholders
+# Raw XML
+python {baseDir}/scripts/office/unpack.py presentation.pptx unpacked/
+```
 
-- Count the actual content pieces before choosing a layout.
-- Pick layouts based on the real number of ideas, columns, images, or charts the slide needs.
-- Do not force two ideas into a three-column slide or cram dense text under a chart.
-- Category counts and data series lengths must match or charts will break in ugly ways.
-- Explicit sizing beats wishful thinking: text boxes, images, and charts need real space, not "it should fit".
-- Do not choose a layout with more placeholders than the content can meaningfully fill.
-- Quote layouts are for real quotes, and image-led layouts are for slides that actually have images.
-- For chart-, table-, or image-heavy slides, full-slide or two-column layouts are usually safer than stacking dense text above the visual.
+---
 
-### 4. Preserve the deck's visual language
+## Editing Workflow
 
-- Theme, master, and layout files usually decide fonts, colors, and hierarchy more than any one slide does.
-- Start from the deck's actual theme, fonts, spacing, and aspect ratio instead of improvising a new style.
-- Reuse the deck's own alignment and spacing system instead of inventing a second visual language.
-- Use common fonts for portability and strong contrast for readability.
-- Preserve the template's visual logic first; originality matters less than not breaking the deck's existing language.
-- Combining slides from multiple sources requires normalizing themes, masters, and alignment afterward.
+**Read [editing.md](editing.md) for full details.**
 
-### 5. Run content QA and visual QA separately
+1. Analyze template with `thumbnail.py`
+2. Unpack → manipulate slides → edit content → clean → pack
 
-- Text overflow, bad alignment, clipped shapes, weak contrast, and placeholder leftovers are normal first-pass failures.
-- Run both content QA and visual QA; missing text and broken layout are different failure classes.
-- Render or inspect the actual deck output before delivery when layout matters.
-- Search for leftover template junk, sample labels, and placeholder text before calling the deck finished.
-- Check notes, comments, labels, legends, and chart/table semantics separately from the visual pass.
-- A deck can pass text extraction and still fail on overlap, clipping, wrong theme inheritance, or broken notes.
-- Thumbnail grids and rendered slides usually reveal layout bugs faster than code or text inspection.
-- Assume the first render is wrong and do at least one fix-and-verify cycle before calling the deck finished.
-- Re-check affected slides after each fix because one spacing change often creates another issue.
+---
 
-### 6. Keep decks portable and review-safe
+## Creating from Scratch
 
-- Template masters can override direct edits in surprising ways.
-- Complex effects may degrade across PowerPoint, LibreOffice, and conversion pipelines, so keep important content robust without them.
-- Image sizing, font substitution, and placeholder mismatch are common reasons a deck looks good in code and bad on screen.
-- Notes, comments, linked media, and merged decks can stay broken even when the visible slide looks fine.
+**Read [pptxgenjs.md](pptxgenjs.md) for full details.**
 
-## Common Traps
+Use when no template or reference presentation is available.
 
-- Placeholder text and sample charts often survive template reuse if not explicitly replaced.
-- Directly editing one slide can fail if the real issue lives in the master or layout.
-- Charts, icons, and text boxes need enough space; near-collisions are usually visible only after rendering.
-- Layout indexes vary by template, so built-in assumptions from one deck often break in another.
-- A missing placeholder or wrong shape target can silently put content in the wrong place.
-- Counting the text ideas after choosing the layout usually leads to empty placeholders, weak hierarchy, or leftover template junk.
-- Font substitution can move line breaks and wreck careful spacing.
-- Speaker notes, comments, and linked media can stay broken even when the visible slide looks fine.
-- A deck can pass text inspection and still fail visually because of overlap, contrast, or edge clipping.
-- Editing from one slide alone can miss the real source of truth in the theme, master, or layout definitions.
-- Choosing a quote, comparison, or multi-column layout without matching content usually makes the deck look templated rather than intentional.
-- Combining or duplicating slides without checking masters and themes can create subtle inconsistency slide by slide.
-- Aspect-ratio mismatches like `16:9` versus `4:3` can shift every placement decision even when each slide looks locally reasonable.
+---
 
-## Related Skills
+## Design Ideas
 
-Install with `clawhub install <slug>` if user confirms:
+**Don't create boring slides.** Plain bullets on a white background won't impress anyone. Consider ideas from this list for each slide.
 
-- `documents` — Document workflows that often feed presentation content.
-- `design` — Visual direction and layout decisions.
-- `brief` — Concise business messaging for slide narratives.
+### Before Starting
 
-## Feedback
+- **Pick a bold, content-informed color palette**: The palette should feel designed for THIS topic. If swapping your colors into a completely different presentation would still "work," you haven't made specific enough choices.
+- **Dominance over equality**: One color should dominate (60-70% visual weight), with 1-2 supporting tones and one sharp accent. Never give all colors equal weight.
+- **Dark/light contrast**: Dark backgrounds for title + conclusion slides, light for content ("sandwich" structure). Or commit to dark throughout for a premium feel.
+- **Commit to a visual motif**: Pick ONE distinctive element and repeat it — rounded image frames, icons in colored circles, thick single-side borders. Carry it across every slide.
 
-- If useful: `clawhub star powerpoint-pptx`
-- Stay updated: `clawhub sync`
+### Color Palettes
+
+Choose colors that match your topic — don't default to generic blue. Use these palettes as inspiration:
+
+| Theme                  | Primary               | Secondary             | Accent              |
+| ---------------------- | --------------------- | --------------------- | ------------------- |
+| **Midnight Executive** | `1E2761` (navy)       | `CADCFC` (ice blue)   | `FFFFFF` (white)    |
+| **Forest & Moss**      | `2C5F2D` (forest)     | `97BC62` (moss)       | `F5F5F5` (cream)    |
+| **Coral Energy**       | `F96167` (coral)      | `F9E795` (gold)       | `2F3C7E` (navy)     |
+| **Warm Terracotta**    | `B85042` (terracotta) | `E7E8D1` (sand)       | `A7BEAE` (sage)     |
+| **Ocean Gradient**     | `065A82` (deep blue)  | `1C7293` (teal)       | `21295C` (midnight) |
+| **Charcoal Minimal**   | `36454F` (charcoal)   | `F2F2F2` (off-white)  | `212121` (black)    |
+| **Teal Trust**         | `028090` (teal)       | `00A896` (seafoam)    | `02C39A` (mint)     |
+| **Berry & Cream**      | `6D2E46` (berry)      | `A26769` (dusty rose) | `ECE2D0` (cream)    |
+| **Sage Calm**          | `84B59F` (sage)       | `69A297` (eucalyptus) | `50808E` (slate)    |
+| **Cherry Bold**        | `990011` (cherry)     | `FCF6F5` (off-white)  | `2F3C7E` (navy)     |
+
+### For Each Slide
+
+**Every slide needs a visual element** — image, chart, icon, or shape. Text-only slides are forgettable.
+
+**Layout options:**
+
+- Two-column (text left, illustration on right)
+- Icon + text rows (icon in colored circle, bold header, description below)
+- 2x2 or 2x3 grid (image on one side, grid of content blocks on other)
+- Half-bleed image (full left or right side) with content overlay
+
+**Data display:**
+
+- Large stat callouts (big numbers 60-72pt with small labels below)
+- Comparison columns (before/after, pros/cons, side-by-side options)
+- Timeline or process flow (numbered steps, arrows)
+
+**Visual polish:**
+
+- Icons in small colored circles next to section headers
+- Italic accent text for key stats or taglines
+
+### Typography
+
+**Choose an interesting font pairing** — don't default to Arial. Pick a header font with personality and pair it with a clean body font.
+
+| Header Font  | Body Font     |
+| ------------ | ------------- |
+| Georgia      | Calibri       |
+| Arial Black  | Arial         |
+| Calibri      | Calibri Light |
+| Cambria      | Calibri       |
+| Trebuchet MS | Calibri       |
+| Impact       | Arial         |
+| Palatino     | Garamond      |
+| Consolas     | Calibri       |
+
+| Element        | Size          |
+| -------------- | ------------- |
+| Slide title    | 36-44pt bold  |
+| Section header | 20-24pt bold  |
+| Body text      | 14-16pt       |
+| Captions       | 10-12pt muted |
+
+### Spacing
+
+- 0.5" minimum margins
+- 0.3-0.5" between content blocks
+- Leave breathing room—don't fill every inch
+
+### Avoid (Common Mistakes)
+
+- **Don't repeat the same layout** — vary columns, cards, and callouts across slides
+- **Don't center body text** — left-align paragraphs and lists; center only titles
+- **Don't skimp on size contrast** — titles need 36pt+ to stand out from 14-16pt body
+- **Don't default to blue** — pick colors that reflect the specific topic
+- **Don't mix spacing randomly** — choose 0.3" or 0.5" gaps and use consistently
+- **Don't style one slide and leave the rest plain** — commit fully or keep it simple throughout
+- **Don't create text-only slides** — add images, icons, charts, or visual elements; avoid plain title + bullets
+- **Don't forget text box padding** — when aligning lines or shapes with text edges, set `margin: 0` on the text box or offset the shape to account for padding
+- **Don't use low-contrast elements** — icons AND text need strong contrast against the background; avoid light text on light backgrounds or dark text on dark backgrounds
+- **NEVER use accent lines under titles** — these are a hallmark of AI-generated slides; use whitespace or background color instead
+
+---
+
+## QA (Required)
+
+**Assume there are problems. Your job is to find them.**
+
+Your first render is almost never correct. Approach QA as a bug hunt, not a confirmation step. If you found zero issues on first inspection, you weren't looking hard enough.
+
+### Content QA
+
+```bash
+python -m markitdown output.pptx
+```
+
+Check for missing content, typos, wrong order.
+
+**When using templates, check for leftover placeholder text:**
+
+```bash
+python -m markitdown output.pptx | grep -iE "xxxx|lorem|ipsum|this.*(page|slide).*layout"
+```
+
+If grep returns results, fix them before declaring success.
+
+### Visual QA
+
+**⚠️ USE SUBAGENTS** — even for 2-3 slides. You've been staring at the code and will see what you expect, not what's there. Subagents have fresh eyes.
+
+Convert slides to images (see [Converting to Images](#converting-to-images)), then use this prompt:
+
+```
+Visually inspect these slides. Assume there are issues — find them.
+
+Look for:
+- Overlapping elements (text through shapes, lines through words, stacked elements)
+- Text overflow or cut off at edges/box boundaries
+- Decorative lines positioned for single-line text but title wrapped to two lines
+- Source citations or footers colliding with content above
+- Elements too close (< 0.3" gaps) or cards/sections nearly touching
+- Uneven gaps (large empty area in one place, cramped in another)
+- Insufficient margin from slide edges (< 0.5")
+- Columns or similar elements not aligned consistently
+- Low-contrast text (e.g., light gray text on cream-colored background)
+- Low-contrast icons (e.g., dark icons on dark backgrounds without a contrasting circle)
+- Text boxes too narrow causing excessive wrapping
+- Leftover placeholder content
+
+For each slide, list issues or areas of concern, even if minor.
+
+Read and analyze these images:
+1. /path/to/slide-01.jpg (Expected: [brief description])
+2. /path/to/slide-02.jpg (Expected: [brief description])
+
+Report ALL issues found, including minor ones.
+```
+
+### Verification Loop
+
+1. Generate slides → Convert to images → Inspect
+2. **List issues found** (if none found, look again more critically)
+3. Fix issues
+4. **Re-verify affected slides** — one fix often creates another problem
+5. Repeat until a full pass reveals no new issues
+
+**Do not declare success until you've completed at least one fix-and-verify cycle.**
+
+---
+
+## Converting to Images
+
+Convert presentations to individual slide images for visual inspection:
+
+```bash
+python {baseDir}/scripts/office/soffice.py --headless --convert-to pdf output.pptx
+pdftoppm -jpeg -r 150 output.pdf slide
+```
+
+This creates `slide-01.jpg`, `slide-02.jpg`, etc.
+
+To re-render specific slides after fixes:
+
+```bash
+pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
+```
+
+---
+
+## Dependencies
+
+- `pip install "markitdown[pptx]"` - text extraction
+- `pip install Pillow` - thumbnail grids
+- `npm install -g pptxgenjs` - creating from scratch
+- LibreOffice (`soffice`) - PDF conversion (auto-configured for sandboxed environments via `{baseDir}/scripts/office/soffice.py`)
+- Poppler (`pdftoppm`) - PDF to images
