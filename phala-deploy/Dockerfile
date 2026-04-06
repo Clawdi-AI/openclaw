@@ -98,6 +98,10 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /root/.npm /tmp/* /usr/include
 
+# Pre-install the Clawdi platform plugin (RPCs, Redpill provider, built-in skills).
+ARG CLAWDI_PLUGIN_VERSION="latest"
+RUN openclaw plugins install "@clawdi/openclaw-plugin@${CLAWDI_PLUGIN_VERSION}"
+
 # --- Stage 3: Dev image (openclaw via bind mount) ---
 FROM base-prereqs AS dev
 
