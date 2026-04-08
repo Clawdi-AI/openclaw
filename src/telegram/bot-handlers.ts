@@ -525,8 +525,6 @@ export const registerTelegramHandlers = ({
     hasGroupAllowOverride: boolean;
     groupConfig?: TelegramGroupConfig;
     topicConfig?: TelegramTopicConfig;
-    /** When true, skip sender-level allowlist check (e.g. channel_post). */
-    skipSenderAllowlist?: boolean;
   }) => {
     const {
       isGroup,
@@ -539,7 +537,6 @@ export const registerTelegramHandlers = ({
       hasGroupAllowOverride,
       groupConfig,
       topicConfig,
-      skipSenderAllowlist,
     } = params;
     const baseAccess = evaluateTelegramGroupBaseAccess({
       isGroup,
@@ -584,9 +581,9 @@ export const registerTelegramHandlers = ({
       resolveGroupPolicy,
       enforcePolicy: true,
       useTopicAndGroupOverrides: true,
-      enforceAllowlistAuthorization: !skipSenderAllowlist,
+      enforceAllowlistAuthorization: true,
       allowEmptyAllowlistEntries: false,
-      requireSenderForAllowlistAuthorization: !skipSenderAllowlist,
+      requireSenderForAllowlistAuthorization: true,
       checkChatAllowlist: true,
     });
     if (!policyAccess.allowed) {
@@ -1517,8 +1514,6 @@ export const registerTelegramHandlers = ({
     senderId: string;
     senderUsername: string;
     requireConfiguredGroup: boolean;
-    /** Skip sender-level allowlist authorization (e.g. channel_post where sender is always the channel itself). */
-    skipSenderAllowlist: boolean;
     sendOversizeWarning: boolean;
     oversizeLogMessage: string;
     errorMessage: string;
@@ -1571,7 +1566,6 @@ export const registerTelegramHandlers = ({
           hasGroupAllowOverride,
           groupConfig,
           topicConfig,
-          skipSenderAllowlist: event.skipSenderAllowlist,
         })
       ) {
         return;
@@ -1624,7 +1618,6 @@ export const registerTelegramHandlers = ({
       senderId: msg.from?.id != null ? String(msg.from.id) : "",
       senderUsername: msg.from?.username ?? "",
       requireConfiguredGroup: false,
-      skipSenderAllowlist: false,
       sendOversizeWarning: true,
       oversizeLogMessage: "media exceeds size limit",
       errorMessage: "handler failed",
@@ -1678,7 +1671,6 @@ export const registerTelegramHandlers = ({
             : "",
       senderUsername: post.sender_chat?.username ?? post.from?.username ?? "",
       requireConfiguredGroup: true,
-      skipSenderAllowlist: true,
       sendOversizeWarning: false,
       oversizeLogMessage: "channel post media exceeds size limit",
       errorMessage: "channel_post handler failed",
