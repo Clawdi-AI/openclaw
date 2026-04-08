@@ -120,13 +120,15 @@ describe("Discord mux round trip", () => {
           }
 
           discord.registerGuildChannel({ guildId, channelId });
+          // Include bot in mentions so the message passes requireMention gating.
           discord.enqueueGuildMessage({
             guildId,
             channelId,
             messageId: "9101",
-            content: inboundText,
+            content: `<@${discord.botUserId}> ${inboundText}`,
             authorId: userId,
             username: "guild-user",
+            mentions: [{ id: discord.botUserId, username: "integration-bot", bot: true }],
           });
 
           await harness.openai.waitForRequest(
@@ -201,9 +203,10 @@ describe("Discord mux round trip", () => {
             guildId,
             channelId: threadId,
             messageId: "9201",
-            content: inboundText,
+            content: `<@${discord.botUserId}> ${inboundText}`,
             authorId: userId,
             username: "thread-user",
+            mentions: [{ id: discord.botUserId, username: "integration-bot", bot: true }],
           });
 
           await harness.openai.waitForRequest(
@@ -239,4 +242,77 @@ describe("Discord mux round trip", () => {
     },
     60_000,
   );
+
+  test("drops a Discord guild message when bot is not mentioned (requireMention default)", async () => {
+    const guildId = "9001";
+    const channelId = "777001";
+    const userId = "4242";
+    const mentionedText = "mentioned hello";
+    const unmatchedText = "unmatched hello without mention";
+    const expectedReply = "DISCORD_MENTION_GATE_OK";
+
+    await withMuxOpenClawHarness(
+      {
+        channel: "discord",
+        chatId: guildId,
+        claimedSessionKey: `agent:main:discord:channel:${channelId}`,
+        pairingRouteKey: `discord:default:guild:${guildId}`,
+        llmReplyText: expectedReply,
+        resolutionMode: "session-first",
+        minimalGateway: false,
+        discordGatewayGuildEnabled: true,
+      },
+      async (harness) => {
+        const discord = harness.discord;
+        expect(discord).toBeDefined();
+        if (!discord) {
+          throw new Error("discord harness not available");
+        }
+
+        discord.registerGuildChannel({ guildId, channelId });
+
+        // Send a guild message WITHOUT mentioning the bot — should be silently dropped.
+        discord.enqueueGuildMessage({
+          guildId,
+          channelId,
+          messageId: "9301",
+          content: unmatchedText,
+          authorId: userId,
+          username: "guild-user",
+        });
+
+        // Give the mux-server time to forward the un-mentioned message.
+        await new Promise((r) => setTimeout(r, 2_000));
+
+        // The un-mentioned message should NOT reach the LLM.
+        const llmHit = harness.openai.requests.find((r) => r.lastUserText.includes(unmatchedText));
+        expect(llmHit).toBeUndefined();
+
+        // Now send a message WITH the bot mentioned — should go through.
+        discord.enqueueGuildMessage({
+          guildId,
+          channelId,
+          messageId: "9302",
+          content: `<@${discord.botUserId}> ${mentionedText}`,
+          authorId: userId,
+          username: "guild-user",
+          mentions: [{ id: discord.botUserId, username: "integration-bot", bot: true }],
+        });
+
+        await harness.openai.waitForRequest(
+          (request) => request.lastUserText.includes(mentionedText),
+          10_000,
+        );
+
+        const outbound = await discord.waitForRequest(
+          (request) =>
+            request.kind === "sendMessage" &&
+            request.channelId === channelId &&
+            request.body.content === expectedReply,
+          10_000,
+        );
+        expect(outbound).toBeDefined();
+      },
+    );
+  }, 60_000);
 });
