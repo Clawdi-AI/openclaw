@@ -1133,6 +1133,9 @@ const stmtInsertAuditLog = db.prepare(`
 
 const idempotencyInflight = new Map<string, InflightEntry>();
 let discordGatewayReady = false;
+// Bot's own user ID, extracted from the Discord gateway READY event.
+// Used to compute wasMentioned for inbound messages.
+let discordBotSelfId: string | null = null;
 const discordChannelInfoCache = new Map<
   string,
   {
@@ -5174,6 +5177,16 @@ async function forwardDiscordMessageToTenant(params: {
     return Number.isFinite(timestampRaw) ? Math.trunc(timestampRaw) : Date.now();
   })();
 
+  // Compute wasMentioned from Discord message.mentions array.
+  let wasMentioned = false;
+  if (discordBotSelfId) {
+    const mentions = Array.isArray(params.message.mentions) ? params.message.mentions : [];
+    wasMentioned = mentions.some(
+      (m: unknown) =>
+        asRecord(m) != null && readNonEmptyString(asRecord(m)?.id) === discordBotSelfId,
+    );
+  }
+
   const payload = buildDiscordInboundEnvelope({
     messageId: params.messageId,
     sessionKey,
@@ -5189,6 +5202,7 @@ async function forwardDiscordMessageToTenant(params: {
     rawMessage: params.message,
     media: inboundMedia.media,
     attachments: inboundMedia.attachments,
+    wasMentioned,
   });
   const payloadWithIdentity = {
     ...payload,
@@ -7530,9 +7544,15 @@ async function runDiscordGatewayDmSession(): Promise<void> {
         const ready = asRecord(frame.d);
         discordGatewayReady = true;
         discordRuntimeHealth.gatewayReadyAtMs = Date.now();
+        const readyUser = asRecord(ready?.user);
+        const selfId = readNonEmptyString(readyUser?.id);
+        if (selfId) {
+          discordBotSelfId = selfId;
+        }
         log({
           type: "discord_gateway_dm_ready",
           sessionId: readNonEmptyString(ready?.session_id) ?? null,
+          botSelfId: discordBotSelfId,
         });
         return;
       }
@@ -9329,6 +9349,24 @@ server.listen(port, host, async () => {
     });
   }
   if (discordInboundEnabled) {
+    // Best-effort fetch of bot's own user ID for wasMentioned computation.
+    // The gateway READY event also sets this, but the polling path needs it too.
+    if (!discordBotSelfId) {
+      try {
+        const { response, result } = await discordRequest({
+          method: "GET",
+          path: "/users/@me",
+        });
+        if (response.ok) {
+          const selfId = readNonEmptyString(result.id);
+          if (selfId) {
+            discordBotSelfId = selfId;
+          }
+        }
+      } catch {
+        // Best-effort — wasMentioned will stay false without it.
+      }
+    }
     log({
       type: "discord_inbound_started",
       tenantTargetCount,
@@ -9337,6 +9375,7 @@ server.listen(port, host, async () => {
       bootstrapLatest: discordBootstrapLatest,
       gatewayDmEnabled: discordGatewayDmEnabled,
       gatewayGuildEnabled: discordGatewayGuildEnabled,
+      botSelfId: discordBotSelfId,
       gatewayIntents:
         Number.isFinite(discordGatewayIntents) && discordGatewayIntents > 0
           ? Math.trunc(discordGatewayIntents)

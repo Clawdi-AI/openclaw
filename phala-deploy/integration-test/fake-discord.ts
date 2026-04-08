@@ -58,6 +58,8 @@ function toStringId(value: unknown): string {
 
 export class FakeDiscordApi {
   readonly requests: FakeDiscordRequest[] = [];
+  /** Bot's own user ID, included in the gateway READY payload. */
+  readonly botUserId = "999888777";
 
   private readonly pendingMessagesByChannel = new Map<string, FakeDiscordInboundMessage[]>();
   private readonly dmChannelsByUser = new Map<string, string>();
@@ -162,6 +164,7 @@ export class FakeDiscordApi {
     authorId: string;
     timestamp?: string;
     username?: string;
+    mentions?: Array<{ id: string; username?: string; bot?: boolean }>;
   }): void {
     const channel = this.channels.get(params.channelId);
     const thread =
@@ -185,7 +188,7 @@ export class FakeDiscordApi {
         },
         ...(thread ? { thread } : {}),
         attachments: [],
-        mentions: [],
+        mentions: params.mentions ?? [],
         mention_roles: [],
         timestamp: params.timestamp ?? "2026-01-01T00:00:00.000Z",
       },
@@ -242,7 +245,10 @@ export class FakeDiscordApi {
             op: 0,
             t: "READY",
             s: 1,
-            d: { session_id: "fake-discord-session" },
+            d: {
+              session_id: "fake-discord-session",
+              user: { id: this.botUserId, username: "integration-bot", bot: true },
+            },
           }),
         );
         this.flushGatewayFrames();
@@ -276,6 +282,12 @@ export class FakeDiscordApi {
     if (method === "GET" && requestUrl.pathname === "/gateway/bot") {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ url: this.url.replace(/^http/i, "ws") + "/gateway" }));
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/users/@me") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ id: this.botUserId, username: "integration-bot", bot: true }));
       return;
     }
 
