@@ -5177,6 +5177,23 @@ async function forwardDiscordMessageToTenant(params: {
     return Number.isFinite(timestampRaw) ? Math.trunc(timestampRaw) : Date.now();
   })();
 
+  // Best-effort wasMentioned for backward compat with old gateways that
+  // don't yet compute mentions from raw data.  New gateways ignore this
+  // when channelData.discord.botUserId is present.
+  let legacyWasMentioned = false;
+  if (discordBotSelfId) {
+    const mentions = Array.isArray(params.message.mentions) ? params.message.mentions : [];
+    legacyWasMentioned = mentions.some(
+      (m: unknown) =>
+        asRecord(m) != null && readNonEmptyString(asRecord(m)?.id) === discordBotSelfId,
+    );
+    if (!legacyWasMentioned && params.body) {
+      legacyWasMentioned =
+        params.body.includes(`<@${discordBotSelfId}>`) ||
+        params.body.includes(`<@!${discordBotSelfId}>`);
+    }
+  }
+
   const payload = buildDiscordInboundEnvelope({
     messageId: params.messageId,
     sessionKey,
@@ -5193,6 +5210,7 @@ async function forwardDiscordMessageToTenant(params: {
     media: inboundMedia.media,
     attachments: inboundMedia.attachments,
     botUserId: discordBotSelfId,
+    wasMentioned: legacyWasMentioned,
   });
   const payloadWithIdentity = {
     ...payload,
