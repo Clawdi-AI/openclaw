@@ -1021,38 +1021,51 @@ async function resolveDiscordMuxAccess(params: {
   }
 
   // Compute wasMentioned from raw Discord data — same logic as non-mux adapter.
-  // The mux-server forwards the raw message (including mentions array) and the
-  // bot's own user ID; the gateway owns all mention-gating decisions.
+  // New mux-servers pass channelData.discord.botUserId + the raw message;
+  // old mux-servers only pass payload.wasMentioned.  When botUserId is
+  // present the gateway owns the decision; otherwise fall back to the
+  // pre-computed envelope value.
   const discordData = asMuxRecord(params.channelData?.discord);
   const rawMessage = asMuxRecord(discordData?.rawMessage);
   const botUserId = readMuxNonEmptyString(discordData?.botUserId);
-  const rawMentions = Array.isArray(rawMessage?.mentions) ? rawMessage.mentions : [];
-  const rawMentionRoles = Array.isArray(rawMessage?.mention_roles) ? rawMessage.mention_roles : [];
-  const mentionEveryone = rawMessage?.mention_everyone === true;
 
-  // Check both the structured mentions array and the body text for Discord's
-  // <@ID>/<@!ID> syntax.  The array is the canonical source, but edge cases
-  // (webhook/forwarded messages, API inconsistencies) can leave it empty even
-  // when the body text contains the mention.
-  const mentionInArray = rawMentions.some(
-    (m: unknown) =>
-      asMuxRecord(m) != null && readMuxNonEmptyString(asMuxRecord(m)?.id) === botUserId,
-  );
-  const mentionInBody =
-    params.body.includes(`<@${botUserId}>`) || params.body.includes(`<@!${botUserId}>`);
-  const explicitlyMentioned = Boolean(botUserId && (mentionInArray || mentionInBody));
-  const hasAnyMention =
-    rawMentions.length > 0 || rawMentionRoles.length > 0 || mentionEveryone || mentionInBody;
-  const mentionRegexes = buildMentionRegexes(params.cfg);
-  const wasMentioned = matchesMentionWithExplicit({
-    text: params.body,
-    mentionRegexes,
-    explicit: {
-      hasAnyMention,
-      isExplicitlyMentioned: explicitlyMentioned,
-      canResolveExplicit: Boolean(botUserId),
-    },
-  });
+  let wasMentioned: boolean;
+  let hasAnyMention: boolean;
+  let canDetectMention: boolean;
+
+  if (botUserId) {
+    // New path: compute from raw Discord data.
+    const rawMentions = Array.isArray(rawMessage?.mentions) ? rawMessage.mentions : [];
+    const rawMentionRoles = Array.isArray(rawMessage?.mention_roles)
+      ? rawMessage.mention_roles
+      : [];
+    const mentionEveryone = rawMessage?.mention_everyone === true;
+    const mentionInArray = rawMentions.some(
+      (m: unknown) =>
+        asMuxRecord(m) != null && readMuxNonEmptyString(asMuxRecord(m)?.id) === botUserId,
+    );
+    const mentionInBody =
+      params.body.includes(`<@${botUserId}>`) || params.body.includes(`<@!${botUserId}>`);
+    const explicitlyMentioned = mentionInArray || mentionInBody;
+    hasAnyMention =
+      rawMentions.length > 0 || rawMentionRoles.length > 0 || mentionEveryone || mentionInBody;
+    const mentionRegexes = buildMentionRegexes(params.cfg);
+    wasMentioned = matchesMentionWithExplicit({
+      text: params.body,
+      mentionRegexes,
+      explicit: {
+        hasAnyMention,
+        isExplicitlyMentioned: explicitlyMentioned,
+        canResolveExplicit: true,
+      },
+    });
+    canDetectMention = true;
+  } else {
+    // Legacy path: old mux-server without botUserId — use envelope value.
+    wasMentioned = params.payload.wasMentioned === true;
+    hasAnyMention = wasMentioned;
+    canDetectMention = true;
+  }
 
   const requireMention = resolveDiscordShouldRequireMention({
     isGuildMessage: true,
@@ -1063,7 +1076,7 @@ async function resolveDiscordMuxAccess(params: {
   const mentionGate = resolveMentionGatingWithBypass({
     isGroup: true,
     requireMention,
-    canDetectMention: Boolean(botUserId),
+    canDetectMention,
     wasMentioned,
     hasAnyMention,
     allowTextCommands: true,
