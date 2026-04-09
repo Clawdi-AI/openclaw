@@ -344,9 +344,9 @@ describe("Discord mux round trip", () => {
         discord.registerGuildChannel({ guildId, channelId });
 
         // Send a guild message WITH <@BOT_ID> in the body text but WITHOUT
-        // the bot in the mentions array.  This simulates edge cases where
-        // Discord does not populate the mentions array (e.g. MESSAGE_CONTENT
-        // intent race, API inconsistency, or forwarded/webhook messages).
+        // the bot in the mentions array.  The mux-server forwards the raw
+        // Discord data; the gateway computes wasMentioned using the same
+        // matchesMentionWithExplicit logic as the non-mux adapter.
         discord.enqueueGuildMessage({
           guildId,
           channelId,
@@ -354,8 +354,8 @@ describe("Discord mux round trip", () => {
           content: `<@${discord.botUserId}> ${inboundText}`,
           authorId: userId,
           username: "guild-user",
-          // Deliberately omit mentions array — the mux-server must detect
-          // the mention from the body text as a fallback.
+          // Deliberately omit mentions array — the gateway must detect the
+          // mention via body-text regex from the raw Discord data.
         });
 
         await harness.openai.waitForRequest(

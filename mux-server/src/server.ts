@@ -5177,25 +5177,6 @@ async function forwardDiscordMessageToTenant(params: {
     return Number.isFinite(timestampRaw) ? Math.trunc(timestampRaw) : Date.now();
   })();
 
-  // Compute wasMentioned from Discord message.mentions array, with a
-  // body-text fallback.  The mentions array is the primary signal, but
-  // edge cases (MESSAGE_CONTENT intent races, webhook/forwarded messages,
-  // or API inconsistencies) can leave it empty even when the body text
-  // contains a <@BOT_ID> mention.  Checking the body text catches those.
-  let wasMentioned = false;
-  if (discordBotSelfId) {
-    const mentions = Array.isArray(params.message.mentions) ? params.message.mentions : [];
-    wasMentioned = mentions.some(
-      (m: unknown) =>
-        asRecord(m) != null && readNonEmptyString(asRecord(m)?.id) === discordBotSelfId,
-    );
-    if (!wasMentioned && params.body) {
-      wasMentioned =
-        params.body.includes(`<@${discordBotSelfId}>`) ||
-        params.body.includes(`<@!${discordBotSelfId}>`);
-    }
-  }
-
   const payload = buildDiscordInboundEnvelope({
     messageId: params.messageId,
     sessionKey,
@@ -5211,7 +5192,7 @@ async function forwardDiscordMessageToTenant(params: {
     rawMessage: params.message,
     media: inboundMedia.media,
     attachments: inboundMedia.attachments,
-    wasMentioned,
+    botUserId: discordBotSelfId,
   });
   const payloadWithIdentity = {
     ...payload,
