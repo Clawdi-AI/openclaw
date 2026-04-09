@@ -38,7 +38,7 @@ GATEWAY_AUTH_TOKEN=$(node -e "
   const c = require('crypto');
   const key = c.hkdfSync('sha256', process.argv[1], '', 'gateway-auth-token', 32);
   process.stdout.write(Buffer.from(key).toString('base64'));
-" "$MASTER_KEY" | tr -d '/+=' | head -c 32)
+" -- "$MASTER_KEY" | tr -d '/+=' | head -c 32)
 
 # inboundUrl uses ${DSTACK_APP_ID} / ${DSTACK_GATEWAY_DOMAIN} placeholders —
 # resolved by the config loader's env-substitution (vars forwarded via docker-compose.yml)

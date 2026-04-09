@@ -41,7 +41,7 @@ GATEWAY_AUTH_TOKEN=$(node -e "
   const c = require('crypto');
   const key = c.hkdfSync('sha256', process.argv[1], '', 'gateway-auth-token', 32);
   process.stdout.write(Buffer.from(key).toString('base64'));
-" "$MASTER_KEY" | tr -d '/+=' | head -c 32)
+" -- "$MASTER_KEY" | tr -d '/+=' | head -c 32)
 
 # Static mock JWT: satisfies pi-ai's extractAccountId for codex oauth-shaped models.
 CODEX_MOCK_JWT="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF9zdWIyYXBpX3Byb3h5In0sImV4cCI6OTk5OTk5OTk5OX0.c3ViMmFwaQ"
