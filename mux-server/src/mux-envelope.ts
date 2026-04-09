@@ -595,6 +595,7 @@ export function buildDiscordInboundEnvelope(params: {
   rawMessage: unknown;
   media: unknown;
   attachments: MuxInboundAttachment[];
+  botUserId?: string | null;
   wasMentioned?: boolean;
 }): MuxInboundEnvelope {
   const raw = {
@@ -626,12 +627,14 @@ export function buildDiscordInboundEnvelope(params: {
       discord: {
         media: params.media,
         rawMessage: params.rawMessage,
+        ...(params.botUserId ? { botUserId: params.botUserId } : {}),
       },
     },
   };
   if (params.attachments.length > 0) {
     payload.attachments = params.attachments;
   }
+  // Backward compat: old gateways read payload.wasMentioned directly.
   if (params.wasMentioned != null) {
     payload.wasMentioned = params.wasMentioned;
   }
