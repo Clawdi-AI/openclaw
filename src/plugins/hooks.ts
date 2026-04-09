@@ -45,11 +45,15 @@ import type {
   PluginHookSubagentEndedEvent,
   PluginHookSubagentSpawnedEvent,
   PluginHookToolContext,
+  PluginHookTransformToolResultEvent,
+  PluginHookTransformToolResultResult,
   PluginHookToolResultPersistContext,
   PluginHookToolResultPersistEvent,
   PluginHookToolResultPersistResult,
   PluginHookBeforeMessageWriteEvent,
   PluginHookBeforeMessageWriteResult,
+  PluginHookMediaFileTransformEvent,
+  PluginHookMediaFileTransformResult,
 } from "./types.js";
 
 // Re-export types for consumers
@@ -76,6 +80,8 @@ export type {
   PluginHookBeforeToolCallEvent,
   PluginHookBeforeToolCallResult,
   PluginHookAfterToolCallEvent,
+  PluginHookTransformToolResultEvent,
+  PluginHookTransformToolResultResult,
   PluginHookToolResultPersistContext,
   PluginHookToolResultPersistEvent,
   PluginHookToolResultPersistResult,
@@ -94,6 +100,8 @@ export type {
   PluginHookGatewayContext,
   PluginHookGatewayStartEvent,
   PluginHookGatewayStopEvent,
+  PluginHookMediaFileTransformEvent,
+  PluginHookMediaFileTransformResult,
 };
 
 export type HookRunnerLogger = {
@@ -463,6 +471,24 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
   }
 
   /**
+   * Run transform_tool_result hook.
+   * Allows plugins to replace the tool result before it is returned to the
+   * agent framework (and therefore before session persistence / LLM context).
+   * Runs sequentially (async, awaited).
+   */
+  async function runTransformToolResult(
+    event: PluginHookTransformToolResultEvent,
+    ctx: PluginHookToolContext,
+  ): Promise<PluginHookTransformToolResultResult | undefined> {
+    return runModifyingHook<"transform_tool_result", PluginHookTransformToolResultResult>(
+      "transform_tool_result",
+      event,
+      ctx,
+      (_acc, next) => next,
+    );
+  }
+
+  /**
    * Run tool_result_persist hook.
    *
    * This hook is intentionally synchronous: it runs in hot paths where session
@@ -593,6 +619,47 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
     // If message was modified by any handler, return it.
     if (current !== event.message) {
       return { message: current };
+    }
+
+    return undefined;
+  }
+
+  // =========================================================================
+  // Media Hooks
+  // =========================================================================
+
+  /**
+   * Run media_file_transform hook.
+   *
+   * Fires for each <file> block extracted during media understanding.
+   * Handlers are executed sequentially in priority order. The first handler
+   * that returns { content } wins — the transformed content replaces the
+   * original file block text.
+   */
+  async function runMediaFileTransform(
+    event: PluginHookMediaFileTransformEvent,
+  ): Promise<PluginHookMediaFileTransformResult | undefined> {
+    const hooks = getHooksForName(registry, "media_file_transform");
+    if (hooks.length === 0) {
+      return undefined;
+    }
+
+    for (const hook of hooks) {
+      try {
+        // oxlint-disable-next-line typescript/no-explicit-any
+        const out = await (hook.handler as any)(event);
+        const result = out as PluginHookMediaFileTransformResult | undefined;
+        if (result?.content) {
+          return result;
+        }
+      } catch (err) {
+        const msg = `[hooks] media_file_transform handler from ${hook.pluginId} failed: ${String(err)}`;
+        if (catchErrors) {
+          logger?.error(msg);
+        } else {
+          throw new Error(msg, { cause: err });
+        }
+      }
     }
 
     return undefined;
@@ -740,9 +807,12 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
     // Tool hooks
     runBeforeToolCall,
     runAfterToolCall,
+    runTransformToolResult,
     runToolResultPersist,
     // Message write hooks
     runBeforeMessageWrite,
+    // Media hooks
+    runMediaFileTransform,
     // Session hooks
     runSessionStart,
     runSessionEnd,

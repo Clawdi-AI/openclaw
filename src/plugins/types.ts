@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Command } from "commander";
 import type {
   ApiKeyCredential,
@@ -436,6 +436,7 @@ export type PluginHookName =
   | "message_sent"
   | "before_tool_call"
   | "after_tool_call"
+  | "transform_tool_result"
   | "tool_result_persist"
   | "before_message_write"
   | "session_start"
@@ -444,6 +445,7 @@ export type PluginHookName =
   | "subagent_delivery_target"
   | "subagent_spawned"
   | "subagent_ended"
+  | "media_file_transform"
   | "gateway_start"
   | "gateway_stop";
 
@@ -462,6 +464,7 @@ export const PLUGIN_HOOK_NAMES = [
   "message_sent",
   "before_tool_call",
   "after_tool_call",
+  "transform_tool_result",
   "tool_result_persist",
   "before_message_write",
   "session_start",
@@ -470,6 +473,7 @@ export const PLUGIN_HOOK_NAMES = [
   "subagent_delivery_target",
   "subagent_spawned",
   "subagent_ended",
+  "media_file_transform",
   "gateway_start",
   "gateway_stop",
 ] as const satisfies readonly PluginHookName[];
@@ -735,6 +739,25 @@ export type PluginHookAfterToolCallEvent = {
   durationMs?: number;
 };
 
+// transform_tool_result hook
+// Fires after tool execution completes but before the result is returned to the
+// agent framework (and therefore before session persistence).  Handlers may
+// return a replacement result — for example a compressed summary produced by an
+// external indexer.  Async handlers are awaited sequentially.
+export type PluginHookTransformToolResultEvent = {
+  toolName: string;
+  params: Record<string, unknown>;
+  /** Provider-specific tool call ID when available. */
+  toolCallId?: string;
+  /** The normalised tool result about to be returned to the agent framework. */
+  result: AgentToolResult<unknown>;
+};
+
+export type PluginHookTransformToolResultResult = {
+  /** Replacement result.  When provided the original result is discarded. */
+  result?: AgentToolResult<unknown>;
+};
+
 // tool_result_persist hook
 export type PluginHookToolResultPersistContext = {
   agentId?: string;
@@ -769,6 +792,27 @@ export type PluginHookBeforeMessageWriteEvent = {
 export type PluginHookBeforeMessageWriteResult = {
   block?: boolean; // If true, message is NOT written to JSONL
   message?: AgentMessage; // Optional: modified message to write instead
+};
+
+// media_file_transform hook
+// Fires for each <file> block extracted during media understanding.
+// Handlers may return transformed content (e.g. compressed summary).
+export type PluginHookMediaFileTransformEvent = {
+  /** Original filename of the attachment. */
+  filename: string;
+  /** MIME type of the attachment. */
+  mime: string;
+  /** Extracted text content from the file (may be truncated, e.g. PDF page limits). */
+  content: string;
+  /** Raw file content as base64. Allows hooks to process the full file (e.g. index entire PDF). */
+  rawBase64?: string;
+  /** Attachment index within the message. */
+  index: number;
+};
+
+export type PluginHookMediaFileTransformResult = {
+  /** Replacement content for the <file> block. If provided, replaces the original. */
+  content?: string;
 };
 
 // Session context
@@ -941,6 +985,13 @@ export type PluginHookHandlerMap = {
     event: PluginHookAfterToolCallEvent,
     ctx: PluginHookToolContext,
   ) => Promise<void> | void;
+  transform_tool_result: (
+    event: PluginHookTransformToolResultEvent,
+    ctx: PluginHookToolContext,
+  ) =>
+    | Promise<PluginHookTransformToolResultResult | void>
+    | PluginHookTransformToolResultResult
+    | void;
   tool_result_persist: (
     event: PluginHookToolResultPersistEvent,
     ctx: PluginHookToolResultPersistContext,
@@ -949,6 +1000,12 @@ export type PluginHookHandlerMap = {
     event: PluginHookBeforeMessageWriteEvent,
     ctx: { agentId?: string; sessionKey?: string },
   ) => PluginHookBeforeMessageWriteResult | void;
+  media_file_transform: (
+    event: PluginHookMediaFileTransformEvent,
+  ) =>
+    | Promise<PluginHookMediaFileTransformResult | undefined>
+    | PluginHookMediaFileTransformResult
+    | undefined;
   session_start: (
     event: PluginHookSessionStartEvent,
     ctx: PluginHookSessionContext,
