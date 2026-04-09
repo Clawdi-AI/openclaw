@@ -1,0 +1,50 @@
+{
+  "id": "mentat-bridge",
+  "kind": "memory",
+  "uiHints": {
+    "mentatUrl": {
+      "label": "Mentat Server URL",
+      "placeholder": "http://127.0.0.1:7832",
+      "help": "HTTP endpoint for the Mentat server"
+    },
+    "enabled": {
+      "label": "Enable Mentat Bridge",
+      "help": "Toggle the Mentat RAG integration on/off"
+    },
+    "autoIndex": {
+      "label": "Auto-Index Tool Results",
+      "help": "Automatically index file reads and web fetches into Mentat"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories into agent context"
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically capture important information from user messages"
+    },
+    "compressResults": {
+      "label": "Compress Large Results",
+      "help": "Replace large file tool results with ToC + brief intro (saves tokens)"
+    },
+    "compressThresholdTokens": {
+      "label": "Compression Threshold (tokens)",
+      "placeholder": "2000",
+      "advanced": true,
+      "help": "Files smaller than this are kept as-is"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mentatUrl": { "type": "string" },
+      "enabled": { "type": "boolean" },
+      "autoIndex": { "type": "boolean" },
+      "autoRecall": { "type": "boolean" },
+      "autoCapture": { "type": "boolean" },
+      "compressResults": { "type": "boolean" },
+      "compressThresholdTokens": { "type": "number", "minimum": 500, "maximum": 50000 }
+    }
+  }
+}

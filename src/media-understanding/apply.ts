@@ -8,6 +8,7 @@ import {
   normalizeMimeType,
   resolveInputFileLimits,
 } from "../media/input-files.js";
+import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { resolveAttachmentKind } from "./attachments.js";
 import { runWithConcurrency } from "./concurrency.js";
 import { DEFAULT_ECHO_TRANSCRIPT_FORMAT, sendTranscriptEcho } from "./echo-transcript.js";
@@ -31,6 +32,39 @@ import type {
   MediaUnderstandingOutput,
   MediaUnderstandingProvider,
 } from "./types.js";
+
+/**
+ * Run media_file_transform plugin hook if any handlers are registered.
+ * Returns transformed content, or the original blockText if no hook fires.
+ */
+async function maybeTransformMediaFile(params: {
+  filename: string;
+  mime: string;
+  content: string;
+  rawBase64: string;
+  index: number;
+}): Promise<string> {
+  const hookRunner = getGlobalHookRunner();
+  if (!hookRunner?.hasHooks("media_file_transform")) {
+    return params.content;
+  }
+
+  try {
+    const hookResult = await hookRunner.runMediaFileTransform({
+      filename: params.filename,
+      mime: params.mime,
+      content: params.content,
+      rawBase64: params.rawBase64,
+      index: params.index,
+    });
+    if (hookResult?.content) {
+      return hookResult.content;
+    }
+  } catch (err) {
+    logVerbose(`media: media_file_transform hook failed: ${String(err)}`);
+  }
+  return params.content;
+}
 
 export type ApplyMediaUnderstandingResult = {
   outputs: MediaUnderstandingOutput[];
@@ -455,6 +489,18 @@ async function extractFileBlocks(params: {
     const safeName = (bufferResult.fileName ?? `file-${attachment.index + 1}`)
       .replace(/[\r\n\t]+/g, " ")
       .trim();
+
+    // Allow plugins to transform file content (e.g. compress via RAG indexing).
+    if (text) {
+      blockText = await maybeTransformMediaFile({
+        filename: safeName,
+        mime: mimeType,
+        content: blockText,
+        rawBase64: bufferResult.buffer.toString("base64"),
+        index: attachment.index,
+      });
+    }
+
     // Escape XML special characters in attributes to prevent injection
     blocks.push(
       `<file name="${xmlEscapeAttr(safeName)}" mime="${xmlEscapeAttr(mimeType)}">\n${escapeFileBlockContent(blockText)}\n</file>`,
