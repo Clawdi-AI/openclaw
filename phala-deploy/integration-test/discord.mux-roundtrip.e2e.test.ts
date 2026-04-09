@@ -315,4 +315,63 @@ describe("Discord mux round trip", () => {
       },
     );
   }, 60_000);
+
+  test("detects mention from body text when mentions array is empty", async () => {
+    const guildId = "9001";
+    const channelId = "777001";
+    const userId = "4242";
+    const inboundText = "body-mention hello";
+    const expectedReply = "DISCORD_BODY_MENTION_OK";
+
+    await withMuxOpenClawHarness(
+      {
+        channel: "discord",
+        chatId: guildId,
+        claimedSessionKey: `agent:main:discord:channel:${channelId}`,
+        pairingRouteKey: `discord:default:guild:${guildId}`,
+        llmReplyText: expectedReply,
+        resolutionMode: "session-first",
+        minimalGateway: false,
+        discordGatewayGuildEnabled: true,
+      },
+      async (harness) => {
+        const discord = harness.discord;
+        expect(discord).toBeDefined();
+        if (!discord) {
+          throw new Error("discord harness not available");
+        }
+
+        discord.registerGuildChannel({ guildId, channelId });
+
+        // Send a guild message WITH <@BOT_ID> in the body text but WITHOUT
+        // the bot in the mentions array.  The mux-server forwards the raw
+        // Discord data; the gateway computes wasMentioned using the same
+        // matchesMentionWithExplicit logic as the non-mux adapter.
+        discord.enqueueGuildMessage({
+          guildId,
+          channelId,
+          messageId: "9401",
+          content: `<@${discord.botUserId}> ${inboundText}`,
+          authorId: userId,
+          username: "guild-user",
+          // Deliberately omit mentions array — the gateway must detect the
+          // mention via body-text regex from the raw Discord data.
+        });
+
+        await harness.openai.waitForRequest(
+          (request) => request.lastUserText.includes(inboundText),
+          10_000,
+        );
+
+        const outbound = await discord.waitForRequest(
+          (request) =>
+            request.kind === "sendMessage" &&
+            request.channelId === channelId &&
+            request.body.content === expectedReply,
+          10_000,
+        );
+        expect(outbound).toBeDefined();
+      },
+    );
+  }, 60_000);
 });
