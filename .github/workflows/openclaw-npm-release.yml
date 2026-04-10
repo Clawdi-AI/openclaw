@@ -1,4 +1,4 @@
-name: OpenClaw NPM Release
+name: OpenClaw Release Tarball
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - "v*"
 
 concurrency:
-  group: openclaw-npm-release-${{ github.ref }}
+  group: openclaw-release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -15,12 +15,10 @@ env:
   PNPM_VERSION: "10.23.0"
 
 jobs:
-  publish_openclaw_npm:
-    # npm trusted publishing + provenance requires a GitHub-hosted runner.
+  publish_release_tarball:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -35,54 +33,8 @@ jobs:
           install-bun: "false"
           use-sticky-disk: "false"
 
-      - name: Validate release tag and package metadata
-        env:
-          RELEASE_SHA: ${{ github.sha }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_MAIN_REF: origin/main
-        run: |
-          set -euo pipefail
-          # Fetch the full main ref so merge-base ancestry checks keep working
-          # for older tagged commits that are still contained in main.
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          pnpm release:openclaw:npm:check
-
-      - name: Ensure version is not already published
-        run: |
-          set -euo pipefail
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
-
-          if npm view "openclaw@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
-            echo "openclaw@${PACKAGE_VERSION} is already published on npm."
-            exit 1
-          fi
-
-          echo "Publishing openclaw@${PACKAGE_VERSION}"
-
-      - name: Check
-        run: pnpm check
-
       - name: Build
         run: pnpm build
-
-      - name: Verify release contents
-        run: pnpm release:check
-
-      - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
-            printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
-          fi
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
-
-          if [[ "$PACKAGE_VERSION" == *-beta.* ]]; then
-            npm publish --access public --tag beta --provenance
-          else
-            npm publish --access public --provenance
-          fi
 
       - name: Pack and upload release tarball
         env:
@@ -94,11 +46,6 @@ jobs:
           mv -f "$TGZ_PATH" /tmp/openclaw.tgz
 
           TAG="${GITHUB_REF_NAME}"
-          # Create the release if it doesn't exist yet (draft=false, prerelease for betas)
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          if [[ "$PACKAGE_VERSION" == *-beta.* ]]; then
-            gh release create "$TAG" --prerelease --title "openclaw $PACKAGE_VERSION" --notes "" 2>/dev/null || true
-          else
-            gh release create "$TAG" --title "openclaw $PACKAGE_VERSION" --notes "" 2>/dev/null || true
-          fi
+          gh release create "$TAG" --title "openclaw $PACKAGE_VERSION" --notes "" 2>/dev/null || true
           gh release upload "$TAG" /tmp/openclaw.tgz --clobber
