@@ -19,7 +19,7 @@ jobs:
     # npm trusted publishing + provenance requires a GitHub-hosted runner.
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - name: Checkout
@@ -83,3 +83,22 @@ jobs:
           else
             npm publish --access public --provenance
           fi
+
+      - name: Pack and upload release tarball
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PACK_OUT="$(npm pack --pack-destination /tmp)"
+          TGZ_PATH="/tmp/$(printf '%s\n' "$PACK_OUT" | tail -n 1 | tr -d '[:space:]')"
+          mv -f "$TGZ_PATH" /tmp/openclaw.tgz
+
+          TAG="${GITHUB_REF_NAME}"
+          # Create the release if it doesn't exist yet (draft=false, prerelease for betas)
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [[ "$PACKAGE_VERSION" == *-beta.* ]]; then
+            gh release create "$TAG" --prerelease --title "openclaw $PACKAGE_VERSION" --notes "" 2>/dev/null || true
+          else
+            gh release create "$TAG" --title "openclaw $PACKAGE_VERSION" --notes "" 2>/dev/null || true
+          fi
+          gh release upload "$TAG" /tmp/openclaw.tgz --clobber
