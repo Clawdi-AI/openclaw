@@ -36,6 +36,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Build Control UI
+        run: pnpm ui:build
+
       - name: Pack and upload release tarball
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
