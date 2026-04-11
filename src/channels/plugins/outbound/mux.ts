@@ -109,14 +109,10 @@ function readString(value: unknown): string | undefined {
 }
 
 function stripWhatsAppPrefix(value: string): string {
-  let candidate = value.trim();
-  for (;;) {
-    const next = candidate.replace(/^whatsapp:/i, "").trim();
-    if (next === candidate) {
-      return candidate;
-    }
-    candidate = next;
-  }
+  return value
+    .trim()
+    .replace(/^whatsapp:/i, "")
+    .trim();
 }
 
 function isWhatsAppGroupSessionKey(sessionKey: string): boolean {
