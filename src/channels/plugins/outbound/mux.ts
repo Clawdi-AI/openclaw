@@ -8,6 +8,7 @@ import {
   resolveDefaultMuxBusinessAccountId,
   resolveMuxBusinessAccountId,
 } from "../../../utils/mux-account.js";
+import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "../../../whatsapp/normalize.js";
 
 type SupportedMuxChannel = "whatsapp" | "telegram" | "discord";
 
@@ -105,6 +106,43 @@ function normalizeBaseUrl(value?: string): string | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stripWhatsAppPrefix(value: string): string {
+  return value
+    .trim()
+    .replace(/^whatsapp:/i, "")
+    .trim();
+}
+
+function isWhatsAppGroupSessionKey(sessionKey: string): boolean {
+  return sessionKey.startsWith("wa:group:") || sessionKey.includes(":whatsapp:group:");
+}
+
+function canonicalizeMuxTarget(params: {
+  channel: SupportedMuxChannel;
+  to?: string;
+  sessionKey: string;
+}): string | undefined {
+  const rawTo = readString(params.to);
+  if (!rawTo || params.channel !== "whatsapp") {
+    return rawTo;
+  }
+
+  if (!isWhatsAppGroupSessionKey(params.sessionKey)) {
+    return rawTo;
+  }
+
+  const strippedTarget = stripWhatsAppPrefix(rawTo);
+  if (isWhatsAppGroupJid(strippedTarget)) {
+    return normalizeWhatsAppTarget(strippedTarget) ?? strippedTarget;
+  }
+
+  if (/^[0-9]+(?:-[0-9]+)*$/.test(strippedTarget)) {
+    return `${strippedTarget}@g.us`;
+  }
+
+  return rawTo;
 }
 
 function normalizeChannelMuxConfig(
@@ -539,12 +577,17 @@ export async function sendViaMux(params: MuxSendRequest): Promise<MuxSendRespons
   });
 
   const requestId = randomUUID();
+  const canonicalTo = canonicalizeMuxTarget({
+    channel: params.channel,
+    to: params.to,
+    sessionKey: resolved.sessionKey,
+  });
   const payload = {
     requestId,
     channel: params.channel,
     sessionKey: resolved.sessionKey,
     accountId,
-    to: params.to,
+    to: canonicalTo,
     text: params.text ?? "",
     mediaUrl: params.mediaUrl,
     mediaUrls: params.mediaUrls,
