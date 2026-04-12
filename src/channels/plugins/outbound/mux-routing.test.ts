@@ -506,6 +506,61 @@ describe("mux outbound routing", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
+  it("canonicalizes bare whatsapp group ids before mux outbound send", async () => {
+    const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = resolveFetchUrl(input);
+      if (url === "http://mux.local/v1/instances/register") {
+        return jsonResponse({
+          ok: true,
+          runtimeToken: RUNTIME_TOKEN,
+          expiresAtMs: Date.now() + 24 * 60 * 60 * 1000,
+        });
+      }
+      if (url === "http://mux.local/v1/mux/outbound/send") {
+        return jsonResponse({ messageId: "mx-wa-group-1" });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const cfg = {
+      ...gatewayMuxConfig(),
+      channels: {
+        whatsapp: {
+          accounts: {
+            default: {
+              mux: {
+                enabled: true,
+              },
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    await whatsappOutbound.sendText!({
+      cfg,
+      to: "117901482786828",
+      text: "hello",
+      sessionKey: "agent:main:whatsapp:group:117901482786828",
+    });
+
+    const sendCall = fetchSpy.mock.calls.find(
+      ([callInput]) => resolveFetchUrl(callInput) === "http://mux.local/v1/mux/outbound/send",
+    );
+    expect(sendCall).toBeDefined();
+    const init = sendCall?.[1];
+    expect(init).toBeDefined();
+    if (!init) {
+      throw new Error("expected mux outbound send call");
+    }
+    expect(parseJsonRequestBody(init)).toMatchObject({
+      channel: "whatsapp",
+      sessionKey: "agent:main:whatsapp:group:117901482786828",
+      to: "117901482786828@g.us",
+    });
+  });
+
   it("routes typing through mux when enabled", async () => {
     const fetchSpy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = resolveFetchUrl(input);

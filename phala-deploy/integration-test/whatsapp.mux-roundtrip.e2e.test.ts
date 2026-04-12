@@ -155,4 +155,65 @@ describe("WhatsApp mux round trip", () => {
     },
     60_000,
   );
+
+  test.each(["session-first", "target-first"] as const)(
+    "round-trips a WhatsApp group when the mux session key uses a bare group id in %s mode",
+    async (resolutionMode) => {
+      const bareGroupId = "117901482786828";
+      const canonicalGroupJid = `${bareGroupId}@g.us`;
+      const senderE164 = "+15550002222";
+      const inboundText = `hello from bare whatsapp group ${resolutionMode}`;
+      const expectedReply = `WHATSAPP_GROUP_BARE_OK_${resolutionMode}`;
+
+      await withMuxOpenClawHarness(
+        {
+          channel: "whatsapp",
+          chatId: canonicalGroupJid,
+          claimedSessionKey: `agent:main:whatsapp:group:${bareGroupId}`,
+          pairingRouteKey: `whatsapp:default:chat:${canonicalGroupJid}`,
+          llmReplyText: expectedReply,
+          resolutionMode,
+          minimalGateway: false,
+        },
+        async (harness) => {
+          const whatsapp = harness.whatsapp;
+          expect(whatsapp).toBeDefined();
+          if (!whatsapp) {
+            throw new Error("whatsapp harness not available");
+          }
+
+          whatsapp.enqueueMessage({
+            id: "wa-group-bare-9001",
+            from: canonicalGroupJid,
+            conversationId: canonicalGroupJid,
+            to: "+15551230000",
+            accountId: "default",
+            body: inboundText,
+            chatType: "group",
+            chatId: canonicalGroupJid,
+            senderE164,
+            senderName: "Group Sender",
+            pushName: "Group Sender",
+            wasMentioned: true,
+            timestamp: Date.now(),
+          });
+
+          await harness.openai.waitForRequest(
+            (request) => request.lastUserText.includes(inboundText),
+            10_000,
+          );
+
+          const outbound = await whatsapp.waitForRequest(
+            (request) =>
+              request.kind === "sendMessage" &&
+              request.to === canonicalGroupJid &&
+              request.text === expectedReply,
+            20_000,
+          );
+          expect(outbound).toBeDefined();
+        },
+      );
+    },
+    60_000,
+  );
 });
