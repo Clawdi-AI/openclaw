@@ -218,11 +218,11 @@ export class SessionCleaner {
   readonly indexedDir: string;
   private offsets: PersistedOffsets = {};
   private timer: ReturnType<typeof setInterval> | null = null;
-  private logger: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void };
+  private logger: { info: (message: string) => void; warn: (message: string) => void };
 
   constructor(
     rawDir: string,
-    logger?: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void },
+    logger?: { info: (message: string) => void; warn: (message: string) => void },
   ) {
     this.rawDir = rawDir;
     this.indexedDir = join(rawDir, ".indexed");
