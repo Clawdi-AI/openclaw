@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import os from "node:os";
@@ -7,63 +7,96 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { RequestClient } from "@buape/carbon";
 import WebSocket from "ws";
+import { startMuxServer } from "./app/bootstrap.js";
+import { createMuxAppContext } from "./app/context.js";
+import { createRuntimeLauncher } from "./app/runtime-launcher.js";
+import { createAuthService, hashApiKey } from "./auth/service.js";
+import { createDiscordInboundRuntime } from "./channels/discord/inbound.js";
+import { createTelegramInboundRuntime } from "./channels/telegram/inbound.js";
+import { createWhatsAppInboundRuntime } from "./channels/whatsapp/inbound.js";
+import {
+  getNoticeText as lookupNoticeText,
+  loadNoticesConfig,
+  readConfiguredText,
+  readRuntimeConfig,
+  type NoticesConfig,
+} from "./config/runtime.js";
+import { initializeDatabase } from "./db/schema.js";
+import {
+  type ActiveBindingLookupRow,
+  type ClaimResult,
+  type ClaimType,
+  type DiscordBoundRoute,
+  type LiveBindingLookupRow,
+  type NoticeChannel,
+  type OutboundResolutionMode,
+  type ResolvedBoundRoute,
+  type StyledNotice,
+  type TelegramBoundRoute,
+  type TenantInboundTarget,
+  type TenantSeed,
+  type WhatsAppBoundRoute,
+} from "./domain/types.js";
+import {
+  asRecord,
+  readNonEmptyString,
+  readPositiveInt,
+  readUnsignedNumericString,
+} from "./domain/values.js";
+import { createOutboundRequestHandler } from "./http/outbound-request.js";
+import {
+  HttpBodyError,
+  readBody as readJsonBody,
+  sendJson as writeJson,
+} from "./http/primitives.js";
+import { createHttpRouteHandler } from "./http/routes.js";
 import {
   buildWhatsAppInboundEnvelope,
   buildDiscordInboundEnvelope,
   buildTelegramCallbackInboundEnvelope,
   buildTelegramInboundEnvelope,
-  collectOutboundMediaUrls,
   type MuxInboundAttachment,
-  type MuxPayload,
-  readOutboundOperation,
-  readOutboundRaw,
-  readOutboundText,
 } from "./mux-envelope.js";
 import {
   normalizeObservabilityLogEvent,
   formatObservabilityLogLine,
 } from "./observability/logging.js";
 import { createMuxMetrics } from "./observability/metrics.js";
-import {
-  buildObservabilityQueueSnapshot,
-  buildObservabilityReadinessReport,
-  buildObservabilitySnapshot,
-  readNonNegativeCount,
-  readOldestQueuedAgeMs,
-} from "./observability/snapshot.js";
+import { createObservabilityRuntime } from "./observability/runtime.js";
 import { createInboundTraceId } from "./observability/tracing.js";
-import { createRuntimeJwtSigner, hasScope } from "./runtime-jwt.js";
+import { createOutboundService, type SendResult } from "./outbound/service.js";
+import { createBotControlService } from "./pairing/bot-control.js";
+import { createPairingNotices } from "./pairing/notices.js";
+import { createPairingService } from "./pairing/service.js";
 import {
-  WhatsAppInboundDeliveryError,
+  buildDiscordChannelSessionKey,
+  buildDiscordDirectSessionKey,
+  buildDiscordDmRouteKey,
+  buildDiscordGuildRouteKey,
+  buildDiscordRouteKey,
+  buildDiscordThreadScopedSessionKey,
+  buildTelegramRouteKey,
+  buildWhatsAppRouteKey,
+  deriveTelegramSessionKey,
+  deriveWhatsAppSessionKey,
+  listTelegramOutboundRouteKeys,
+  listWhatsAppOutboundRouteKeys,
+  normalizeDiscordSessionAgentId,
+  parseDiscordOutboundTarget,
+  parseDiscordRouteKey,
+  parseTelegramRouteKey,
+  parseWhatsAppRouteKey,
+  resolveDiscordBindingRouteKeyForClaim,
+  resolveDiscordBindingScope,
+  resolveOutboundResolutionMode,
+} from "./routing/keys.js";
+import { createRouteResolutionHelpers, normalizeChannel } from "./routing/route-resolution.js";
+import { createRuntimeJwtSigner } from "./runtime-jwt.js";
+import {
   classifyWhatsAppInboundDeliveryError,
   isRetryableWhatsAppInboundStatus,
   resolveWhatsAppInboundQueueRetryState,
 } from "./whatsapp-inbound-queue.js";
-
-type SendResult = {
-  statusCode: number;
-  bodyText: string;
-};
-
-type InflightEntry = {
-  fingerprint: string;
-  promise: Promise<SendResult>;
-};
-
-type TenantSeed = {
-  id: string;
-  name: string;
-  apiKey: string;
-  inboundUrl?: string;
-  inboundTimeoutMs: number;
-};
-
-type TenantIdentity = {
-  id: string;
-  name: string;
-  authToken: string;
-  authKind: "api-key" | "runtime-jwt" | "admin";
-};
 
 type PairingCodeSeed = {
   code: string;
@@ -71,123 +104,6 @@ type PairingCodeSeed = {
   routeKey: string;
   scope: string;
   expiresAtMs: number;
-};
-
-type CachedIdempotencyRow = {
-  request_fingerprint: string;
-  response_status: number;
-  response_body: string;
-};
-
-type PairingCodeRow = {
-  channel: string;
-  route_key: string;
-  scope: string;
-  expires_at_ms: number;
-  claimed_by_tenant_id: string | null;
-};
-
-type PairingTokenRow = {
-  tenant_id: string;
-  session_key: string | null;
-};
-
-type ActiveBindingRow = {
-  binding_id: string;
-  channel: string;
-  scope: string;
-  route_key: string;
-};
-
-type ExistingBindingRow = {
-  binding_id: string;
-  status?: string;
-};
-
-type SessionRouteBindingRow = {
-  binding_id: string;
-  route_key: string;
-  channel_context_json?: string | null;
-};
-
-type SessionRouteByBindingRow = {
-  session_key?: unknown;
-  channel_context_json?: unknown;
-};
-
-type ActiveBindingLookupRow = {
-  tenant_id: string;
-  binding_id: string;
-};
-
-type LiveBindingLookupRow = {
-  tenant_id: string;
-  binding_id: string;
-  status: string;
-};
-
-type ActiveDiscordBindingRow = {
-  tenant_id: string;
-  binding_id: string;
-  route_key: string;
-  status: string;
-};
-
-type WhatsAppInboundQueueRow = {
-  id: number;
-  dedupe_key: string;
-  payload_json: string;
-  attempt_count: number;
-  created_at_ms: number;
-  delivery_window_started_at_ms: number;
-  last_target_update_at_ms: number;
-};
-
-type TelegramBoundRoute = {
-  chatId: string;
-  topicId?: number;
-};
-
-type DiscordBoundRoute =
-  | {
-      kind: "dm";
-      userId: string;
-    }
-  | {
-      kind: "guild";
-      guildId: string;
-      channelId?: string;
-      threadId?: string;
-    };
-
-type DiscordOutboundTarget =
-  | {
-      kind: "user";
-      id: string;
-    }
-  | {
-      kind: "channel";
-      id: string;
-    };
-
-type WhatsAppBoundRoute = {
-  accountId: string;
-  chatJid: string;
-};
-
-type ResolvedBoundRoute<T> = {
-  route: T;
-  routeKey: string;
-  via: "session" | "route";
-};
-
-type OutboundResolutionMode = "session-first" | "target-first";
-
-type TenantInboundTarget = {
-  url: string;
-  timeoutMs: number;
-  openclawId: string;
-  updatedAtMs: number | null;
 };
 
 type WebInboundMessage = {
@@ -427,49 +343,7 @@ type DiscordInboundMediaSummary = {
   url?: string;
 };
 
-type WhatsAppInboundAttachment = MuxInboundAttachment;
-
-type WhatsAppInboundMediaSummary = {
-  mediaPath?: string;
-  mediaType?: string;
-  sizeBytes?: number;
-};
-
-type TelegramUpdate = {
-  update_id?: number;
-  message?: TelegramIncomingMessage;
-  edited_message?: TelegramIncomingMessage;
-  callback_query?: TelegramCallbackQuery;
-};
-
-type BotControlCommand =
-  | {
-      kind: "help";
-    }
-  | {
-      kind: "status";
-    }
-  | {
-      kind: "unpair";
-    }
-  | {
-      kind: "switch";
-      token?: string;
-    };
-
-type NoticeChannel = "telegram" | "discord" | "whatsapp";
 type TelegramParseMode = "HTML";
-type StyledNotice = {
-  text: string;
-  parseMode?: TelegramParseMode;
-};
-
-type TelegramCallbackQuery = {
-  id?: string;
-  from?: { id?: number };
-  data?: string;
-  message?: TelegramIncomingMessage;
-};
 
 function resolveDefaultWhatsAppAuthDir(): string {
   const stateDirRaw =
@@ -560,25 +434,23 @@ async function loadDiscordRuntimeModules(): Promise<DiscordRuntimeModules> {
   return await discordRuntimeModulesPromise;
 }
 
-const host = process.env.MUX_HOST || "127.0.0.1";
-const port = Number(process.env.MUX_PORT || 18891);
-const muxPublicUrl = (process.env.MUX_PUBLIC_URL || `http://${host}:${port}`).replace(/\/+$/, "");
+const runtimeConfig = readRuntimeConfig(process.env);
+const {
+  host,
+  port,
+  muxPublicUrl,
+  logPath,
+  dbPath,
+  idempotencyTtlMs,
+  telegramApiBaseUrl,
+  discordApiBaseUrl,
+  requestBodyMaxBytes,
+} = runtimeConfig;
 const TELEGRAM_GENERAL_TOPIC_ID = 1;
 const muxAdminToken = readNonEmptyString(process.env.MUX_ADMIN_TOKEN);
 const muxRegisterKey = readNonEmptyString(process.env.MUX_REGISTER_KEY);
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 const discordBotToken = process.env.DISCORD_BOT_TOKEN;
-const logPath =
-  process.env.MUX_LOG_PATH || path.resolve(process.cwd(), "mux-server", "logs", "mux-server.log");
-const dbPath =
-  process.env.MUX_DB_PATH || path.resolve(process.cwd(), "mux-server", "data", "mux-server.sqlite");
-const idempotencyTtlMs = Number(process.env.MUX_IDEMPOTENCY_TTL_MS || 10 * 60 * 1000);
-const telegramApiBaseUrl = (
-  process.env.MUX_TELEGRAM_API_BASE_URL || "https://api.telegram.org"
-).replace(/\/+$/, "");
-const discordApiBaseUrl = (
-  process.env.MUX_DISCORD_API_BASE_URL || "https://discord.com/api/v10"
-).replace(/\/+$/, "");
 const outboundResolutionMode = resolveOutboundResolutionMode(
   process.env.MUX_OUTBOUND_RESOLUTION_MODE,
 );
@@ -627,74 +499,64 @@ const whatsappQueueMaxAgeMs = Number(process.env.MUX_WHATSAPP_QUEUE_MAX_AGE_MS |
 const pairingTokenTtlSec = Number(process.env.MUX_PAIRING_TOKEN_TTL_SEC || 15 * 60);
 const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
 let telegramBotUsername = readNonEmptyString(process.env.MUX_TELEGRAM_BOT_USERNAME);
-type NoticesConfigEntry = { text: string | null };
-type NoticesConfig = Partial<{
-  clawdiIntro: NoticesConfigEntry;
-  pairingSuccess: NoticesConfigEntry;
-  pairingRepaired: NoticesConfigEntry;
-  pairingTakeover: NoticesConfigEntry;
-  pairingInvalid: NoticesConfigEntry;
-  whatsappContactTip: NoticesConfigEntry;
-  postPairingPrompt: NoticesConfigEntry;
-  botHelp: NoticesConfigEntry;
-  botStatus: NoticesConfigEntry;
-  botUnpairSuccess: NoticesConfigEntry;
-  botNotPaired: NoticesConfigEntry;
-  botSwitchUsage: NoticesConfigEntry;
-}>;
 
-type ClaimType = "fresh" | "repaired" | "takeover";
-type ClaimResult = {
-  tenantId: string;
-  bindingId: string;
-  routeKey: string;
-  sessionKey: string;
-  claimType: ClaimType;
-  previousTenantId?: string;
-};
-
-function loadNoticesConfig(): NoticesConfig {
-  const configPath = process.env.MUX_NOTICES_CONFIG_PATH || "./config/notices.json";
-  try {
-    const raw = fs.readFileSync(path.resolve(configPath), "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-const noticesConfig = loadNoticesConfig();
+const noticesConfig = loadNoticesConfig(process.env);
 
 function getNoticeText(key: keyof NoticesConfig): string | null {
-  const entry = noticesConfig[key];
-  if (entry && typeof entry.text === "string") {
-    return entry.text;
-  }
-  return null;
+  return lookupNoticeText(noticesConfig, key);
+}
+
+function sendJson(res: ServerResponse, statusCode: number, payload: unknown): string {
+  return writeJson(res, statusCode, payload);
+}
+
+async function readBody<T extends object>(req: IncomingMessage): Promise<T> {
+  return await readJsonBody<T>(req, requestBodyMaxBytes);
 }
 
 // Env var overrides take priority over config file
 const pairingSuccessTextOverride =
-  readNonEmptyString(process.env.MUX_PAIRING_SUCCESS_TEXT) || getNoticeText("pairingSuccess");
+  readConfiguredText(process.env.MUX_PAIRING_SUCCESS_TEXT) || getNoticeText("pairingSuccess");
 const pairingInvalidTextOverride =
-  readNonEmptyString(process.env.MUX_PAIRING_INVALID_TEXT) || getNoticeText("pairingInvalid");
+  readConfiguredText(process.env.MUX_PAIRING_INVALID_TEXT) || getNoticeText("pairingInvalid");
 const botControlHelpTextOverride =
-  readNonEmptyString(process.env.MUX_BOT_HELP_TEXT) || getNoticeText("botHelp");
+  readConfiguredText(process.env.MUX_BOT_HELP_TEXT) || getNoticeText("botHelp");
 const botUnpairSuccessTextOverride =
-  readNonEmptyString(process.env.MUX_BOT_UNPAIR_SUCCESS_TEXT) || getNoticeText("botUnpairSuccess");
+  readConfiguredText(process.env.MUX_BOT_UNPAIR_SUCCESS_TEXT) || getNoticeText("botUnpairSuccess");
 const botNotPairedTextOverride =
-  readNonEmptyString(process.env.MUX_BOT_NOT_PAIRED_TEXT) || getNoticeText("botNotPaired");
+  readConfiguredText(process.env.MUX_BOT_NOT_PAIRED_TEXT) || getNoticeText("botNotPaired");
 const botSwitchUsageTextOverride =
-  readNonEmptyString(process.env.MUX_BOT_SWITCH_USAGE_TEXT) || getNoticeText("botSwitchUsage");
+  readConfiguredText(process.env.MUX_BOT_SWITCH_USAGE_TEXT) || getNoticeText("botSwitchUsage");
 const configuredUnpairedHintText =
-  readNonEmptyString(process.env.MUX_UNPAIRED_HINT_TEXT) || getNoticeText("clawdiIntro");
-const DEFAULT_REQUEST_BODY_MAX_BYTES = 50 * 1024 * 1024;
-const requestBodyMaxBytes = (() => {
-  const parsed = Number(process.env.MUX_MAX_BODY_BYTES || DEFAULT_REQUEST_BODY_MAX_BYTES);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_REQUEST_BODY_MAX_BYTES;
-  }
-  return Math.trunc(parsed);
-})();
+  readConfiguredText(process.env.MUX_UNPAIRED_HINT_TEXT) || getNoticeText("clawdiIntro");
+const pairingNotices = createPairingNotices({
+  pairingSuccessTextOverride,
+  pairingInvalidTextOverride,
+  botControlHelpTextOverride,
+  botUnpairSuccessTextOverride,
+  botNotPairedTextOverride,
+  botSwitchUsageTextOverride,
+  configuredUnpairedHintText,
+  getNoticeText,
+});
+const {
+  extractTokenFromStartCommand,
+  normalizeControlText,
+  extractPairingTokenFromText,
+  parseBotControlCommand,
+  renderPairingSuccessNotice,
+  renderPairingInvalidNotice,
+  renderBotHelpNotice,
+  renderBotUnpairSuccessNotice,
+  renderBotNotPairedNotice,
+  renderBotSwitchUsageNotice,
+  renderUnpairedHintNotice,
+  renderPairingRepairedNotice,
+  renderPairingTakeoverNotice,
+  renderWhatsAppContactTip,
+  renderBotStatusNotice,
+  resolvePostPairingPrompt,
+} = pairingNotices;
 const runtimeJwtAudienceMux = "mux-server";
 const runtimeJwtAudienceOpenClaw = "openclaw-mux-inbound";
 const runtimeTokenTtlSec = 86_400; // 1 day
@@ -789,6 +651,22 @@ const stmtSelectTenantInboundTargetById = db.prepare(`
   WHERE id = ? AND status = 'active'
   LIMIT 1
 `);
+
+const authService = createAuthService({
+  runtimeJwtSigner,
+  runtimeJwtAudienceMux,
+  stmtSelectTenantById,
+  stmtSelectTenantByHash,
+  stmtSelectTenantInboundTargetById,
+  muxAdminToken,
+  muxRegisterKey,
+});
+const {
+  resolveTenantIdentity,
+  isAdminAuthorized,
+  isRegisterAuthorized,
+  resolveTenantInboundTarget,
+} = authService;
 
 const stmtCountActiveTenantInboundTargets = db.prepare(`
   SELECT COUNT(*) AS count
@@ -1131,7 +1009,13 @@ const stmtInsertAuditLog = db.prepare(`
   VALUES (?, ?, ?, ?)
 `);
 
-const idempotencyInflight = new Map<string, InflightEntry>();
+const idempotencyInflight = new Map<
+  string,
+  {
+    fingerprint: string;
+    promise: Promise<SendResult>;
+  }
+>();
 let discordGatewayReady = false;
 // Bot's own user ID, extracted from the Discord gateway READY event.
 // Used to compute wasMentioned for inbound messages.
@@ -1182,127 +1066,6 @@ const whatsappRuntimeHealth: WhatsAppRuntimeHealth = {
 };
 let telegramPollConflictHealth: TelegramPollConflictHealth | null = null;
 
-function hashApiKey(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function resolveBearerToken(authHeader: unknown): string | null {
-  if (typeof authHeader !== "string") {
-    return null;
-  }
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() || null;
-}
-
-function resolveOpenClawIdHeader(req: IncomingMessage): string | null {
-  const raw = req.headers["x-openclaw-id"];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  return readNonEmptyString(value);
-}
-
-async function verifyRuntimeJwtForMuxApi(token: string): Promise<TenantIdentity | null> {
-  const verified = await runtimeJwtSigner.verify({
-    token,
-    audience: runtimeJwtAudienceMux,
-  });
-  if (!verified.ok) {
-    return null;
-  }
-  const payload = verified.payload;
-  const sub = readNonEmptyString(payload.sub);
-  if (!sub) {
-    return null;
-  }
-  const scopeAllowsRuntime =
-    hasScope(payload.scope, "mux:runtime") ||
-    hasScope(payload.scope, "mux:outbound") ||
-    hasScope(payload.scope, "mux:pairings") ||
-    hasScope(payload.scope, "mux:control");
-  if (!scopeAllowsRuntime) {
-    return null;
-  }
-  const row = stmtSelectTenantById.get(sub) as { id?: unknown; name?: unknown } | undefined;
-  if (!row) {
-    return null;
-  }
-  const id = typeof row.id === "string" ? row.id : "";
-  if (!id) {
-    return null;
-  }
-  const name = typeof row.name === "string" && row.name.trim() ? row.name : id;
-  return {
-    id,
-    name,
-    authKind: "runtime-jwt",
-    authToken: token,
-  };
-}
-
-async function resolveTenantIdentity(req: IncomingMessage): Promise<TenantIdentity | null> {
-  const token = resolveBearerToken(req.headers.authorization);
-  if (!token) {
-    return null;
-  }
-  const runtimeIdentity = await verifyRuntimeJwtForMuxApi(token);
-  if (runtimeIdentity) {
-    const headerOpenClawId = resolveOpenClawIdHeader(req);
-    if (!headerOpenClawId || headerOpenClawId !== runtimeIdentity.id) {
-      return null;
-    }
-    return runtimeIdentity;
-  }
-  const row = stmtSelectTenantByHash.get(hashApiKey(token)) as
-    | { id?: unknown; name?: unknown }
-    | undefined;
-  if (!row) {
-    return null;
-  }
-  const id = typeof row.id === "string" ? row.id : "";
-  if (!id) {
-    return null;
-  }
-  const name = typeof row.name === "string" && row.name.trim() ? row.name : id;
-  return { id, name, authKind: "api-key", authToken: token };
-}
-
-function isAdminAuthorized(req: IncomingMessage): boolean {
-  if (!muxAdminToken) {
-    return false;
-  }
-  const token = resolveBearerToken(req.headers.authorization);
-  return Boolean(token && token === muxAdminToken);
-}
-
-function isRegisterAuthorized(req: IncomingMessage): boolean {
-  if (!muxRegisterKey) {
-    return false;
-  }
-  const token = resolveBearerToken(req.headers.authorization);
-  return Boolean(token && token === muxRegisterKey);
-}
-
-function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | null {
-  const row = stmtSelectTenantInboundTargetById.get(tenantId) as
-    | {
-        inbound_url?: unknown;
-        inbound_timeout_ms?: unknown;
-        updated_at_ms?: unknown;
-      }
-    | undefined;
-  const url = readNonEmptyString(row?.inbound_url);
-  if (!url) {
-    return null;
-  }
-  const timeoutMs = readPositiveInt(row?.inbound_timeout_ms) ?? 15_000;
-  const updatedAtMs = readPositiveInt(row?.updated_at_ms) ?? null;
-  return {
-    url,
-    timeoutMs,
-    openclawId: tenantId,
-    updatedAtMs,
-  };
-}
-
 function resolveLiveBindingByRouteKey(
   channel: string,
   routeKey: string,
@@ -1332,89 +1095,6 @@ function isRouteBoundByAnotherTenant(params: {
 function isSqliteUniqueConstraintError(error: unknown): boolean {
   const text = String(error);
   return text.includes("SQLITE_CONSTRAINT") && text.includes("UNIQUE");
-}
-
-function countActiveTenantInboundTargets(): number {
-  const row = stmtCountActiveTenantInboundTargets.get() as { count?: unknown } | undefined;
-  return readNonNegativeCount(row?.count);
-}
-
-function countWhatsAppInboundQueueDepth(): number {
-  const row = stmtCountWhatsAppInboundQueue.get() as { count?: unknown } | undefined;
-  return readNonNegativeCount(row?.count);
-}
-
-async function renderMetricsPayload(): Promise<string> {
-  const queues = buildQueueSnapshot(Date.now());
-  return await metrics.renderPrometheus(queues.depth);
-}
-
-function resolveWhatsAppOldestQueuedAgeMs(nowMs = Date.now()): number | null {
-  const row = stmtSelectOldestWhatsAppInboundQueue.get() as
-    | { oldest_created_at_ms?: unknown }
-    | undefined;
-  return readOldestQueuedAgeMs(row?.oldest_created_at_ms, nowMs);
-}
-
-function buildQueueSnapshot(nowMs = Date.now()): {
-  depth: Record<"telegram" | "discord" | "whatsapp", number>;
-  oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp", number | null>;
-} {
-  return buildObservabilityQueueSnapshot({
-    nowMs,
-    telegramBgRetryCount,
-    telegramBgRetryQueuedAtMs,
-    discordBgRetryCount,
-    discordBgRetryQueuedAtMs,
-    whatsappQueueDepth: countWhatsAppInboundQueueDepth(),
-    whatsappOldestQueuedAgeMs: resolveWhatsAppOldestQueuedAgeMs(nowMs),
-  });
-}
-
-function buildReadinessReport(nowMs = Date.now()): {
-  ready: boolean;
-  channels: Record<
-    "telegram" | "discord" | "whatsapp",
-    {
-      status: string;
-      ready: boolean;
-      reason?: string;
-      lastSuccessAtMs?: number | null;
-      lastErrorAtMs?: number | null;
-      lastError?: string | null;
-      lastInboundSeenAtMs?: number | null;
-    }
-  >;
-  queues: {
-    depth: Record<"telegram" | "discord" | "whatsapp", number>;
-    oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp", number | null>;
-  };
-  degraded: Array<{ channel: "telegram" | "discord" | "whatsapp"; reason: string }>;
-} {
-  const queues = buildQueueSnapshot(nowMs);
-  const whatsAppCredentialHealth = getWhatsAppCredentialHealth();
-  return buildObservabilityReadinessReport({
-    nowMs,
-    queues,
-    telegramInboundEnabled,
-    telegramPollConflictHealth,
-    telegramRuntimeHealth,
-    discordInboundEnabled,
-    discordRuntimeHealth,
-    whatsappInboundEnabled,
-    whatsappRuntimeHealth,
-    whatsappCredentialStatus: whatsAppCredentialHealth.status,
-  });
-}
-
-function renderObservabilitySnapshot(params: { nowMs?: number; tenantId?: string }) {
-  const nowMs = params.nowMs ?? Date.now();
-  const readiness = buildReadinessReport(nowMs);
-  return buildObservabilitySnapshot({
-    nowMs,
-    tenantId: params.tenantId,
-    readiness,
-  });
 }
 
 async function mintRuntimeJwt(params: {
@@ -1581,201 +1261,6 @@ function resolvePairingCodeSeeds(): PairingCodeSeed[] {
   return seeds;
 }
 
-function initializeDatabase(database: DatabaseSync) {
-  database.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = NORMAL;
-
-    CREATE TABLE IF NOT EXISTS tenants (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      api_key_hash TEXT NOT NULL UNIQUE,
-      status TEXT NOT NULL DEFAULT 'active',
-      inbound_url TEXT,
-      inbound_token TEXT,
-      inbound_timeout_ms INTEGER,
-      created_at_ms INTEGER NOT NULL,
-      updated_at_ms INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
-
-    CREATE TABLE IF NOT EXISTS pairing_codes (
-      code TEXT PRIMARY KEY,
-      channel TEXT NOT NULL,
-      route_key TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      expires_at_ms INTEGER NOT NULL,
-      claimed_by_tenant_id TEXT,
-      claimed_at_ms INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_pairing_codes_expires ON pairing_codes(expires_at_ms);
-
-    CREATE TABLE IF NOT EXISTS pairing_tokens (
-      token_hash TEXT PRIMARY KEY,
-      tenant_id TEXT NOT NULL,
-      channel TEXT,
-      session_key TEXT,
-      created_at_ms INTEGER NOT NULL,
-      expires_at_ms INTEGER NOT NULL,
-      consumed_at_ms INTEGER,
-      consumed_binding_id TEXT,
-      consumed_route_key TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_pairing_tokens_tenant_channel
-      ON pairing_tokens(tenant_id, channel, expires_at_ms);
-
-    CREATE TABLE IF NOT EXISTS bindings (
-      binding_id TEXT PRIMARY KEY,
-      tenant_id TEXT NOT NULL,
-      channel TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      route_key TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active',
-      created_at_ms INTEGER NOT NULL,
-      updated_at_ms INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_bindings_tenant_channel ON bindings(tenant_id, channel);
-    CREATE INDEX IF NOT EXISTS idx_bindings_channel_route_status
-      ON bindings(channel, route_key, status);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_bindings_channel_route_live_unique
-      ON bindings(channel, route_key)
-      WHERE status IN ('active', 'pending');
-
-    CREATE TABLE IF NOT EXISTS session_routes (
-      tenant_id TEXT NOT NULL,
-      channel TEXT NOT NULL,
-      session_key TEXT NOT NULL,
-      binding_id TEXT NOT NULL,
-      channel_context_json TEXT,
-      updated_at_ms INTEGER NOT NULL,
-      PRIMARY KEY (tenant_id, channel, session_key)
-    );
-
-    CREATE TABLE IF NOT EXISTS idempotency_keys (
-      tenant_id TEXT NOT NULL,
-      key TEXT NOT NULL,
-      request_fingerprint TEXT NOT NULL,
-      response_status INTEGER NOT NULL,
-      response_body TEXT NOT NULL,
-      expires_at_ms INTEGER NOT NULL,
-      created_at_ms INTEGER NOT NULL,
-      PRIMARY KEY (tenant_id, key)
-    );
-    CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys(expires_at_ms);
-
-    CREATE TABLE IF NOT EXISTS audit_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      tenant_id TEXT,
-      event_type TEXT NOT NULL,
-      payload_json TEXT,
-      created_at_ms INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created
-      ON audit_logs(tenant_id, created_at_ms);
-
-    CREATE TABLE IF NOT EXISTS telegram_offsets (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      last_update_id INTEGER NOT NULL,
-      updated_at_ms INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS discord_offsets (
-      binding_id TEXT PRIMARY KEY,
-      last_message_id TEXT NOT NULL,
-      updated_at_ms INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS whatsapp_inbound_queue (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      dedupe_key TEXT NOT NULL UNIQUE,
-      payload_json TEXT NOT NULL,
-      next_attempt_at_ms INTEGER NOT NULL,
-      attempt_count INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      delivery_window_started_at_ms INTEGER NOT NULL,
-      last_target_update_at_ms INTEGER NOT NULL DEFAULT 0,
-      created_at_ms INTEGER NOT NULL,
-      updated_at_ms INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_whatsapp_inbound_queue_next_attempt
-      ON whatsapp_inbound_queue(next_attempt_at_ms, id);
-  `);
-  ensureTenantInboundTargetColumns(database);
-  ensurePairingTokenColumns(database);
-  ensureWhatsAppInboundQueueColumns(database);
-}
-
-function ensureTenantInboundTargetColumns(database: DatabaseSync) {
-  const rows = database.prepare("PRAGMA table_info(tenants)").all() as Array<{ name?: unknown }>;
-  const columnNames = new Set(rows.map((row) => (typeof row.name === "string" ? row.name : "")));
-  if (!columnNames.has("inbound_url")) {
-    database.exec("ALTER TABLE tenants ADD COLUMN inbound_url TEXT");
-  }
-  if (!columnNames.has("inbound_token")) {
-    database.exec("ALTER TABLE tenants ADD COLUMN inbound_token TEXT");
-  }
-  if (!columnNames.has("inbound_timeout_ms")) {
-    database.exec("ALTER TABLE tenants ADD COLUMN inbound_timeout_ms INTEGER");
-  }
-}
-
-function ensurePairingTokenColumns(database: DatabaseSync) {
-  const rows = database.prepare("PRAGMA table_info(pairing_tokens)").all() as Array<{
-    name?: unknown;
-    notnull?: unknown;
-  }>;
-  const columnNames = new Set(rows.map((row) => (typeof row.name === "string" ? row.name : "")));
-  if (!columnNames.has("consumed_binding_id")) {
-    database.exec("ALTER TABLE pairing_tokens ADD COLUMN consumed_binding_id TEXT");
-  }
-  if (!columnNames.has("consumed_route_key")) {
-    database.exec("ALTER TABLE pairing_tokens ADD COLUMN consumed_route_key TEXT");
-  }
-
-  // Migrate channel column from NOT NULL to nullable (channel-agnostic tokens)
-  const channelCol = rows.find((r) => typeof r.name === "string" && r.name === "channel");
-  if (channelCol && channelCol.notnull === 1) {
-    database.exec(`
-      ALTER TABLE pairing_tokens RENAME TO pairing_tokens_old;
-      CREATE TABLE pairing_tokens (
-        token_hash TEXT PRIMARY KEY,
-        tenant_id TEXT NOT NULL,
-        channel TEXT,
-        session_key TEXT,
-        created_at_ms INTEGER NOT NULL,
-        expires_at_ms INTEGER NOT NULL,
-        consumed_at_ms INTEGER,
-        consumed_binding_id TEXT,
-        consumed_route_key TEXT
-      );
-      INSERT INTO pairing_tokens SELECT * FROM pairing_tokens_old;
-      DROP TABLE pairing_tokens_old;
-    `);
-  }
-}
-
-function ensureWhatsAppInboundQueueColumns(database: DatabaseSync) {
-  const rows = database.prepare("PRAGMA table_info(whatsapp_inbound_queue)").all() as Array<{
-    name?: unknown;
-  }>;
-  const columnNames = new Set(rows.map((row) => (typeof row.name === "string" ? row.name : "")));
-  if (!columnNames.has("delivery_window_started_at_ms")) {
-    database.exec(
-      "ALTER TABLE whatsapp_inbound_queue ADD COLUMN delivery_window_started_at_ms INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  if (!columnNames.has("last_target_update_at_ms")) {
-    database.exec(
-      "ALTER TABLE whatsapp_inbound_queue ADD COLUMN last_target_update_at_ms INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  database.exec(`
-    UPDATE whatsapp_inbound_queue
-    SET delivery_window_started_at_ms = created_at_ms
-    WHERE delivery_window_started_at_ms <= 0
-  `);
-}
-
 function seedTenants(database: DatabaseSync, tenants: TenantSeed[]) {
   const now = Date.now();
   const upsert = database.prepare(`
@@ -1855,199 +1340,6 @@ function log(entry: Record<string, unknown>) {
   const normalized = normalizeObservabilityLogEvent(entry);
   metrics.observeLogEvent(normalized);
   fs.appendFileSync(logPath, formatObservabilityLogLine(normalized));
-}
-
-function sendJson(res: ServerResponse, statusCode: number, payload: unknown): string {
-  const bodyText = JSON.stringify(payload);
-  res.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
-  res.end(bodyText);
-  return bodyText;
-}
-
-function readPositiveInt(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-    return Math.trunc(value);
-  }
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number.parseInt(value.trim(), 10);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
-    }
-  }
-  return undefined;
-}
-
-function getWhatsAppCredentialHealth() {
-  const authDir = whatsappAuthDir;
-  const credsPath = path.join(authDir, "creds.json");
-  const authDirExists = fs.existsSync(authDir);
-  const credsPresent = fs.existsSync(credsPath);
-  const fileCounts = {
-    session: 0,
-    senderKey: 0,
-    preKey: 0,
-    deviceList: 0,
-    lidMapping: 0,
-  };
-  let scanError: string | null = null;
-
-  if (authDirExists) {
-    try {
-      for (const entry of fs.readdirSync(authDir)) {
-        if (entry.startsWith("session-")) {
-          fileCounts.session += 1;
-          continue;
-        }
-        if (entry.startsWith("sender-key-")) {
-          fileCounts.senderKey += 1;
-          continue;
-        }
-        if (entry.startsWith("pre-key-")) {
-          fileCounts.preKey += 1;
-          continue;
-        }
-        if (entry.startsWith("device-list-")) {
-          fileCounts.deviceList += 1;
-          continue;
-        }
-        if (entry.startsWith("lid-mapping-")) {
-          fileCounts.lidMapping += 1;
-        }
-      }
-    } catch (error) {
-      scanError = String(error);
-    }
-  }
-
-  let credsStat: { present: boolean; sizeBytes?: number; mtimeMs?: number } = {
-    present: credsPresent,
-  };
-  let credsMeId: string | null = null;
-  if (credsPresent) {
-    try {
-      const stat = fs.statSync(credsPath);
-      credsStat = {
-        present: true,
-        sizeBytes: stat.size,
-        mtimeMs: stat.mtimeMs,
-      };
-      const parsedCreds = JSON.parse(fs.readFileSync(credsPath, "utf8")) as {
-        me?: { id?: unknown };
-      };
-      if (typeof parsedCreds.me?.id === "string" && parsedCreds.me.id.trim() !== "") {
-        credsMeId = parsedCreds.me.id.trim();
-      }
-    } catch {
-      credsStat = { present: true };
-    }
-  }
-
-  let status = "disabled";
-  if (whatsappInboundEnabled) {
-    if (!authDirExists || !credsPresent) {
-      status = "missing_credentials";
-    } else if (whatsappRuntimeHealth.listenerActive) {
-      status = "listening";
-    } else if (whatsappRuntimeHealth.lastListenerErrorAtMs) {
-      status = "listener_error";
-    } else {
-      status = "starting_or_idle";
-    }
-  }
-
-  return {
-    status,
-    inboundEnabled: whatsappInboundEnabled,
-    accountId: whatsappAccountId,
-    openclawAccountId: openclawMuxAccountId,
-    authDir,
-    authDirExists,
-    credsPath,
-    creds: credsStat,
-    credsMeId,
-    fileCounts,
-    runtime: {
-      listenerActive: whatsappRuntimeHealth.listenerActive,
-      loopStartedAtMs: whatsappRuntimeHealth.loopStartedAtMs,
-      lastListenerStartAtMs: whatsappRuntimeHealth.lastListenerStartAtMs,
-      lastListenerCloseAtMs: whatsappRuntimeHealth.lastListenerCloseAtMs,
-      lastListenerCloseStatus: whatsappRuntimeHealth.lastListenerCloseStatus,
-      lastListenerClosedLoggedOut: whatsappRuntimeHealth.lastListenerClosedLoggedOut,
-      lastListenerErrorAtMs: whatsappRuntimeHealth.lastListenerErrorAtMs,
-      lastListenerError: whatsappRuntimeHealth.lastListenerError,
-      lastInboundSeenAtMs: whatsappRuntimeHealth.lastInboundSeenAtMs,
-    },
-    ...(scanError ? { scanError } : {}),
-  };
-}
-
-function readUnsignedNumericString(value: unknown): string | undefined {
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-    return String(Math.trunc(value));
-  }
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    return undefined;
-  }
-  return trimmed;
-}
-
-function readSignedNumericString(value: unknown): string | undefined {
-  if (typeof value === "number" && Number.isFinite(value) && value !== 0) {
-    return String(Math.trunc(value));
-  }
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  if (!/^-?\d+$/.test(trimmed) || trimmed === "0" || trimmed === "-0") {
-    return undefined;
-  }
-  return trimmed;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-}
-
-class HttpBodyError extends Error {
-  readonly statusCode: number;
-
-  constructor(statusCode: number, message: string) {
-    super(message);
-    this.statusCode = statusCode;
-    this.name = "HttpBodyError";
-  }
-}
-
-async function readBody<T extends object>(req: IncomingMessage): Promise<T> {
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  let tooLarge = false;
-  for await (const chunk of req) {
-    const chunkBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    totalBytes += chunkBuffer.length;
-    if (totalBytes > requestBodyMaxBytes) {
-      tooLarge = true;
-      continue;
-    }
-    chunks.push(chunkBuffer);
-  }
-  if (tooLarge) {
-    throw new HttpBodyError(413, "payload too large");
-  }
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw.trim()) {
-    return {} as T;
-  }
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    throw new HttpBodyError(400, "invalid JSON body");
-  }
 }
 
 function requireTelegramBotToken(): string {
@@ -2596,358 +1888,6 @@ async function extractDiscordInboundMedia(params: {
   return { attachments, media: summaries };
 }
 
-function purgeExpiredIdempotency(now: number) {
-  stmtDeleteExpiredIdempotency.run(now);
-}
-
-function resolveInflightKey(tenantId: string, idempotencyKey: string): string {
-  return `${tenantId}:${idempotencyKey}`;
-}
-
-function loadCachedIdempotency(params: {
-  tenantId: string;
-  idempotencyKey: string;
-  fingerprint: string;
-  now: number;
-}): SendResult | "mismatch" | null {
-  const row = stmtSelectCachedIdempotency.get(params.tenantId, params.idempotencyKey, params.now) as
-    | CachedIdempotencyRow
-    | undefined;
-  if (!row) {
-    return null;
-  }
-  if (row.request_fingerprint !== params.fingerprint) {
-    return "mismatch";
-  }
-  return {
-    statusCode: Number(row.response_status),
-    bodyText: String(row.response_body),
-  };
-}
-
-function storeIdempotency(params: {
-  tenantId: string;
-  idempotencyKey: string;
-  fingerprint: string;
-  result: SendResult;
-  now: number;
-}) {
-  stmtUpsertIdempotency.run(
-    params.tenantId,
-    params.idempotencyKey,
-    params.fingerprint,
-    params.result.statusCode,
-    params.result.bodyText,
-    params.now + idempotencyTtlMs,
-    params.now,
-  );
-}
-
-function readNonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function normalizeTtlSec(ttlSec: number): number {
-  const safeDefault = Math.max(1, Math.trunc(pairingTokenTtlSec));
-  const safeMax = Math.max(safeDefault, Math.trunc(pairingTokenMaxTtlSec));
-  if (!Number.isFinite(ttlSec) || ttlSec <= 0) {
-    return safeDefault;
-  }
-  return Math.min(Math.max(1, Math.trunc(ttlSec)), safeMax);
-}
-
-function generatePairingToken(): string {
-  // Use hex instead of base64url to avoid underscores, which Discord renders as italic Markdown.
-  return `mpt_${randomBytes(24).toString("hex")}`;
-}
-
-function hashPairingToken(token: string): string {
-  return createHash("sha256").update(token, "utf8").digest("hex");
-}
-
-function purgeExpiredPairingTokens(nowMs: number) {
-  stmtDeleteExpiredPairingTokens.run(nowMs);
-  if (discordPendingGcEnabled) {
-    stmtDeactivateStaleDiscordPendingBindings.run(nowMs, nowMs);
-  }
-}
-
-function runTokenClaimTransaction<T>(claim: () => T | null): T | null {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = claim();
-    if (result === null) {
-      db.exec("ROLLBACK");
-      return null;
-    }
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      // Ignore rollback failures if transaction already closed.
-    }
-    throw error;
-  }
-}
-
-function issuePairingTokenForTenant(params: {
-  tenant: TenantIdentity;
-  sessionKey?: string;
-  ttlSec?: number;
-}) {
-  const nowMs = Date.now();
-  purgeExpiredPairingTokens(nowMs);
-  const ttlSec = normalizeTtlSec(params.ttlSec ?? pairingTokenTtlSec);
-  const token = generatePairingToken();
-  const tokenHash = hashPairingToken(token);
-  const expiresAtMs = nowMs + ttlSec * 1_000;
-  const sessionKey = readNonEmptyString(params.sessionKey);
-
-  stmtInsertPairingToken.run(tokenHash, params.tenant.id, sessionKey, nowMs, expiresAtMs);
-
-  const telegramDeepLink = telegramBotUsername
-    ? `https://t.me/${telegramBotUsername}?start=${encodeURIComponent(token)}`
-    : null;
-
-  writeAuditLog(
-    params.tenant.id,
-    "pairing_token_issued",
-    {
-      expiresAtMs,
-      hasSessionKey: Boolean(sessionKey),
-    },
-    nowMs,
-  );
-
-  return {
-    statusCode: 200,
-    payload: {
-      ok: true,
-      token,
-      expiresAtMs,
-      startCommand: `/start ${token}`,
-      deepLink: telegramDeepLink,
-    },
-  };
-}
-
-function extractTokenFromStartCommand(input: string): string | null {
-  const match = input.match(/^\/start(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?$/i);
-  if (!match) {
-    return null;
-  }
-  return readNonEmptyString(match[1]);
-}
-
-function normalizeControlText(input: string | null): string | null {
-  if (typeof input !== "string") {
-    return null;
-  }
-  const trimmed = input.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function parseBotControlCommand(input: string | null): BotControlCommand | null {
-  const normalized = normalizeControlText(input);
-  if (!normalized) {
-    return null;
-  }
-  const match = normalized.match(
-    /^[/!](bot_help|bot_status|bot_unpair|bot_switch)(?:@[A-Za-z0-9_]+)?(?:\s+(.*))?$/i,
-  );
-  if (!match?.[1]) {
-    return null;
-  }
-  const command = match[1].toLowerCase();
-  if (command === "bot_help") {
-    return { kind: "help" };
-  }
-  if (command === "bot_status") {
-    return { kind: "status" };
-  }
-  if (command === "bot_unpair") {
-    return { kind: "unpair" };
-  }
-  const arg = normalizeControlText(match[2] ?? null);
-  const token = extractPairingTokenFromText(arg);
-  return { kind: "switch", ...(token ? { token } : {}) };
-}
-
-function escapeTelegramHtml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-function styleBold(channel: NoticeChannel, text: string): string {
-  if (channel === "telegram") {
-    return `<b>${escapeTelegramHtml(text)}</b>`;
-  }
-  return `**${text}**`;
-}
-
-function styleCode(channel: NoticeChannel, text: string): string {
-  if (channel === "telegram") {
-    return `<code>${escapeTelegramHtml(text)}</code>`;
-  }
-  return `\`${text}\``;
-}
-
-function styleText(channel: NoticeChannel, text: string): string {
-  return channel === "telegram" ? escapeTelegramHtml(text) : text;
-}
-
-function buildStyledNotice(channel: NoticeChannel, lines: string[]): StyledNotice {
-  if (channel === "telegram") {
-    return { text: lines.join("\n"), parseMode: "HTML" };
-  }
-  return { text: lines.join("\n") };
-}
-
-function renderPairingSuccessNotice(channel: NoticeChannel): StyledNotice {
-  if (pairingSuccessTextOverride) {
-    return { text: pairingSuccessTextOverride };
-  }
-  return buildStyledNotice(channel, [
-    styleBold(channel, "Paired successfully"),
-    "",
-    "You can chat now.",
-  ]);
-}
-
-function renderPairingInvalidNotice(channel: NoticeChannel): StyledNotice {
-  if (pairingInvalidTextOverride) {
-    return { text: pairingInvalidTextOverride };
-  }
-  return buildStyledNotice(channel, [
-    styleBold(channel, "Pairing link is invalid or expired"),
-    "",
-    "Request a new link from your dashboard.",
-  ]);
-}
-
-function renderBotHelpNotice(channel: NoticeChannel): StyledNotice {
-  if (botControlHelpTextOverride) {
-    return { text: botControlHelpTextOverride };
-  }
-  const command = (value: string): string =>
-    channel === "telegram" ? styleText(channel, value) : styleCode(channel, value);
-  return buildStyledNotice(channel, [
-    styleBold(channel, "Bot control commands"),
-    "",
-    `• ${command("/bot_help")} - Show bot control help.`,
-    `• ${command("/bot_status")} - Show current pairing status.`,
-    `• ${command("/bot_unpair")} - Unlink this chat from OpenClaw.`,
-    `• ${command("/bot_switch <token>")} - Switch this chat to another OpenClaw.`,
-    "",
-    `After pairing, ${command("/help")} is provided by your OpenClaw instance.`,
-  ]);
-}
-
-function renderBotUnpairSuccessNotice(channel: NoticeChannel): StyledNotice {
-  if (botUnpairSuccessTextOverride) {
-    return { text: botUnpairSuccessTextOverride };
-  }
-  return buildStyledNotice(channel, [
-    styleBold(channel, "Unpaired successfully"),
-    "",
-    `Use ${styleCode(channel, "/bot_switch <token>")} to pair again.`,
-  ]);
-}
-
-function renderBotNotPairedNotice(channel: NoticeChannel): StyledNotice {
-  if (botNotPairedTextOverride) {
-    return { text: botNotPairedTextOverride };
-  }
-  return buildStyledNotice(channel, [
-    styleBold(channel, "This chat is not paired yet"),
-    "",
-    `Use ${styleCode(channel, "/bot_switch <token>")} to pair this chat.`,
-  ]);
-}
-
-function renderBotSwitchUsageNotice(channel: NoticeChannel): StyledNotice {
-  if (botSwitchUsageTextOverride) {
-    return { text: botSwitchUsageTextOverride };
-  }
-  return buildStyledNotice(channel, [
-    `Usage: ${styleCode(channel, "/bot_switch <pairing-token>")}`,
-  ]);
-}
-
-function renderUnpairedHintNotice(channel: NoticeChannel): StyledNotice {
-  if (configuredUnpairedHintText) {
-    return convertConfigNotice(channel, configuredUnpairedHintText);
-  }
-  return buildStyledNotice(channel, [
-    `Hi! I'm ${styleBold(channel, "Clawdi")} — your AI assistant.`,
-    "",
-    "To get started, pair this chat with your Clawdi account:",
-    `Visit ${styleBold(channel, "clawdi.ai")} and connect this messenger from your dashboard.`,
-  ]);
-}
-
-function convertConfigNotice(channel: NoticeChannel, text: string): StyledNotice {
-  if (channel === "telegram") {
-    // Escape HTML entities first, then convert markdown to HTML tags
-    const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const converted = escaped
-      .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
-      .replace(/`(.+?)`/g, "<code>$1</code>");
-    return { text: converted, parseMode: "HTML" };
-  }
-  return { text };
-}
-
-function renderPairingRepairedNotice(channel: NoticeChannel): StyledNotice {
-  const override = getNoticeText("pairingRepaired");
-  if (override) {
-    return convertConfigNotice(channel, override);
-  }
-  return buildStyledNotice(channel, [
-    styleBold(channel, "Reconnected successfully"),
-    "",
-    "You can chat now.",
-  ]);
-}
-
-function renderPairingTakeoverNotice(channel: NoticeChannel): StyledNotice {
-  const override = getNoticeText("pairingTakeover");
-  if (override) {
-    return convertConfigNotice(channel, override);
-  }
-  return buildStyledNotice(channel, [
-    styleBold(channel, "Paired successfully"),
-    "",
-    "Your previous connection was closed. You're now connected to a new assistant.",
-  ]);
-}
-
-function renderWhatsAppContactTip(channel: NoticeChannel): StyledNotice {
-  const override = getNoticeText("whatsappContactTip");
-  if (override) {
-    return convertConfigNotice(channel, override);
-  }
-  return buildStyledNotice(channel, [
-    `${styleBold(channel, "Tip:")} Save this number to your contacts and give it a custom name — like your assistant's name or anything you'd like!`,
-  ]);
-}
-
-function extractPairingTokenFromTelegramMessage(message: TelegramIncomingMessage): string | null {
-  const rawText = typeof message.text === "string" ? message.text : undefined;
-  const rawCaption = typeof message.caption === "string" ? message.caption : undefined;
-  const text = normalizeControlText(rawText ?? rawCaption ?? null);
-  if (text === null) {
-    return null;
-  }
-  const fromStart = extractTokenFromStartCommand(text);
-  if (fromStart && /^mpt_[A-Za-z0-9_-]{20,200}$/.test(fromStart)) {
-    return fromStart;
-  }
-  const direct = text.match(/\b(mpt_[A-Za-z0-9_-]{20,200})\b/);
-  return direct?.[1] ?? null;
-}
-
 function isTelegramCommandText(input: string | null): boolean {
   const normalized = normalizeControlText(input);
   if (!normalized) {
@@ -2971,25 +1911,6 @@ function hasTelegramMessageContent(message: TelegramIncomingMessage): boolean {
     message.audio ||
     message.video_note,
   );
-}
-
-function extractPairingTokenFromText(input: string | null): string | null {
-  const normalized = normalizeControlText(input);
-  if (!normalized) {
-    return null;
-  }
-  const direct = normalized.match(/\b(mpt_[A-Za-z0-9_-]{20,200})\b/);
-  return direct?.[1] ?? null;
-}
-
-function extractPairingTokenFromDiscordMessage(message: Record<string, unknown>): string | null {
-  const text = typeof message.content === "string" ? message.content : null;
-  return extractPairingTokenFromText(text);
-}
-
-function extractPairingTokenFromWhatsAppMessage(message: WebInboundMessage): string | null {
-  const text = typeof message.body === "string" ? message.body : null;
-  return extractPairingTokenFromText(text);
 }
 
 function isDiscordCommandText(input: string): boolean {
@@ -3357,48 +2278,6 @@ async function answerTelegramCallbackQuery(params: {
   }
 }
 
-async function extractWhatsAppInboundMedia(params: {
-  message: WebInboundMessage;
-}): Promise<{ attachments: WhatsAppInboundAttachment[]; media: WhatsAppInboundMediaSummary[] }> {
-  const attachments: WhatsAppInboundAttachment[] = [];
-  const media: WhatsAppInboundMediaSummary[] = [];
-  const mediaPath = readNonEmptyString(params.message.mediaPath) ?? undefined;
-  const mediaType = readNonEmptyString(params.message.mediaType)?.toLowerCase() ?? undefined;
-  if (!mediaPath) {
-    return { attachments, media };
-  }
-
-  const summary: WhatsAppInboundMediaSummary = {
-    mediaPath,
-    mediaType,
-  };
-  let sizeBytes: number | undefined;
-  try {
-    const stat = fs.statSync(mediaPath);
-    if (stat.isFile() && Number.isFinite(stat.size) && stat.size > 0) {
-      sizeBytes = Math.trunc(stat.size);
-      summary.sizeBytes = sizeBytes;
-    }
-  } catch (error) {
-    log({
-      type: "whatsapp_media_stat_error",
-      mediaPath,
-      error: String(error),
-    });
-  }
-  media.push(summary);
-
-  const resolvedMime = mediaType || inferMimeTypeFromPath(mediaPath) || "application/octet-stream";
-  const proxyUrl = `${muxPublicUrl}/v1/mux/files/whatsapp?path=${encodeURIComponent(mediaPath)}`;
-  attachments.push({
-    type: resolvedMime.split("/")[0] || "file",
-    mimeType: resolvedMime,
-    fileName: path.basename(mediaPath),
-    url: proxyUrl,
-  });
-  return { attachments, media };
-}
-
 async function sendWhatsAppPairingNotice(params: {
   chatJid: string;
   accountId: string;
@@ -3411,611 +2290,19 @@ async function sendWhatsAppPairingNotice(params: {
   });
 }
 
-function normalizeChannel(value: unknown): string | null {
-  if (typeof value !== "string" || !value.trim()) {
-    return null;
-  }
-  return value.trim().toLowerCase();
-}
-
-function parseTelegramRouteKey(routeKey: string): TelegramBoundRoute | null {
-  const match = routeKey.match(/^telegram:[^:]+:chat:([^:]+)(?::topic:([^:]+))?$/);
-  if (!match) {
-    return null;
-  }
-  const chatId = match[1]?.trim();
-  if (!chatId) {
-    return null;
-  }
-  const topicId = readPositiveInt(match[2]);
-  return topicId ? { chatId, topicId } : { chatId };
-}
-
-function readRouteKeyFromSessionContext(raw: unknown): string | null {
-  if (typeof raw !== "string" || !raw.trim()) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    const record = asRecord(parsed);
-    return readNonEmptyString(record?.routeKey) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function resolveBoundRouteKeyFromSession(row: SessionRouteBindingRow): string {
-  return readRouteKeyFromSessionContext(row.channel_context_json) ?? String(row.route_key);
-}
-
-function resolveSessionKeyForBindingRoute(params: {
-  tenantId: string;
-  channel: "telegram" | "discord" | "whatsapp";
-  bindingId: string;
-  routeKey: string;
-}): string | null {
-  const rows = stmtListSessionRoutesByBinding.all(
-    params.tenantId,
-    params.channel,
-    params.bindingId,
-  ) as SessionRouteByBindingRow[];
-  for (const row of rows) {
-    const sessionKey = readNonEmptyString(row.session_key);
-    if (!sessionKey) {
-      continue;
-    }
-    const routeKey = readRouteKeyFromSessionContext(row.channel_context_json);
-    if (routeKey === params.routeKey) {
-      return sessionKey;
-    }
-  }
-  return null;
-}
-
-function resolveLatestSessionKeyForBinding(params: {
-  tenantId: string;
-  channel: "telegram" | "discord" | "whatsapp";
-  bindingId: string;
-}): string | null {
-  const row = stmtSelectSessionKeyByBinding.get(
-    params.tenantId,
-    params.channel,
-    params.bindingId,
-  ) as { session_key?: unknown } | undefined;
-  return readNonEmptyString(row?.session_key);
-}
-
-function buildThreadScopedSessionKey(
-  baseSessionKey: string,
-  chatId: string,
-  topicId: number,
-): string {
-  const normalizedBase = baseSessionKey.trim().replace(/:(thread|topic):[^:]+$/i, "");
-  return chatId.startsWith("-")
-    ? `${normalizedBase}:topic:${topicId}`
-    : `${normalizedBase}:thread:${topicId}`;
-}
-
-function resolveTelegramInboundSessionKey(params: {
-  tenantId: string;
-  bindingId: string;
-  chatId: string;
-  topicId?: number;
-}): string {
-  const incomingRouteKey = buildTelegramRouteKey(params.chatId, params.topicId);
-  const exactSessionKey = resolveSessionKeyForBindingRoute({
-    tenantId: params.tenantId,
-    channel: "telegram",
-    bindingId: params.bindingId,
-    routeKey: incomingRouteKey,
-  });
-  if (exactSessionKey) {
-    return exactSessionKey;
-  }
-
-  if (params.topicId) {
-    const chatRouteKey = buildTelegramRouteKey(params.chatId);
-    const chatSessionKey =
-      resolveSessionKeyForBindingRoute({
-        tenantId: params.tenantId,
-        channel: "telegram",
-        bindingId: params.bindingId,
-        routeKey: chatRouteKey,
-      }) ??
-      resolveLatestSessionKeyForBinding({
-        tenantId: params.tenantId,
-        channel: "telegram",
-        bindingId: params.bindingId,
-      }) ??
-      deriveTelegramSessionKey(params.chatId);
-    return buildThreadScopedSessionKey(chatSessionKey, params.chatId, params.topicId);
-  }
-
-  const chatRouteKey = buildTelegramRouteKey(params.chatId);
-  return (
-    resolveSessionKeyForBindingRoute({
-      tenantId: params.tenantId,
-      channel: "telegram",
-      bindingId: params.bindingId,
-      routeKey: chatRouteKey,
-    }) ??
-    resolveLatestSessionKeyForBinding({
-      tenantId: params.tenantId,
-      channel: "telegram",
-      bindingId: params.bindingId,
-    }) ??
-    deriveTelegramSessionKey(params.chatId)
-  );
-}
-
-function parseDiscordRouteKey(routeKey: string): DiscordBoundRoute | null {
-  const dmMatch = routeKey.match(/^discord:[^:]+:dm:user:(\d+)$/);
-  if (dmMatch?.[1]) {
-    return { kind: "dm", userId: dmMatch[1] };
-  }
-  const guildMatch = routeKey.match(
-    /^discord:[^:]+:guild:(\d+)(?::channel:(\d+))?(?::thread:(\d+))?$/,
-  );
-  if (!guildMatch?.[1]) {
-    return null;
-  }
-  const guildId = guildMatch[1];
-  const channelId = guildMatch[2];
-  const threadId = guildMatch[3];
-  return {
-    kind: "guild",
-    guildId,
-    ...(channelId ? { channelId } : {}),
-    ...(threadId ? { threadId } : {}),
-  };
-}
-
-function buildDiscordGuildRouteKey(params: {
-  guildId: string;
-  channelId?: string;
-  threadId?: string;
-}): string {
-  const base = `discord:default:guild:${params.guildId}`;
-  if (params.channelId && params.threadId) {
-    return `${base}:channel:${params.channelId}:thread:${params.threadId}`;
-  }
-  if (params.threadId) {
-    return `${base}:thread:${params.threadId}`;
-  }
-  if (params.channelId) {
-    return `${base}:channel:${params.channelId}`;
-  }
-  return base;
-}
-
-function buildDiscordDmRouteKey(userId: string): string {
-  return `discord:default:dm:user:${userId}`;
-}
-
-function buildDiscordRouteKey(route: DiscordBoundRoute): string {
-  if (route.kind === "dm") {
-    return buildDiscordDmRouteKey(route.userId);
-  }
-  return buildDiscordGuildRouteKey({
-    guildId: route.guildId,
-    ...(route.channelId ? { channelId: route.channelId } : {}),
-    ...(route.threadId ? { threadId: route.threadId } : {}),
-  });
-}
-
-function normalizeDiscordSessionAgentId(agentId: string | null | undefined): string {
-  const trimmed = readNonEmptyString(agentId);
-  return trimmed ? trimmed.toLowerCase() : "main";
-}
-
-function resolveDiscordSessionAgentIdFromKey(sessionKey: string | null | undefined): string {
-  const trimmed = readNonEmptyString(sessionKey);
-  if (!trimmed) {
-    return "main";
-  }
-  const match = trimmed.match(/^agent:([^:]+):/i);
-  return normalizeDiscordSessionAgentId(match?.[1] ?? null);
-}
-
-function buildDiscordDirectSessionKey(userId: string, agentId = "main"): string {
-  return `agent:${normalizeDiscordSessionAgentId(agentId)}:discord:direct:${userId}`;
-}
-
-function buildDiscordChannelSessionKey(channelId: string, agentId = "main"): string {
-  return `agent:${normalizeDiscordSessionAgentId(agentId)}:discord:channel:${channelId}`;
-}
-
-function buildDiscordThreadScopedSessionKey(baseSessionKey: string, threadId: string): string {
-  return buildDiscordChannelSessionKey(
-    threadId,
-    resolveDiscordSessionAgentIdFromKey(baseSessionKey),
-  );
-}
-
-function resolveDiscordBindingRouteKeyForClaim(params: {
-  incomingRoute: DiscordBoundRoute;
-}): string {
-  if (params.incomingRoute.kind === "guild") {
-    return buildDiscordGuildRouteKey({
-      guildId: params.incomingRoute.guildId,
-    });
-  }
-  return buildDiscordRouteKey(params.incomingRoute);
-}
-
-function resolveDiscordBindingScope(route: DiscordBoundRoute): string {
-  if (route.kind === "dm") {
-    return "dm";
-  }
-  if (route.threadId) {
-    return "thread";
-  }
-  if (route.channelId) {
-    return "channel";
-  }
-  return "guild";
-}
-
-function resolveDiscordInboundSessionKey(params: {
-  tenantId: string;
-  bindingId: string;
-  route: DiscordBoundRoute;
-  channelId: string;
-}): string {
-  const incomingRouteKey = buildDiscordRouteKey(params.route);
-  const exactSessionKey = resolveSessionKeyForBindingRoute({
-    tenantId: params.tenantId,
-    channel: "discord",
-    bindingId: params.bindingId,
-    routeKey: incomingRouteKey,
-  });
-  if (exactSessionKey) {
-    return exactSessionKey;
-  }
-
-  if (params.route.kind === "guild" && params.route.threadId) {
-    const anchorRouteKey = params.route.channelId
-      ? buildDiscordGuildRouteKey({
-          guildId: params.route.guildId,
-          channelId: params.route.channelId,
-        })
-      : null;
-    const anchorSessionKey =
-      (anchorRouteKey
-        ? resolveSessionKeyForBindingRoute({
-            tenantId: params.tenantId,
-            channel: "discord",
-            bindingId: params.bindingId,
-            routeKey: anchorRouteKey,
-          })
-        : null) ??
-      resolveLatestSessionKeyForBinding({
-        tenantId: params.tenantId,
-        channel: "discord",
-        bindingId: params.bindingId,
-      }) ??
-      deriveDiscordSessionKey({
-        route: {
-          kind: "guild",
-          guildId: params.route.guildId,
-          ...(params.route.channelId ? { channelId: params.route.channelId } : {}),
-        },
-        channelId: params.route.channelId ?? params.channelId,
-      });
-    return buildDiscordThreadScopedSessionKey(anchorSessionKey, params.route.threadId);
-  }
-
-  return deriveDiscordSessionKey({
-    route: params.route,
-    channelId: params.channelId,
-  });
-}
-
-function buildWhatsAppRouteKey(chatJid: string, accountId = "default"): string {
-  return `whatsapp:${accountId}:chat:${chatJid}`;
-}
-
-function parseWhatsAppRouteKey(routeKey: string): WhatsAppBoundRoute | null {
-  const match = routeKey.match(/^whatsapp:([^:]+):chat:(.+)$/);
-  if (!match?.[1] || !match?.[2]) {
-    return null;
-  }
-  const accountId = match[1].trim();
-  const chatJid = match[2].trim();
-  if (!accountId || !chatJid) {
-    return null;
-  }
-  return { accountId, chatJid };
-}
-
-function normalizeWhatsAppDirectPeerId(value: string | undefined): string | null {
-  const raw = readNonEmptyString(value);
-  if (!raw) {
-    return null;
-  }
-  const withoutPrefix = raw.replace(/^whatsapp:/i, "").trim();
-
-  const jidMatch = withoutPrefix.match(/^(\d+)(?::\d+)?@(s\.whatsapp\.net|hosted)$/i);
-  if (jidMatch?.[1]) {
-    return `+${jidMatch[1]}`;
-  }
-
-  const lidMatch = withoutPrefix.match(/^(\d+)(?::\d+)?@(lid|hosted\.lid)$/i);
-  if (lidMatch) {
-    return null;
-  }
-
-  const digits = withoutPrefix.replace(/[^\d+]/g, "");
-  if (!digits) {
-    return null;
-  }
-  const normalized = digits.startsWith("+") ? `+${digits.slice(1)}` : `+${digits}`;
-  return normalized.length > 1 ? normalized : null;
-}
-
-function deriveWhatsAppSessionKey(params: {
-  chatJid: string;
-  chatType: "direct" | "group";
-  directPeerId?: string;
-}): string {
-  if (params.chatType === "group") {
-    return `agent:main:whatsapp:group:${params.chatJid}`;
-  }
-  const peerId =
-    normalizeWhatsAppDirectPeerId(params.directPeerId) ??
-    normalizeWhatsAppDirectPeerId(params.chatJid) ??
-    readNonEmptyString(params.directPeerId) ??
-    params.chatJid;
-  return `agent:main:whatsapp:direct:${peerId}`;
-}
-
-function parseDiscordOutboundTarget(value: unknown): DiscordOutboundTarget | null {
-  const raw = readNonEmptyString(value);
-  if (!raw) {
-    return null;
-  }
-  const directChannel = raw.match(/^channel:(\d+)$/i);
-  if (directChannel?.[1]) {
-    return { kind: "channel", id: directChannel[1] };
-  }
-  const directUser = raw.match(/^user:(\d+)$/i);
-  if (directUser?.[1]) {
-    return { kind: "user", id: directUser[1] };
-  }
-  const discordChannel = raw.match(/^discord:channel:(\d+)$/i);
-  if (discordChannel?.[1]) {
-    return { kind: "channel", id: discordChannel[1] };
-  }
-  const discordUser = raw.match(/^discord:user:(\d+)$/i);
-  if (discordUser?.[1]) {
-    return { kind: "user", id: discordUser[1] };
-  }
-  const discordLegacy = raw.match(/^discord:(\d+)$/i);
-  if (discordLegacy?.[1]) {
-    return { kind: "user", id: discordLegacy[1] };
-  }
-  const userMention = raw.match(/^<@!?(\d+)>$/);
-  if (userMention?.[1]) {
-    return { kind: "user", id: userMention[1] };
-  }
-  const channelMention = raw.match(/^<#(\d+)>$/);
-  if (channelMention?.[1]) {
-    return { kind: "channel", id: channelMention[1] };
-  }
-  if (/^\d+$/.test(raw)) {
-    return { kind: "channel", id: raw };
-  }
-  return null;
-}
-
-function uniqueRouteKeys(routeKeys: Array<string | null | undefined>): string[] {
-  const seen = new Set<string>();
-  const unique: string[] = [];
-  for (const routeKey of routeKeys) {
-    const trimmed = readNonEmptyString(routeKey);
-    if (!trimmed || seen.has(trimmed)) {
-      continue;
-    }
-    seen.add(trimmed);
-    unique.push(trimmed);
-  }
-  return unique;
-}
-
-function resolveOutboundResolutionMode(value: unknown): OutboundResolutionMode {
-  const normalized = readNonEmptyString(value)?.toLowerCase();
-  return normalized === "target-first" ? "target-first" : "session-first";
-}
-
-function resolveRouteKeyBySession(params: {
-  tenantId: string;
-  channel: "telegram" | "discord" | "whatsapp";
-  sessionKey: string;
-}): string | null {
-  const exactRow = stmtResolveSessionRouteBinding.get(
-    params.tenantId,
-    params.channel,
-    params.sessionKey,
-  ) as SessionRouteBindingRow | undefined;
-  return exactRow ? resolveBoundRouteKeyFromSession(exactRow) : null;
-}
-
-function resolveRouteKeyByTarget(params: {
-  tenantId: string;
-  channel: "telegram" | "discord" | "whatsapp";
-  routeKeys?: string[];
-}): string | null {
-  for (const routeKey of uniqueRouteKeys(params.routeKeys ?? [])) {
-    const row = stmtSelectActiveBindingByTenantAndRoute.get(
-      params.tenantId,
-      params.channel,
-      routeKey,
-    ) as ExistingBindingRow | undefined;
-    if (!row?.binding_id || row.status !== "active") {
-      continue;
-    }
-    return routeKey;
-  }
-  return null;
-}
-
-function resolveSessionRouteBinding(params: {
-  tenantId: string;
-  channel: "telegram" | "discord" | "whatsapp";
-  sessionKey: string;
-  routeKeys?: string[];
-  mode?: OutboundResolutionMode;
-}): { routeKey: string; via: "session" | "route" } | null {
-  const mode = params.mode ?? "session-first";
-  if (mode === "target-first") {
-    const routeKey = resolveRouteKeyByTarget(params);
-    if (routeKey) {
-      return { routeKey, via: "route" };
-    }
-    const exactRouteKey = resolveRouteKeyBySession(params);
-    if (exactRouteKey) {
-      return { routeKey: exactRouteKey, via: "session" };
-    }
-    return null;
-  }
-
-  const exactRouteKey = resolveRouteKeyBySession(params);
-  if (exactRouteKey) {
-    return { routeKey: exactRouteKey, via: "session" };
-  }
-  const routeKey = resolveRouteKeyByTarget(params);
-  if (routeKey) {
-    return { routeKey, via: "route" };
-  }
-
-  return null;
-}
-
-function parseTelegramOutboundChatId(value: unknown): string | null {
-  const direct = readSignedNumericString(value);
-  if (direct) {
-    return direct;
-  }
-  const prefixed = readNonEmptyString(value)?.match(/^(?:telegram|tg):(-?\d+)$/i);
-  return prefixed?.[1] ?? null;
-}
-
-function listTelegramOutboundRouteKeys(params: {
-  requestedTo?: unknown;
-  rawBody?: Record<string, unknown>;
-  requestedThreadId?: number;
-}): string[] {
-  const rawChatId = parseTelegramOutboundChatId(params.rawBody?.chat_id);
-  const requestedChatId = parseTelegramOutboundChatId(params.requestedTo);
-  if (rawChatId && requestedChatId && rawChatId !== requestedChatId) {
-    return [];
-  }
-  const rawThreadId = readPositiveInt(params.rawBody?.message_thread_id);
-  if (rawThreadId && params.requestedThreadId && rawThreadId !== params.requestedThreadId) {
-    return [];
-  }
-  const chatId = rawChatId ?? requestedChatId;
-  if (!chatId) {
-    return [];
-  }
-  const topicId = rawThreadId ?? params.requestedThreadId ?? undefined;
-  return uniqueRouteKeys([
-    topicId ? buildTelegramRouteKey(chatId, topicId) : null,
-    buildTelegramRouteKey(chatId),
-  ]);
-}
-
-async function hasDiscordOutboundTargetConflict(params: {
-  requestedTo?: unknown;
-  requestedThreadId?: string;
-}): Promise<boolean> {
-  const target = parseDiscordOutboundTarget(params.requestedTo);
-  const threadId = readUnsignedNumericString(params.requestedThreadId);
-  if (!target || !threadId) {
-    return false;
-  }
-  if (target.kind === "user") {
-    return true;
-  }
-  if (target.id === threadId) {
-    return false;
-  }
-  try {
-    const threadInfo = await resolveDiscordChannelInfo(threadId);
-    return threadInfo.parentId !== target.id;
-  } catch {
-    return false;
-  }
-}
-
-async function listDiscordOutboundRouteKeys(params: {
-  requestedTo?: unknown;
-  requestedThreadId?: string;
-}): Promise<string[]> {
-  if (await hasDiscordOutboundTargetConflict(params)) {
-    return [];
-  }
-  const threadId = readUnsignedNumericString(params.requestedThreadId);
-  if (threadId) {
-    try {
-      const info = await resolveDiscordChannelInfo(threadId);
-      if (info.guildId) {
-        return uniqueRouteKeys([
-          info.parentId
-            ? buildDiscordGuildRouteKey({
-                guildId: info.guildId,
-                channelId: info.parentId,
-                threadId,
-              })
-            : null,
-          buildDiscordGuildRouteKey({ guildId: info.guildId, threadId }),
-          info.parentId
-            ? buildDiscordGuildRouteKey({
-                guildId: info.guildId,
-                channelId: info.parentId,
-              })
-            : null,
-          buildDiscordGuildRouteKey({ guildId: info.guildId }),
-        ]);
-      }
-    } catch {
-      // Fall through to target-based lookup below.
-    }
-  }
-
-  const target = parseDiscordOutboundTarget(params.requestedTo);
-  if (!target) {
-    return [];
-  }
-  if (target.kind === "user") {
-    return [buildDiscordDmRouteKey(target.id)];
-  }
-
-  try {
-    const info = await resolveDiscordChannelInfo(target.id);
-    if (!info.guildId) {
-      return [];
-    }
-    if (info.parentId) {
-      return uniqueRouteKeys([
-        buildDiscordGuildRouteKey({
-          guildId: info.guildId,
-          channelId: info.parentId,
-          threadId: target.id,
-        }),
-        buildDiscordGuildRouteKey({ guildId: info.guildId, threadId: target.id }),
-        buildDiscordGuildRouteKey({ guildId: info.guildId, channelId: info.parentId }),
-        buildDiscordGuildRouteKey({ guildId: info.guildId }),
-      ]);
-    }
-    return uniqueRouteKeys([
-      buildDiscordGuildRouteKey({ guildId: info.guildId, channelId: target.id }),
-      buildDiscordGuildRouteKey({ guildId: info.guildId }),
-    ]);
-  } catch {
-    return [];
-  }
-}
+const {
+  resolveTelegramInboundSessionKey,
+  resolveDiscordInboundSessionKey,
+  resolveSessionRouteBinding,
+  listDiscordOutboundRouteKeys,
+} = createRouteResolutionHelpers({
+  stmtListSessionRoutesByBinding,
+  stmtSelectSessionKeyByBinding,
+  stmtResolveSessionRouteBinding,
+  stmtSelectActiveBindingByTenantAndRoute,
+  resolveDiscordChannelInfo,
+  deriveDiscordSessionKey,
+});
 
 async function resolveDiscordExplicitThreadParentId(
   threadId: string | undefined,
@@ -4030,42 +2317,6 @@ async function resolveDiscordExplicitThreadParentId(
   } catch {
     return undefined;
   }
-}
-
-function parseWhatsAppOutboundChatJid(value: unknown): string | null {
-  const raw = readNonEmptyString(value);
-  if (!raw) {
-    return null;
-  }
-  const withoutPrefix = raw.replace(/^whatsapp:/i, "").trim();
-  if (withoutPrefix.includes("@")) {
-    return withoutPrefix;
-  }
-  const digits = withoutPrefix.replace(/[^\d]/g, "");
-  if (!digits) {
-    return null;
-  }
-  return `${digits}@s.whatsapp.net`;
-}
-
-function listWhatsAppOutboundRouteKeys(params: {
-  requestedTo?: unknown;
-  accountId?: string | null;
-  rawSend?: Record<string, unknown> | null;
-}): string[] {
-  const outerChatJid = parseWhatsAppOutboundChatJid(params.requestedTo);
-  const innerChatJid =
-    parseWhatsAppOutboundChatJid(params.rawSend?.to) ??
-    parseWhatsAppOutboundChatJid(params.rawSend?.chatJid);
-  if (outerChatJid && innerChatJid && outerChatJid !== innerChatJid) {
-    return [];
-  }
-  const chatJid = outerChatJid;
-  if (!chatJid) {
-    return [];
-  }
-  const accountIds = uniqueRouteKeys([params.accountId, whatsappAccountId, openclawMuxAccountId]);
-  return accountIds.map((accountId) => buildWhatsAppRouteKey(chatJid, accountId));
 }
 
 function resolveTelegramBoundRoute(params: {
@@ -4176,24 +2427,6 @@ async function resolveDiscordOutboundChannelId(params: {
   return { ok: true, channelId };
 }
 
-function buildTelegramRouteKey(chatId: string, topicId?: number): string {
-  if (topicId) {
-    return `telegram:default:chat:${chatId}:topic:${topicId}`;
-  }
-  return `telegram:default:chat:${chatId}`;
-}
-
-function deriveTelegramSessionKey(chatId: string, topicId?: number): string {
-  const isGroup = chatId.startsWith("-");
-  const base = isGroup
-    ? `agent:main:telegram:group:${chatId}`
-    : `agent:main:telegram:direct:${chatId}`;
-  if (!topicId) {
-    return base;
-  }
-  return isGroup ? `${base}:topic:${topicId}` : `${base}:thread:${topicId}`;
-}
-
 function resolveTelegramIncomingTopicId(params: {
   isForum: boolean;
   messageThreadId: unknown;
@@ -4264,6 +2497,57 @@ function writeAuditLog(
   stmtInsertAuditLog.run(tenantId, eventType, JSON.stringify(payload), timestampMs);
 }
 
+const pairingService = createPairingService({
+  dbExec: (sql) => db.exec(sql),
+  pairingTokenTtlSec,
+  pairingTokenMaxTtlSec,
+  discordPendingGcEnabled,
+  telegramBotUsername,
+  buildTelegramRouteKey,
+  buildDiscordRouteKey,
+  buildDiscordThreadScopedSessionKey,
+  buildThreadScopedSessionKey,
+  buildWhatsAppRouteKey,
+  deriveTelegramSessionKey,
+  deriveDiscordSessionKey,
+  deriveWhatsAppSessionKey,
+  parseDiscordRouteKey,
+  resolveDiscordBindingRouteKeyForClaim,
+  resolveDiscordBindingScope,
+  resolveLiveBindingByRouteKey,
+  stmtDeleteExpiredPairingTokens,
+  stmtDeactivateStaleDiscordPendingBindings,
+  stmtInsertPairingToken,
+  stmtSelectActivePairingTokenByHash,
+  stmtSelectPairingCodeByCode,
+  stmtClaimPairingCode,
+  stmtRevertPairingCodeClaim,
+  stmtInsertBinding,
+  stmtInsertPendingBinding,
+  stmtActivatePendingBinding,
+  stmtDeactivateLiveBinding,
+  stmtUpsertSessionRoute,
+  stmtConsumePairingToken,
+  stmtAttachPairingTokenBinding,
+  stmtListActiveBindingsByTenant,
+  stmtSelectActiveBindingByTenantAndRoute,
+  stmtUnbindActiveBinding,
+  stmtDeleteSessionRoutesByBinding,
+  isRouteBoundByAnotherTenant,
+  isSqliteUniqueConstraintError,
+  writeAuditLog,
+});
+const {
+  issuePairingTokenForTenant,
+  peekActivePairingToken,
+  claimTelegramPairingToken,
+  claimDiscordPairingToken,
+  claimWhatsAppPairingToken,
+  claimPairingForTenant,
+  listPairingsForTenant,
+  unbindPairingForTenant,
+} = pairingService;
+
 function deactivateLiveBinding(params: {
   tenantId: string;
   bindingId: string;
@@ -4305,47 +2589,6 @@ function resolveBindingSessionKey(params: {
     params.bindingId,
   ) as { session_key?: unknown } | undefined;
   return readNonEmptyString(row?.session_key);
-}
-
-function renderBotStatusNotice(params: {
-  channel: NoticeChannel;
-  paired: boolean;
-  routeKey?: string;
-  sessionKey?: string | null;
-}): StyledNotice {
-  const channelLabel =
-    params.channel === "telegram"
-      ? "telegram"
-      : params.channel === "discord"
-        ? "discord"
-        : "whatsapp";
-  const lines = [
-    styleBold(params.channel, "Bot status"),
-    `Channel: ${styleText(params.channel, channelLabel)}`,
-    `Paired: ${params.paired ? "yes" : "no"}`,
-  ];
-  const sessionKey = readNonEmptyString(params.sessionKey ?? null);
-  if (sessionKey) {
-    lines.push(`Session key: ${styleCode(params.channel, sessionKey)}`);
-  }
-  if (params.routeKey) {
-    lines.push(`Route: ${styleCode(params.channel, params.routeKey)}`);
-  }
-  lines.push(
-    params.paired
-      ? `Use ${styleCode(params.channel, "/bot_unpair")} to unlink this chat.`
-      : `Use ${styleCode(params.channel, "/bot_switch <token>")} to pair this chat.`,
-  );
-  return buildStyledNotice(params.channel, lines);
-}
-
-function resolvePostPairingPrompt(channel: NoticeChannel): string {
-  const template =
-    getNoticeText("postPairingPrompt") ||
-    "Hey, please introduce yourself in this way:\n- Understand who I am (user). If you don't know (e.g. it's called \"there\"), feel free to ask.\n- Then check what connector you have the access to using composio MCP tool (clawdi-mcp.COMPOSIO_SEARCH_TOOLS). It's ok to have no connection, but if there are some, you can tell me what I can do with the connectors.\n- If there are connectors, suggest me 3-4 compound multi-app automations. Each with one sentence, combining 2-3 apps to complete some potential useful tasks.\n- Otherwise, you can suggest me what the most popular connectors can do if I have them connected (Gmail, notion, drive, slack). Then it's a good opportunity to invite me to set up the connectors.\n- Ask me my background like name and role (occupation) if you don't know. Guide me to find out what I can do with you. You are so powerful. So you can do a lot of awesome things.\nReply me concisely and friendly within 100 words. Don't be verbose. We are in a conversation and feel free to explore it together with me.";
-  const channelLabel =
-    channel === "telegram" ? "Telegram" : channel === "discord" ? "Discord" : "WhatsApp";
-  return template.replace(/\{\{channel\}\}/g, channelLabel);
 }
 
 async function sendPostPairingSyntheticInbound(params: {
@@ -4525,586 +2768,6 @@ async function sendPostClaimNotices(params: {
   }
 }
 
-function peekActivePairingToken(token: string): PairingTokenRow | null {
-  const now = Date.now();
-  purgeExpiredPairingTokens(now);
-  const tokenHash = hashPairingToken(token);
-  const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as PairingTokenRow | undefined;
-  return row ?? null;
-}
-
-function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?: string) {
-  const now = Date.now();
-  const row = stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
-  if (!row || Number(row.expires_at_ms) <= now) {
-    return { statusCode: 404, payload: { ok: false, error: "pairing code not found or expired" } };
-  }
-  if (row.claimed_by_tenant_id) {
-    return { statusCode: 409, payload: { ok: false, error: "pairing code already claimed" } };
-  }
-  if (
-    isRouteBoundByAnotherTenant({
-      channel: String(row.channel),
-      routeKey: String(row.route_key),
-      tenantId: tenant.id,
-    })
-  ) {
-    return { statusCode: 409, payload: { ok: false, error: "route already bound" } };
-  }
-
-  const claimResult = stmtClaimPairingCode.run(tenant.id, now, code, now);
-  if (claimResult.changes === 0) {
-    const postCheck = stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
-    if (!postCheck || Number(postCheck.expires_at_ms) <= now) {
-      return {
-        statusCode: 404,
-        payload: { ok: false, error: "pairing code not found or expired" },
-      };
-    }
-    return { statusCode: 409, payload: { ok: false, error: "pairing code already claimed" } };
-  }
-
-  const bindingId = `bind_${randomUUID()}`;
-  try {
-    stmtInsertBinding.run(
-      bindingId,
-      tenant.id,
-      String(row.channel),
-      String(row.scope),
-      String(row.route_key),
-      now,
-      now,
-    );
-  } catch (error) {
-    if (isSqliteUniqueConstraintError(error)) {
-      stmtRevertPairingCodeClaim.run(code, tenant.id);
-      return { statusCode: 409, payload: { ok: false, error: "route already bound" } };
-    }
-    throw error;
-  }
-  const resolvedSessionKey = readNonEmptyString(sessionKey);
-  if (resolvedSessionKey) {
-    stmtUpsertSessionRoute.run(
-      tenant.id,
-      String(row.channel),
-      resolvedSessionKey,
-      bindingId,
-      JSON.stringify({ routeKey: String(row.route_key) }),
-      now,
-    );
-  }
-  writeAuditLog(tenant.id, "pairing_claimed", { bindingId, code, routeKey: row.route_key }, now);
-  return {
-    statusCode: 200,
-    payload: {
-      bindingId,
-      channel: String(row.channel),
-      scope: String(row.scope),
-      routeKey: String(row.route_key),
-      ...(resolvedSessionKey ? { sessionKey: resolvedSessionKey } : {}),
-    },
-  };
-}
-
-function claimTelegramPairingToken(params: {
-  token: string;
-  chatId: string;
-  topicId?: number;
-  chatType: "direct" | "group";
-}): ClaimResult | null {
-  return runTokenClaimTransaction(() => {
-    const now = Date.now();
-    purgeExpiredPairingTokens(now);
-    const tokenHash = hashPairingToken(params.token);
-    const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
-      | PairingTokenRow
-      | undefined;
-    if (!row) {
-      return null;
-    }
-
-    const tenantId = String(row.tenant_id);
-    const claimRouteKey = buildTelegramRouteKey(params.chatId, params.topicId);
-    // Telegram pairing is chat-scoped for both DMs and groups (including forum groups).
-    // We still keep topic-specific session routes via claimRouteKey + inbound session mapping.
-    const boundRouteKey = buildTelegramRouteKey(params.chatId);
-
-    let claimType: ClaimType = "fresh";
-    let previousTenantId: string | undefined;
-
-    const liveBinding = resolveLiveBindingByRouteKey("telegram", boundRouteKey);
-    if (liveBinding && liveBinding.tenant_id !== tenantId) {
-      // Takeover: different tenant owns this route
-      previousTenantId = liveBinding.tenant_id;
-      stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
-      stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
-      writeAuditLog(
-        liveBinding.tenant_id,
-        "pairing_unbound_by_route_takeover",
-        {
-          bindingId: liveBinding.binding_id,
-          routeKey: boundRouteKey,
-          takeoverTenantId: tenantId,
-        },
-        now,
-      );
-      claimType = "takeover";
-    }
-
-    const existing = stmtSelectActiveBindingByTenantAndRoute.get(
-      tenantId,
-      "telegram",
-      boundRouteKey,
-    ) as ExistingBindingRow | undefined;
-
-    if (existing?.binding_id && existing?.status === "active") {
-      // Same tenant already active — re-pair
-      const bindingId = String(existing.binding_id);
-      const preferredSessionKey = readNonEmptyString(row.session_key);
-      const sessionKey =
-        params.chatType === "direct" && params.topicId
-          ? buildThreadScopedSessionKey(
-              preferredSessionKey || deriveTelegramSessionKey(params.chatId),
-              params.chatId,
-              params.topicId,
-            )
-          : (preferredSessionKey ?? deriveTelegramSessionKey(params.chatId, params.topicId));
-      stmtUpsertSessionRoute.run(
-        tenantId,
-        "telegram",
-        sessionKey,
-        bindingId,
-        JSON.stringify({ routeKey: claimRouteKey }),
-        now,
-      );
-      const consumeRepaired = stmtConsumePairingToken.run(now, tokenHash, now);
-      if (consumeRepaired.changes === 0) {
-        return null;
-      }
-      stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
-      writeAuditLog(
-        tenantId,
-        "pairing_token_claimed",
-        { bindingId, routeKey: boundRouteKey, claimType: "repaired" },
-        now,
-      );
-      return { tenantId, bindingId, routeKey: boundRouteKey, sessionKey, claimType: "repaired" };
-    }
-
-    const bindingId =
-      (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
-    if (!existing?.binding_id) {
-      try {
-        stmtInsertBinding.run(
-          bindingId,
-          tenantId,
-          "telegram",
-          boundRouteKey === claimRouteKey && params.topicId ? "topic" : "chat",
-          boundRouteKey,
-          now,
-          now,
-        );
-      } catch (error) {
-        if (isSqliteUniqueConstraintError(error)) {
-          return null;
-        }
-        throw error;
-      }
-    }
-
-    const preferredSessionKey = readNonEmptyString(row.session_key);
-    const sessionKey =
-      params.chatType === "direct" && params.topicId
-        ? buildThreadScopedSessionKey(
-            preferredSessionKey || deriveTelegramSessionKey(params.chatId),
-            params.chatId,
-            params.topicId,
-          )
-        : (preferredSessionKey ?? deriveTelegramSessionKey(params.chatId, params.topicId));
-    stmtUpsertSessionRoute.run(
-      tenantId,
-      "telegram",
-      sessionKey,
-      bindingId,
-      JSON.stringify({ routeKey: claimRouteKey }),
-      now,
-    );
-
-    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
-    if (consumeResult.changes === 0) {
-      return null;
-    }
-    stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
-    writeAuditLog(
-      tenantId,
-      "pairing_token_claimed",
-      {
-        bindingId,
-        routeKey: boundRouteKey,
-        claimType,
-        ...(previousTenantId ? { previousTenantId } : {}),
-      },
-      now,
-    );
-    return {
-      tenantId,
-      bindingId,
-      routeKey: boundRouteKey,
-      sessionKey,
-      claimType,
-      ...(previousTenantId ? { previousTenantId } : {}),
-    };
-  });
-}
-
-function claimDiscordPairingToken(params: {
-  token: string;
-  route: DiscordBoundRoute;
-  channelId: string;
-}): ClaimResult | null {
-  return runTokenClaimTransaction(() => {
-    const now = Date.now();
-    purgeExpiredPairingTokens(now);
-    const tokenHash = hashPairingToken(params.token);
-    const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
-      | PairingTokenRow
-      | undefined;
-    if (!row) {
-      return null;
-    }
-    const tenantId = String(row.tenant_id);
-    if (!tenantId) {
-      return null;
-    }
-
-    const claimRouteKey = buildDiscordRouteKey(params.route);
-    const boundRouteKey = resolveDiscordBindingRouteKeyForClaim({
-      incomingRoute: params.route,
-    });
-    const boundRoute = parseDiscordRouteKey(boundRouteKey);
-    if (!boundRoute) {
-      return null;
-    }
-
-    let claimType: ClaimType = "fresh";
-    let previousTenantId: string | undefined;
-
-    const liveBinding = resolveLiveBindingByRouteKey("discord", boundRouteKey);
-    if (liveBinding && liveBinding.tenant_id !== tenantId) {
-      previousTenantId = liveBinding.tenant_id;
-      stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
-      stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
-      writeAuditLog(
-        liveBinding.tenant_id,
-        "pairing_unbound_by_route_takeover",
-        {
-          bindingId: liveBinding.binding_id,
-          routeKey: boundRouteKey,
-          takeoverTenantId: tenantId,
-        },
-        now,
-      );
-      claimType = "takeover";
-    }
-
-    const existing = stmtSelectActiveBindingByTenantAndRoute.get(
-      tenantId,
-      "discord",
-      boundRouteKey,
-    ) as ExistingBindingRow | undefined;
-    if (existing?.status === "active") {
-      // Same tenant already active — re-pair
-      const bindingId = String(existing.binding_id);
-      const preferredSessionKey = readNonEmptyString(row.session_key);
-      const sessionKey =
-        params.route.kind === "guild" && params.route.threadId
-          ? buildDiscordThreadScopedSessionKey(
-              preferredSessionKey ??
-                deriveDiscordSessionKey({
-                  route:
-                    boundRoute.kind === "guild"
-                      ? {
-                          kind: "guild",
-                          guildId: boundRoute.guildId,
-                          ...(boundRoute.channelId ? { channelId: boundRoute.channelId } : {}),
-                        }
-                      : boundRoute,
-                  channelId:
-                    boundRoute.kind === "guild"
-                      ? (boundRoute.channelId ??
-                        (params.route.kind === "guild"
-                          ? (params.route.channelId ?? params.channelId)
-                          : params.channelId))
-                      : params.channelId,
-                }),
-              params.route.threadId,
-            )
-          : (preferredSessionKey ??
-            deriveDiscordSessionKey({
-              route: params.route,
-              channelId: params.channelId,
-            }));
-      stmtUpsertSessionRoute.run(
-        tenantId,
-        "discord",
-        sessionKey,
-        bindingId,
-        JSON.stringify({ routeKey: claimRouteKey, channelId: params.channelId }),
-        now,
-      );
-      const consumeRepaired = stmtConsumePairingToken.run(now, tokenHash, now);
-      if (consumeRepaired.changes === 0) {
-        return null;
-      }
-      stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
-      writeAuditLog(
-        tenantId,
-        "pairing_token_claimed",
-        { bindingId, routeKey: boundRouteKey, claimType: "repaired" },
-        now,
-      );
-      return { tenantId, bindingId, routeKey: boundRouteKey, sessionKey, claimType: "repaired" };
-    }
-
-    const bindingId =
-      (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
-    if (!existing?.binding_id) {
-      try {
-        stmtInsertPendingBinding.run(
-          bindingId,
-          tenantId,
-          "discord",
-          resolveDiscordBindingScope(boundRoute),
-          boundRouteKey,
-          now,
-          now,
-        );
-      } catch (error) {
-        if (isSqliteUniqueConstraintError(error)) {
-          return null;
-        }
-        throw error;
-      }
-    }
-
-    const activateResult = stmtActivatePendingBinding.run(now, bindingId, tenantId);
-    if (activateResult.changes === 0) {
-      return null;
-    }
-
-    const preferredSessionKey = readNonEmptyString(row.session_key);
-    const sessionKey =
-      params.route.kind === "guild" && params.route.threadId
-        ? buildDiscordThreadScopedSessionKey(
-            preferredSessionKey ??
-              deriveDiscordSessionKey({
-                route:
-                  boundRoute.kind === "guild"
-                    ? {
-                        kind: "guild",
-                        guildId: boundRoute.guildId,
-                        ...(boundRoute.channelId ? { channelId: boundRoute.channelId } : {}),
-                      }
-                    : boundRoute,
-                channelId:
-                  boundRoute.kind === "guild"
-                    ? (boundRoute.channelId ??
-                      (params.route.kind === "guild"
-                        ? (params.route.channelId ?? params.channelId)
-                        : params.channelId))
-                    : params.channelId,
-              }),
-            params.route.threadId,
-          )
-        : (preferredSessionKey ??
-          deriveDiscordSessionKey({
-            route: params.route,
-            channelId: params.channelId,
-          }));
-    stmtUpsertSessionRoute.run(
-      tenantId,
-      "discord",
-      sessionKey,
-      bindingId,
-      JSON.stringify({ routeKey: claimRouteKey, channelId: params.channelId }),
-      now,
-    );
-
-    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
-    if (consumeResult.changes === 0) {
-      return null;
-    }
-    stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
-    writeAuditLog(
-      tenantId,
-      "pairing_token_claimed",
-      {
-        bindingId,
-        routeKey: boundRouteKey,
-        claimType,
-        ...(previousTenantId ? { previousTenantId } : {}),
-      },
-      now,
-    );
-    return {
-      tenantId,
-      bindingId,
-      routeKey: boundRouteKey,
-      sessionKey,
-      claimType,
-      ...(previousTenantId ? { previousTenantId } : {}),
-    };
-  });
-}
-
-function claimWhatsAppPairingToken(params: {
-  token: string;
-  chatJid: string;
-  accountId: string;
-  chatType: "direct" | "group";
-  directPeerId?: string;
-}): ClaimResult | null {
-  return runTokenClaimTransaction(() => {
-    const now = Date.now();
-    purgeExpiredPairingTokens(now);
-    const tokenHash = hashPairingToken(params.token);
-    const row = stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
-      | PairingTokenRow
-      | undefined;
-    if (!row) {
-      return null;
-    }
-
-    const tenantId = String(row.tenant_id);
-    const routeKey = buildWhatsAppRouteKey(params.chatJid, params.accountId);
-
-    let claimType: ClaimType = "fresh";
-    let previousTenantId: string | undefined;
-
-    const liveBinding = resolveLiveBindingByRouteKey("whatsapp", routeKey);
-    if (liveBinding && liveBinding.tenant_id !== tenantId) {
-      // Takeover: different tenant owns this route
-      previousTenantId = liveBinding.tenant_id;
-      stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
-      stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
-      writeAuditLog(
-        liveBinding.tenant_id,
-        "pairing_unbound_by_route_takeover",
-        {
-          bindingId: liveBinding.binding_id,
-          routeKey,
-          takeoverTenantId: tenantId,
-        },
-        now,
-      );
-      claimType = "takeover";
-    }
-
-    const existing = stmtSelectActiveBindingByTenantAndRoute.get(tenantId, "whatsapp", routeKey) as
-      | ExistingBindingRow
-      | undefined;
-
-    if (existing?.binding_id && existing?.status === "active") {
-      // Same tenant already active — re-pair
-      const bindingId = String(existing.binding_id);
-      const preferredSessionKey = readNonEmptyString(row.session_key);
-      const sessionKey =
-        preferredSessionKey ||
-        deriveWhatsAppSessionKey({
-          chatJid: params.chatJid,
-          chatType: params.chatType,
-          directPeerId: params.directPeerId,
-        });
-      stmtUpsertSessionRoute.run(
-        tenantId,
-        "whatsapp",
-        sessionKey,
-        bindingId,
-        JSON.stringify({
-          routeKey,
-          accountId: params.accountId,
-          chatJid: params.chatJid,
-        }),
-        now,
-      );
-      const consumeRepaired = stmtConsumePairingToken.run(now, tokenHash, now);
-      if (consumeRepaired.changes === 0) {
-        return null;
-      }
-      stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
-      writeAuditLog(
-        tenantId,
-        "pairing_token_claimed",
-        { bindingId, routeKey, claimType: "repaired" },
-        now,
-      );
-      return { tenantId, bindingId, routeKey, sessionKey, claimType: "repaired" };
-    }
-
-    const bindingId =
-      (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
-    if (!existing?.binding_id) {
-      try {
-        stmtInsertBinding.run(
-          bindingId,
-          tenantId,
-          "whatsapp",
-          params.chatType === "group" ? "group" : "chat",
-          routeKey,
-          now,
-          now,
-        );
-      } catch (error) {
-        if (isSqliteUniqueConstraintError(error)) {
-          return null;
-        }
-        throw error;
-      }
-    }
-
-    const preferredSessionKey = readNonEmptyString(row.session_key);
-    const sessionKey =
-      preferredSessionKey ||
-      deriveWhatsAppSessionKey({
-        chatJid: params.chatJid,
-        chatType: params.chatType,
-        directPeerId: params.directPeerId,
-      });
-    stmtUpsertSessionRoute.run(
-      tenantId,
-      "whatsapp",
-      sessionKey,
-      bindingId,
-      JSON.stringify({
-        routeKey,
-        accountId: params.accountId,
-        chatJid: params.chatJid,
-      }),
-      now,
-    );
-
-    const consumeResult = stmtConsumePairingToken.run(now, tokenHash, now);
-    if (consumeResult.changes === 0) {
-      return null;
-    }
-    stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
-    writeAuditLog(
-      tenantId,
-      "pairing_token_claimed",
-      { bindingId, routeKey, claimType, ...(previousTenantId ? { previousTenantId } : {}) },
-      now,
-    );
-    return {
-      tenantId,
-      bindingId,
-      routeKey,
-      sessionKey,
-      claimType,
-      ...(previousTenantId ? { previousTenantId } : {}),
-    };
-  });
-}
-
 async function sendDiscordPairingNotice(params: { channelId: string; text: string }) {
   const { response } = await discordRequest({
     method: "POST",
@@ -5117,6 +2780,39 @@ async function sendDiscordPairingNotice(params: { channelId: string; text: strin
     throw new Error(`discord pairing notice failed (${response.status})`);
   }
 }
+
+const botControlService = createBotControlService({
+  extractTokenFromStartCommand,
+  normalizeControlText,
+  extractPairingTokenFromText,
+  renderPairingInvalidNotice,
+  renderBotHelpNotice,
+  renderBotUnpairSuccessNotice,
+  renderBotNotPairedNotice,
+  renderBotSwitchUsageNotice,
+  renderBotStatusNotice,
+  resolveBindingSessionKey,
+  peekActivePairingToken,
+  claimTelegramPairingToken,
+  claimDiscordPairingToken,
+  claimWhatsAppPairingToken,
+  parseDiscordRouteKey,
+  deactivateLiveBinding,
+  setBindingPending,
+  sendPostClaimNotices,
+  sendTelegramPairingNotice,
+  sendDiscordPairingNotice,
+  sendWhatsAppPairingNotice,
+});
+const {
+  extractPairingTokenFromTelegramMessage,
+  extractPairingTokenFromDiscordMessage,
+  extractPairingTokenFromWhatsAppMessage,
+  handleTelegramBotControlCommand,
+  handleDiscordBotControlCommand,
+  handleDiscordBotControlCommandUnbound,
+  handleWhatsAppBotControlCommand,
+} = botControlService;
 
 async function forwardDiscordMessageToTenant(params: {
   tenantId: string;
@@ -5271,21 +2967,6 @@ async function forwardDiscordMessageToTenant(params: {
   return "forwarded";
 }
 
-function listPairingsForTenant(tenant: TenantIdentity) {
-  const rows = stmtListActiveBindingsByTenant.all(tenant.id) as ActiveBindingRow[];
-  return {
-    statusCode: 200,
-    payload: {
-      items: rows.map((row) => ({
-        bindingId: String(row.binding_id),
-        channel: String(row.channel),
-        scope: String(row.scope),
-        routeKey: String(row.route_key),
-      })),
-    },
-  };
-}
-
 async function registerOpenClawInstance(input: {
   openclawId?: unknown;
   inboundUrl?: unknown;
@@ -5342,16 +3023,34 @@ async function registerOpenClawInstance(input: {
   };
 }
 
-function unbindPairingForTenant(tenant: TenantIdentity, bindingId: string) {
+function upsertTenantInboundTargetByAdmin(params: {
+  openclawId: string;
+  inboundUrl: string;
+  inboundTimeoutMs?: number;
+}): { ok: true } | { ok: false; statusCode: number; error: string } {
   const now = Date.now();
-  const unbindResult = stmtUnbindActiveBinding.run(now, bindingId, tenant.id);
-  if (unbindResult.changes === 0) {
-    return { statusCode: 404, payload: { ok: false, error: "binding not found" } };
+  const syntheticApiKey = `instance:${params.openclawId}`;
+  try {
+    stmtUpsertTenantInboundTargetByAdmin.run(
+      params.openclawId,
+      params.openclawId,
+      hashApiKey(syntheticApiKey),
+      params.inboundUrl,
+      params.inboundTimeoutMs ?? 15_000,
+      now,
+      now,
+    );
+  } catch (error) {
+    if (String(error).includes("UNIQUE constraint failed: tenants.api_key_hash")) {
+      return {
+        ok: false,
+        statusCode: 409,
+        error: "instance id conflict",
+      };
+    }
+    throw error;
   }
-
-  stmtDeleteSessionRoutesByBinding.run(bindingId, tenant.id);
-  writeAuditLog(tenant.id, "pairing_unbound", { bindingId }, now);
-  return { statusCode: 200, payload: { ok: true } };
+  return { ok: true };
 }
 
 function resolveStoredTelegramOffset(): number {
@@ -5378,77 +3077,6 @@ function storeDiscordOffset(bindingId: string, lastMessageId: string) {
   stmtUpsertDiscordOffsetByBinding.run(bindingId, lastMessageId, Date.now());
 }
 
-function computeWhatsAppQueueRetryDelayMs(attemptCount: number): number {
-  const base = Math.max(100, Math.trunc(whatsappQueueRetryInitialMs));
-  const maxDelay = Math.max(base, Math.trunc(whatsappQueueRetryMaxMs));
-  const exp = Math.max(0, Math.min(10, Math.trunc(attemptCount)));
-  const delay = base * 2 ** exp;
-  return Math.min(maxDelay, delay);
-}
-
-function snapshotWhatsAppInboundMessage(message: WebInboundMessage): WebInboundMessage {
-  return {
-    id: readNonEmptyString(message.id) ?? undefined,
-    from: typeof message.from === "string" ? message.from : "",
-    to: typeof message.to === "string" ? message.to : "",
-    accountId: readNonEmptyString(message.accountId) ?? whatsappAccountId,
-    body: typeof message.body === "string" ? message.body : "",
-    timestamp:
-      typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
-        ? Math.trunc(message.timestamp)
-        : undefined,
-    chatType: message.chatType === "group" ? "group" : "direct",
-    chatId: readNonEmptyString(message.chatId) ?? readNonEmptyString(message.from) ?? "",
-    senderJid: readNonEmptyString(message.senderJid) ?? undefined,
-    senderE164: readNonEmptyString(message.senderE164) ?? undefined,
-    senderName: readNonEmptyString(message.senderName) ?? undefined,
-    replyToId: readNonEmptyString(message.replyToId) ?? undefined,
-    replyToBody: readNonEmptyString(message.replyToBody) ?? undefined,
-    replyToSender: readNonEmptyString(message.replyToSender) ?? undefined,
-    replyToSenderJid: readNonEmptyString(message.replyToSenderJid) ?? undefined,
-    replyToSenderE164: readNonEmptyString(message.replyToSenderE164) ?? undefined,
-    groupSubject: readNonEmptyString(message.groupSubject) ?? undefined,
-    groupParticipants: Array.isArray(message.groupParticipants)
-      ? message.groupParticipants.filter((entry): entry is string => typeof entry === "string")
-      : undefined,
-    mentionedJids: Array.isArray(message.mentionedJids)
-      ? message.mentionedJids.filter((entry): entry is string => typeof entry === "string")
-      : undefined,
-    mediaPath: readNonEmptyString(message.mediaPath) ?? undefined,
-    mediaType: readNonEmptyString(message.mediaType) ?? undefined,
-    mediaUrl: readNonEmptyString(message.mediaUrl) ?? undefined,
-  };
-}
-
-function enqueueWhatsAppInboundMessage(message: WebInboundMessage): void {
-  const snapshot = snapshotWhatsAppInboundMessage(message);
-  if (!snapshot.chatId) {
-    return;
-  }
-  const now = Date.now();
-  const messageId = readNonEmptyString(snapshot.id);
-  const dedupeKey = messageId
-    ? `${snapshot.accountId}:${snapshot.chatId}:${messageId}`
-    : `${snapshot.accountId}:${snapshot.chatId}:noid:${now}:${randomUUID()}`;
-  const insertResult = stmtInsertWhatsAppInboundQueue.run(
-    dedupeKey,
-    JSON.stringify(snapshot),
-    now,
-    now,
-    now,
-    now,
-  );
-  if (insertResult.changes > 0) {
-    log({
-      type: "whatsapp_inbound_queue_enqueued",
-      dedupeKey,
-      messageId: snapshot.id ?? null,
-      chatJid: snapshot.chatId,
-      accountId: snapshot.accountId,
-    });
-  }
-}
-
 function deriveDiscordSessionKey(params: {
   route: DiscordBoundRoute;
   channelId: string;
@@ -5464,6 +3092,17 @@ function deriveDiscordSessionKey(params: {
   );
 }
 
+function buildThreadScopedSessionKey(
+  baseSessionKey: string,
+  chatId: string,
+  topicId: number,
+): string {
+  const normalizedBase = baseSessionKey.trim().replace(/:(thread|topic):[^:]+$/i, "");
+  return chatId.startsWith("-")
+    ? `${normalizedBase}:topic:${topicId}`
+    : `${normalizedBase}:thread:${topicId}`;
+}
+
 async function resolveDiscordInboundChannelId(route: DiscordBoundRoute): Promise<string | null> {
   if (route.kind === "dm") {
     return await resolveDiscordDmChannelIdCached(route.userId);
@@ -5477,3817 +3116,320 @@ async function resolveDiscordInboundChannelId(route: DiscordBoundRoute): Promise
   return null;
 }
 
-async function runOutboundAction(params: {
-  tenant: TenantIdentity;
-  channel: string;
-  sessionKey: string;
-  action?: string;
-  requestedTo?: unknown;
-  requestedThreadId?: number;
-  requestedDiscordThreadId?: string;
-  accountId?: string | null;
-  mode?: OutboundResolutionMode;
-}): Promise<SendResult> {
-  if (params.action !== "typing") {
-    return {
-      statusCode: 400,
-      bodyText: JSON.stringify({
-        ok: false,
-        error: "unsupported action",
-        action: params.action ?? null,
-      }),
-    };
-  }
-
-  if (params.channel === "telegram") {
-    const resolvedRoute = resolveTelegramBoundRoute({
-      tenantId: params.tenant.id,
-      channel: params.channel,
-      sessionKey: params.sessionKey,
-      mode: params.mode,
-      routeKeys: listTelegramOutboundRouteKeys({
-        requestedTo: params.requestedTo,
-        requestedThreadId: params.requestedThreadId,
-      }),
-    });
-    if (!resolvedRoute) {
-      return {
-        statusCode: 403,
-        bodyText: JSON.stringify({
-          ok: false,
-          error: "route not bound",
-          code: "ROUTE_NOT_BOUND",
-        }),
-      };
-    }
-    metrics.recordOutboundRouteResolution({
-      channel: "telegram",
-      mode: params.mode ?? "session-first",
-      via: resolvedRoute.via,
-    });
-    const boundRoute = resolvedRoute.route;
-    const body: Record<string, unknown> = {
-      chat_id: boundRoute.chatId,
-      action: "typing",
-    };
-    if (boundRoute.topicId) {
-      body.message_thread_id = boundRoute.topicId;
-    }
-    const { response, result } = await sendTelegram("sendChatAction", body);
-    if (!response.ok || result.ok !== true) {
-      return {
-        statusCode: 502,
-        bodyText: JSON.stringify({ ok: false, error: "telegram typing failed", details: result }),
-      };
-    }
-    return {
-      statusCode: 200,
-      bodyText: JSON.stringify({ ok: true }),
-    };
-  }
-
-  if (params.channel === "discord") {
-    const resolvedRoute = await resolveDiscordBoundRoute({
-      tenantId: params.tenant.id,
-      channel: params.channel,
-      sessionKey: params.sessionKey,
-      mode: params.mode,
-      routeKeys: await listDiscordOutboundRouteKeys({
-        requestedTo: params.requestedTo,
-        requestedThreadId: params.requestedDiscordThreadId,
-      }),
-    });
-    if (!resolvedRoute) {
-      return {
-        statusCode: 403,
-        bodyText: JSON.stringify({
-          ok: false,
-          error: "route not bound",
-          code: "ROUTE_NOT_BOUND",
-        }),
-      };
-    }
-    metrics.recordOutboundRouteResolution({
-      channel: "discord",
-      mode: params.mode ?? "session-first",
-      via: resolvedRoute.via,
-    });
-    const boundRoute = resolvedRoute.route;
-    const resolvedTarget = await resolveDiscordOutboundChannelId({
-      boundRoute,
-      requestedTo: params.requestedTo,
-      requestedThreadId: params.requestedDiscordThreadId,
-    });
-    if (!resolvedTarget.ok) {
-      return {
-        statusCode: resolvedTarget.statusCode,
-        bodyText: JSON.stringify({ ok: false, error: resolvedTarget.error }),
-      };
-    }
-    const { response, result } = await sendDiscordTyping({
-      channelId: resolvedTarget.channelId,
-    });
-    if (!response.ok) {
-      return {
-        statusCode: 502,
-        bodyText: JSON.stringify({ ok: false, error: "discord typing failed", details: result }),
-      };
-    }
-    return {
-      statusCode: 200,
-      bodyText: JSON.stringify({ ok: true }),
-    };
-  }
-
-  if (params.channel === "whatsapp") {
-    const resolvedRoute = resolveWhatsAppBoundRoute({
-      tenantId: params.tenant.id,
-      channel: params.channel,
-      sessionKey: params.sessionKey,
-      mode: params.mode,
-      routeKeys: listWhatsAppOutboundRouteKeys({
-        requestedTo: params.requestedTo,
-        accountId: params.accountId,
-      }),
-    });
-    if (!resolvedRoute) {
-      return {
-        statusCode: 403,
-        bodyText: JSON.stringify({
-          ok: false,
-          error: "route not bound",
-          code: "ROUTE_NOT_BOUND",
-        }),
-      };
-    }
-    metrics.recordOutboundRouteResolution({
-      channel: "whatsapp",
-      mode: params.mode ?? "session-first",
-      via: resolvedRoute.via,
-    });
-    const boundRoute = resolvedRoute.route;
-    try {
-      const { sendTypingWhatsApp } = await loadWebRuntimeModules();
-      await sendTypingWhatsApp(boundRoute.chatJid, {
-        accountId: boundRoute.accountId,
-      });
-    } catch (error) {
-      return {
-        statusCode: 502,
-        bodyText: JSON.stringify({
-          ok: false,
-          error: "whatsapp typing failed",
-          details: String(error),
-        }),
-      };
-    }
-    return {
-      statusCode: 200,
-      bodyText: JSON.stringify({ ok: true }),
-    };
-  }
-
-  return {
-    statusCode: 400,
-    bodyText: JSON.stringify({ ok: false, error: "unsupported channel" }),
-  };
-}
-
-function extractTelegramMessage(update: TelegramUpdate): TelegramIncomingMessage | null {
-  const candidate = update.message ?? update.edited_message;
-  if (!candidate || typeof candidate !== "object") {
-    return null;
-  }
-  return candidate;
-}
-
-function extractTelegramCallbackQuery(update: TelegramUpdate): TelegramCallbackQuery | null {
-  const candidate = update.callback_query;
-  if (!candidate || typeof candidate !== "object") {
-    return null;
-  }
-  return candidate;
-}
-
-async function fetchTelegramUpdates(offset: number): Promise<TelegramUpdate[]> {
-  const token = requireTelegramBotToken();
-  const response = await fetch(`${telegramApiBaseUrl}/bot${token}/getUpdates`, {
-    method: "POST",
-    headers: { "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({
-      offset,
-      timeout: Math.max(1, Math.trunc(telegramPollTimeoutSec)),
-      allowed_updates: ["message", "edited_message", "callback_query"],
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`telegram getUpdates failed (${response.status})`);
-  }
-  const json = (await response.json()) as { ok?: boolean; result?: unknown };
-  if (json.ok !== true || !Array.isArray(json.result)) {
-    throw new Error("telegram getUpdates returned invalid payload");
-  }
-  return json.result as TelegramUpdate[];
-}
-
-function resolveTelegramGetUpdatesStatusCode(errorText: string): number | null {
-  const match = errorText.match(/telegram(?: bootstrap)? getUpdates failed \((\d{3})\)/i);
-  if (!match) {
-    return null;
-  }
-  const parsed = Number.parseInt(match[1] ?? "", 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return null;
-  }
-  return parsed;
-}
-
-function updateTelegramPollConflictHealth(error: unknown) {
-  const errorText = String(error);
-  const statusCode = resolveTelegramGetUpdatesStatusCode(errorText);
-  if (statusCode === 409) {
-    telegramPollConflictHealth = {
-      lastConflictAtMs: Date.now(),
-      lastError: errorText,
-    };
-    return;
-  }
-  telegramPollConflictHealth = null;
-}
-
-function clearTelegramPollConflictHealth() {
-  telegramPollConflictHealth = null;
-}
-
-/** Extract the bound tenant ID for a Telegram update (if any). Used by background retry cap. */
-function resolveTenantIdForTelegramUpdate(update: TelegramUpdate): string | null {
-  const message = extractTelegramMessage(update);
-  if (!message) {
-    return null;
-  }
-  const chatId =
-    typeof message.chat?.id === "number" && Number.isFinite(message.chat.id)
-      ? String(Math.trunc(message.chat.id))
-      : "";
-  if (!chatId) {
-    return null;
-  }
-  const isForum = message.chat?.is_forum === true;
-  const topicId = resolveTelegramIncomingTopicId({
-    isForum,
-    messageThreadId: message.message_thread_id,
-  });
-  const binding = resolveTelegramBindingForIncoming(chatId, topicId);
-  return binding?.tenantId ?? null;
-}
-
-async function bootstrapTelegramOffsetIfNeeded() {
-  if (!telegramBootstrapLatest) {
-    return;
-  }
-  const current = resolveStoredTelegramOffset();
-  if (current > 0) {
-    return;
-  }
-  const token = requireTelegramBotToken();
-  const response = await fetch(`${telegramApiBaseUrl}/bot${token}/getUpdates`, {
-    method: "POST",
-    headers: { "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({
-      timeout: 0,
-      limit: 1,
-      allowed_updates: ["message", "edited_message", "callback_query"],
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`telegram bootstrap getUpdates failed (${response.status})`);
-  }
-  const json = (await response.json()) as { ok?: boolean; result?: unknown };
-  if (json.ok !== true || !Array.isArray(json.result) || json.result.length === 0) {
-    return;
-  }
-  const lastUpdate = json.result[json.result.length - 1] as TelegramUpdate;
-  const updateId =
-    typeof lastUpdate.update_id === "number" && Number.isFinite(lastUpdate.update_id)
-      ? Math.trunc(lastUpdate.update_id)
-      : 0;
-  if (updateId > 0) {
-    storeTelegramOffset(updateId);
-  }
-}
-
-async function forwardTelegramCallbackQueryToTenant(params: {
-  updateId: number;
-  update: TelegramUpdate;
-  callbackQuery: TelegramCallbackQuery;
-}) {
-  const callbackData = readNonEmptyString(params.callbackQuery.data);
-  const callbackMessage =
-    params.callbackQuery.message && typeof params.callbackQuery.message === "object"
-      ? params.callbackQuery.message
-      : null;
-  const callbackQueryId = readNonEmptyString(params.callbackQuery.id);
-  if (!callbackData || !callbackMessage) {
-    if (callbackQueryId) {
-      try {
-        await answerTelegramCallbackQuery({ callbackQueryId });
-      } catch (error) {
-        log({
-          type: "telegram_callback_answer_error",
-          updateId: params.updateId,
-          error: String(error),
-        });
-      }
-    }
-    return;
-  }
-
-  const chatId =
-    typeof callbackMessage.chat?.id === "number" && Number.isFinite(callbackMessage.chat.id)
-      ? String(Math.trunc(callbackMessage.chat.id))
-      : "";
-  if (!chatId) {
-    return;
-  }
-  const isForum = callbackMessage.chat?.is_forum === true;
-  const topicId = resolveTelegramIncomingTopicId({
-    isForum,
-    messageThreadId: callbackMessage.message_thread_id,
-  });
-  const callbackMessageIdSeed =
-    typeof callbackMessage.message_id === "number" && Number.isFinite(callbackMessage.message_id)
-      ? String(Math.trunc(callbackMessage.message_id))
-      : undefined;
-  const traceId = createInboundTraceId({
-    channel: "telegram",
-    updateId: params.updateId,
-    messageId: callbackMessageIdSeed,
-  });
-  const binding = resolveTelegramBindingForIncoming(chatId, topicId);
-  if (!binding) {
-    if (callbackQueryId) {
-      try {
-        await answerTelegramCallbackQuery({
-          callbackQueryId,
-          text: "Pairing link is invalid or expired. Request a new link from your dashboard.",
-        });
-      } catch (error) {
-        log({
-          type: "telegram_callback_answer_error",
-          updateId: params.updateId,
-          error: String(error),
-          traceId,
-        });
-      }
-    }
-    return;
-  }
-
-  const target = resolveTenantInboundTarget(binding.tenantId);
-  if (!target) {
-    metrics.recordInboundEvent("telegram", "dropped");
-    log({
-      type: "telegram_inbound_drop_no_target",
-      tenantId: binding.tenantId,
-      updateId: params.updateId,
-      routeKey: binding.routeKey,
-      traceId,
-    });
-    throw new Error(`telegram inbound target missing for tenant ${binding.tenantId}`);
-  }
-
-  const callbackMessageId =
-    typeof callbackMessage.message_id === "number" && Number.isFinite(callbackMessage.message_id)
-      ? String(Math.trunc(callbackMessage.message_id))
-      : `tg-callback-msg:${params.updateId}`;
-  const fromId =
-    typeof params.callbackQuery.from?.id === "number" &&
-    Number.isFinite(params.callbackQuery.from.id)
-      ? String(Math.trunc(params.callbackQuery.from.id))
-      : "unknown";
-  metrics.recordActiveUser("telegram", fromId);
-  const timestampMs =
-    typeof callbackMessage.date === "number" && Number.isFinite(callbackMessage.date)
-      ? Math.trunc(callbackMessage.date) * 1_000
-      : Date.now();
-  const chatType = callbackMessage.chat?.type === "private" ? "direct" : "group";
-  const inboundRouteKey = buildTelegramRouteKey(chatId, topicId);
-  const sessionKey = resolveTelegramInboundSessionKey({
-    tenantId: binding.tenantId,
-    bindingId: binding.bindingId,
-    chatId,
-    topicId,
-  });
-
-  stmtUpsertSessionRoute.run(
-    binding.tenantId,
-    "telegram",
-    sessionKey,
-    binding.bindingId,
-    JSON.stringify({ routeKey: inboundRouteKey }),
-    Date.now(),
-  );
-
-  const payload = buildTelegramCallbackInboundEnvelope({
-    updateId: params.updateId,
-    sessionKey,
-    accountId: openclawMuxAccountId,
-    rawBody: callbackData,
-    fromId,
-    chatId,
-    topicId,
-    chatType,
-    messageId: callbackMessageId,
-    timestampMs,
-    routeKey: inboundRouteKey,
-    callbackData,
-    callbackQueryId: callbackQueryId ?? undefined,
-    rawCallbackQuery: params.callbackQuery,
-    rawMessage: callbackMessage,
-    rawUpdate: params.update,
-  });
-  const payloadWithIdentity = {
-    ...payload,
-    openclawId: binding.tenantId,
-  };
-  const tenantTraceId = createInboundTraceId({
-    channel: "telegram",
-    tenantId: binding.tenantId,
-    routeKey: inboundRouteKey,
-    updateId: params.updateId,
-    messageId: callbackMessageId,
-  });
-
-  const forwardStartedAtMs = Date.now();
-  let response: Response;
-  try {
-    response = await fetch(target.url, {
-      method: "POST",
-      headers: {
-        ...(await buildInboundAuthHeaders(target, tenantTraceId)),
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify(payloadWithIdentity),
-      signal: AbortSignal.timeout(target.timeoutMs),
-    });
-  } catch (error) {
-    metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
-    metrics.recordInboundEvent("telegram", "error");
-    throw error;
-  }
-  if (!response.ok) {
-    metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
-    metrics.recordInboundEvent("telegram", "error");
-    const bodyText = await response.text();
-    throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
-  }
-  metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
-  metrics.recordInboundEvent("telegram", "forwarded");
-
-  if (callbackQueryId) {
-    try {
-      await answerTelegramCallbackQuery({ callbackQueryId });
-    } catch (error) {
-      log({
-        type: "telegram_callback_answer_error",
-        updateId: params.updateId,
-        error: String(error),
-        traceId: tenantTraceId,
-      });
-    }
-  }
-
-  log({
-    type: "telegram_callback_forwarded",
-    tenantId: binding.tenantId,
-    sessionKey,
-    updateId: params.updateId,
-    messageId: callbackMessageId,
-    callbackData,
-    traceId: tenantTraceId,
-  });
-}
-
-async function handleTelegramBotControlCommand(params: {
-  command: BotControlCommand;
-  chatId: string;
-  topicId?: number;
-  chatType: "direct" | "group";
-  fromId: string;
-  binding: { tenantId: string; bindingId: string; routeKey: string } | null;
-}) {
-  if (params.command.kind === "help") {
-    const notice = renderBotHelpNotice("telegram");
-    await sendTelegramPairingNotice({
-      chatId: params.chatId,
-      topicId: params.topicId,
-      text: notice.text,
-      parseMode: notice.parseMode,
-    });
-    return;
-  }
-  if (params.command.kind === "status") {
-    const notice = renderBotStatusNotice({
-      channel: "telegram",
-      paired: Boolean(params.binding),
-      routeKey: params.binding?.routeKey,
-      sessionKey: params.binding
-        ? resolveBindingSessionKey({
-            tenantId: params.binding.tenantId,
-            channel: "telegram",
-            bindingId: params.binding.bindingId,
-          })
-        : null,
-    });
-    await sendTelegramPairingNotice({
-      chatId: params.chatId,
-      topicId: params.topicId,
-      text: notice.text,
-      parseMode: notice.parseMode,
-    });
-    return;
-  }
-  if (params.command.kind === "unpair") {
-    if (!params.binding) {
-      const notice = renderBotNotPairedNotice("telegram");
-      await sendTelegramPairingNotice({
-        chatId: params.chatId,
-        topicId: params.topicId,
-        text: notice.text,
-        parseMode: notice.parseMode,
-      });
-      return;
-    }
-    const removed = deactivateLiveBinding({
-      tenantId: params.binding.tenantId,
-      bindingId: params.binding.bindingId,
-      auditEventType: "pairing_unbound_by_bot",
-    });
-    const notice = removed
-      ? renderBotUnpairSuccessNotice("telegram")
-      : renderBotNotPairedNotice("telegram");
-    await sendTelegramPairingNotice({
-      chatId: params.chatId,
-      topicId: params.topicId,
-      text: notice.text,
-      parseMode: notice.parseMode,
-    });
-    return;
-  }
-  if (!params.command.token) {
-    const notice = renderBotSwitchUsageNotice("telegram");
-    await sendTelegramPairingNotice({
-      chatId: params.chatId,
-      topicId: params.topicId,
-      text: notice.text,
-      parseMode: notice.parseMode,
-    });
-    return;
-  }
-  const tokenRow = peekActivePairingToken(params.command.token);
-  if (!tokenRow) {
-    const notice = renderPairingInvalidNotice("telegram");
-    await sendTelegramPairingNotice({
-      chatId: params.chatId,
-      topicId: params.topicId,
-      text: notice.text,
-      parseMode: notice.parseMode,
-    });
-    return;
-  }
-  if (params.binding) {
-    deactivateLiveBinding({
-      tenantId: params.binding.tenantId,
-      bindingId: params.binding.bindingId,
-      auditEventType: "pairing_unbound_by_bot_switch",
-    });
-  }
-  const claimed = claimTelegramPairingToken({
-    token: params.command.token,
-    chatId: params.chatId,
-    topicId: params.topicId,
-    chatType: params.chatType,
-  });
-  if (!claimed) {
-    const notice = renderPairingInvalidNotice("telegram");
-    await sendTelegramPairingNotice({
-      chatId: params.chatId,
-      topicId: params.topicId,
-      text: notice.text,
-      parseMode: notice.parseMode,
-    });
-    return;
-  }
-  await sendPostClaimNotices({
-    channel: "telegram",
-    claimed,
-    send: async (notice) => {
-      await sendTelegramPairingNotice({
-        chatId: params.chatId,
-        topicId: params.topicId,
-        text: notice.text,
-        parseMode: notice.parseMode,
-      });
-    },
-    fromId: params.fromId,
-    chatId: params.chatId,
-    chatType: params.chatType,
-  });
-}
-
-async function handleDiscordBotControlCommand(params: {
-  command: BotControlCommand;
-  channelId: string;
-  routeKey: string;
-  fromId: string;
-  tenantId: string;
-  bindingId: string;
-  status: "active" | "pending";
-}): Promise<{ routeReset: boolean; pending?: boolean }> {
-  if (params.command.kind === "help") {
-    const notice = renderBotHelpNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return { routeReset: false };
-  }
-  if (params.command.kind === "status") {
-    const notice = renderBotStatusNotice({
-      channel: "discord",
-      paired: params.status === "active",
-      routeKey: params.routeKey,
-      sessionKey:
-        params.status === "active"
-          ? resolveBindingSessionKey({
-              tenantId: params.tenantId,
-              channel: "discord",
-              bindingId: params.bindingId,
-            })
-          : null,
-    });
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return { routeReset: false };
-  }
-  if (params.command.kind === "unpair") {
-    const removed = setBindingPending({
-      tenantId: params.tenantId,
-      bindingId: params.bindingId,
-      auditEventType: "pairing_unbound_by_bot",
-    });
-    const notice = removed
-      ? renderBotUnpairSuccessNotice("discord")
-      : renderBotNotPairedNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return { routeReset: false, pending: true };
-  }
-  if (!params.command.token) {
-    const notice = renderBotSwitchUsageNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return { routeReset: false };
-  }
-  const tokenRow = peekActivePairingToken(params.command.token);
-  const route = parseDiscordRouteKey(params.routeKey);
-  if (!route || !tokenRow) {
-    const notice = renderPairingInvalidNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return { routeReset: false };
-  }
-  deactivateLiveBinding({
-    tenantId: params.tenantId,
-    bindingId: params.bindingId,
-    auditEventType: "pairing_unbound_by_bot_switch",
-  });
-  const claimed = claimDiscordPairingToken({
-    token: params.command.token,
-    route,
-    channelId: params.channelId,
-  });
-  if (!claimed) {
-    const notice = renderPairingInvalidNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return { routeReset: false };
-  }
-  await sendPostClaimNotices({
-    channel: "discord",
-    claimed,
-    send: async (notice) => {
-      await sendDiscordPairingNotice({
-        channelId: params.channelId,
-        text: notice.text,
-      });
-    },
-    fromId: params.fromId,
-    chatId: params.channelId,
-    chatType: route.kind === "dm" ? "direct" : "group",
-  });
-  return { routeReset: true, pending: false };
-}
-
-async function handleDiscordBotControlCommandUnbound(params: {
-  command: BotControlCommand;
-  channelId: string;
-  routeKey: string;
-  fromId: string;
-}): Promise<void> {
-  if (params.command.kind === "help") {
-    const notice = renderBotHelpNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return;
-  }
-  if (params.command.kind === "status") {
-    const notice = renderBotStatusNotice({
-      channel: "discord",
-      paired: false,
-      routeKey: params.routeKey,
-      sessionKey: null,
-    });
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return;
-  }
-  if (params.command.kind === "unpair") {
-    const notice = renderBotNotPairedNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return;
-  }
-  if (!params.command.token) {
-    const notice = renderBotSwitchUsageNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return;
-  }
-  const tokenRow = peekActivePairingToken(params.command.token);
-  const route = parseDiscordRouteKey(params.routeKey);
-  if (!route || !tokenRow) {
-    const notice = renderPairingInvalidNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return;
-  }
-  const claimed = claimDiscordPairingToken({
-    token: params.command.token,
-    route,
-    channelId: params.channelId,
-  });
-  if (!claimed) {
-    const notice = renderPairingInvalidNotice("discord");
-    await sendDiscordPairingNotice({
-      channelId: params.channelId,
-      text: notice.text,
-    });
-    return;
-  }
-  await sendPostClaimNotices({
-    channel: "discord",
-    claimed,
-    send: async (notice) => {
-      await sendDiscordPairingNotice({
-        channelId: params.channelId,
-        text: notice.text,
-      });
-    },
-    fromId: params.fromId,
-    chatId: params.channelId,
-    chatType: route.kind === "dm" ? "direct" : "group",
-  });
-}
-
-async function handleWhatsAppBotControlCommand(params: {
-  command: BotControlCommand;
-  chatJid: string;
-  accountId: string;
-  chatType: "direct" | "group";
-  fromId: string;
-  directPeerId?: string;
-  binding: { tenantId: string; bindingId: string; routeKey: string } | null;
-}) {
-  if (params.command.kind === "help") {
-    const notice = renderBotHelpNotice("whatsapp");
-    await sendWhatsAppPairingNotice({
-      chatJid: params.chatJid,
-      accountId: params.accountId,
-      text: notice.text,
-    });
-    return;
-  }
-  if (params.command.kind === "status") {
-    const notice = renderBotStatusNotice({
-      channel: "whatsapp",
-      paired: Boolean(params.binding),
-      routeKey: params.binding?.routeKey,
-      sessionKey: params.binding
-        ? resolveBindingSessionKey({
-            tenantId: params.binding.tenantId,
-            channel: "whatsapp",
-            bindingId: params.binding.bindingId,
-          })
-        : null,
-    });
-    await sendWhatsAppPairingNotice({
-      chatJid: params.chatJid,
-      accountId: params.accountId,
-      text: notice.text,
-    });
-    return;
-  }
-  if (params.command.kind === "unpair") {
-    if (!params.binding) {
-      const notice = renderBotNotPairedNotice("whatsapp");
-      await sendWhatsAppPairingNotice({
-        chatJid: params.chatJid,
-        accountId: params.accountId,
-        text: notice.text,
-      });
-      return;
-    }
-    const removed = deactivateLiveBinding({
-      tenantId: params.binding.tenantId,
-      bindingId: params.binding.bindingId,
-      auditEventType: "pairing_unbound_by_bot",
-    });
-    const notice = removed
-      ? renderBotUnpairSuccessNotice("whatsapp")
-      : renderBotNotPairedNotice("whatsapp");
-    await sendWhatsAppPairingNotice({
-      chatJid: params.chatJid,
-      accountId: params.accountId,
-      text: notice.text,
-    });
-    return;
-  }
-  if (!params.command.token) {
-    const notice = renderBotSwitchUsageNotice("whatsapp");
-    await sendWhatsAppPairingNotice({
-      chatJid: params.chatJid,
-      accountId: params.accountId,
-      text: notice.text,
-    });
-    return;
-  }
-  const tokenRow = peekActivePairingToken(params.command.token);
-  if (!tokenRow) {
-    const notice = renderPairingInvalidNotice("whatsapp");
-    await sendWhatsAppPairingNotice({
-      chatJid: params.chatJid,
-      accountId: params.accountId,
-      text: notice.text,
-    });
-    return;
-  }
-  if (params.binding) {
-    deactivateLiveBinding({
-      tenantId: params.binding.tenantId,
-      bindingId: params.binding.bindingId,
-      auditEventType: "pairing_unbound_by_bot_switch",
-    });
-  }
-  const claimed = claimWhatsAppPairingToken({
-    token: params.command.token,
-    chatJid: params.chatJid,
-    accountId: params.accountId,
-    chatType: params.chatType,
-    directPeerId: params.directPeerId,
-  });
-  if (!claimed) {
-    const notice = renderPairingInvalidNotice("whatsapp");
-    await sendWhatsAppPairingNotice({
-      chatJid: params.chatJid,
-      accountId: params.accountId,
-      text: notice.text,
-    });
-    return;
-  }
-  await sendPostClaimNotices({
-    channel: "whatsapp",
-    claimed,
-    send: async (notice) => {
-      await sendWhatsAppPairingNotice({
-        chatJid: params.chatJid,
-        accountId: params.accountId,
-        text: notice.text,
-      });
-    },
-    fromId: params.fromId,
-    chatId: params.chatJid,
-    chatType: params.chatType,
-  });
-}
-
-async function forwardTelegramUpdateToTenant(update: TelegramUpdate) {
-  const updateId =
-    typeof update.update_id === "number" && Number.isFinite(update.update_id)
-      ? Math.trunc(update.update_id)
-      : 0;
-  if (updateId <= 0) {
-    return;
-  }
-
-  const callbackQuery = extractTelegramCallbackQuery(update);
-  if (callbackQuery) {
-    await forwardTelegramCallbackQueryToTenant({
-      updateId,
-      update,
-      callbackQuery,
-    });
-    return;
-  }
-
-  const message = extractTelegramMessage(update);
-  if (!message) {
-    return;
-  }
-
-  const chatId =
-    typeof message.chat?.id === "number" && Number.isFinite(message.chat.id)
-      ? String(Math.trunc(message.chat.id))
-      : "";
-  if (!chatId) {
-    return;
-  }
-  const isForum = message.chat?.is_forum === true;
-  const topicId = resolveTelegramIncomingTopicId({
-    isForum,
-    messageThreadId: message.message_thread_id,
-  });
-  const bodyText = typeof message.text === "string" ? message.text : null;
-  const bodyCaption = typeof message.caption === "string" ? message.caption : null;
-  const body = bodyText ?? bodyCaption ?? "";
-  const chatType = message.chat?.type === "private" ? "direct" : "group";
-  const binding = resolveTelegramBindingForIncoming(chatId, topicId);
-  const botControlCommand = parseBotControlCommand(body);
-  if (botControlCommand) {
-    try {
-      const fromId =
-        typeof message.from?.id === "number" && Number.isFinite(message.from.id)
-          ? String(Math.trunc(message.from.id))
-          : chatId;
-      await handleTelegramBotControlCommand({
-        command: botControlCommand,
-        chatId,
-        topicId,
-        chatType,
-        fromId,
-        binding,
-      });
-    } catch (error) {
-      log({
-        type: "telegram_bot_control_error",
-        updateId,
-        chatId,
-        topicId: topicId ?? null,
-        error: String(error),
-      });
-    }
-    return;
-  }
-  const pairingToken = extractPairingTokenFromTelegramMessage(message);
-  if (!binding) {
-    if (!pairingToken) {
-      const shouldSendUnpairedNotice =
-        isTelegramCommandText(body) ||
-        (chatType === "direct" && hasTelegramMessageContent(message));
-      if (shouldSendUnpairedNotice) {
-        try {
-          const notice = renderUnpairedHintNotice("telegram");
-          await sendTelegramPairingNotice({
-            chatId,
-            topicId,
-            text: notice.text,
-            parseMode: notice.parseMode,
-          });
-        } catch (error) {
-          log({
-            type: "telegram_unpaired_command_notice_error",
-            updateId,
-            error: String(error),
-          });
-        }
-      }
-      return;
-    }
-    const claimed = claimTelegramPairingToken({
-      token: pairingToken,
-      chatId,
-      topicId,
-      chatType,
-    });
-    if (!claimed) {
-      try {
-        const notice = renderPairingInvalidNotice("telegram");
-        await sendTelegramPairingNotice({
-          chatId,
-          topicId,
-          text: notice.text,
-          parseMode: notice.parseMode,
-        });
-      } catch (error) {
-        log({
-          type: "telegram_pairing_invalid_notice_error",
-          updateId,
-          error: String(error),
-        });
-      }
-      log({
-        type: "telegram_pairing_token_invalid",
-        updateId,
-        chatId,
-        topicId: topicId ?? null,
-      });
-      return;
-    }
-
-    try {
-      const fromId =
-        typeof message.from?.id === "number" && Number.isFinite(message.from.id)
-          ? String(Math.trunc(message.from.id))
-          : chatId;
-      await sendPostClaimNotices({
-        channel: "telegram",
-        claimed,
-        send: async (notice) => {
-          await sendTelegramPairingNotice({
-            chatId,
-            topicId,
-            text: notice.text,
-            parseMode: notice.parseMode,
-          });
-        },
-        fromId,
-        chatId,
-        chatType,
-      });
-    } catch (error) {
-      log({
-        type: "telegram_pairing_notice_error",
-        tenantId: claimed.tenantId,
-        updateId,
-        error: String(error),
-      });
-    }
-    log({
-      type: "telegram_pairing_token_claimed",
-      tenantId: claimed.tenantId,
-      updateId,
-      routeKey: claimed.routeKey,
-      sessionKey: claimed.sessionKey,
-      claimType: claimed.claimType,
-      ...(claimed.previousTenantId ? { previousTenantId: claimed.previousTenantId } : {}),
-    });
-    return;
-  }
-  if (pairingToken) {
-    const reClaimed = claimTelegramPairingToken({
-      token: pairingToken,
-      chatId,
-      topicId,
-      chatType,
-    });
-    if (reClaimed) {
-      try {
-        const fromId =
-          typeof message.from?.id === "number" && Number.isFinite(message.from.id)
-            ? String(Math.trunc(message.from.id))
-            : chatId;
-        await sendPostClaimNotices({
-          channel: "telegram",
-          claimed: reClaimed,
-          send: async (notice) => {
-            await sendTelegramPairingNotice({
-              chatId,
-              topicId,
-              text: notice.text,
-              parseMode: notice.parseMode,
-            });
-          },
-          fromId,
-          chatId,
-          chatType,
-        });
-      } catch (error) {
-        log({
-          type: "telegram_pairing_notice_error",
-          tenantId: reClaimed.tenantId,
-          updateId,
-          error: String(error),
-        });
-      }
-      log({
-        type: "telegram_pairing_token_claimed",
-        tenantId: reClaimed.tenantId,
-        updateId,
-        routeKey: reClaimed.routeKey,
-        sessionKey: reClaimed.sessionKey,
-        claimType: reClaimed.claimType,
-        ...(reClaimed.previousTenantId ? { previousTenantId: reClaimed.previousTenantId } : {}),
-      });
-    } else {
-      log({
-        type: "telegram_pairing_token_ignored_bound_route",
-        tenantId: binding.tenantId,
-        updateId,
-        routeKey: binding.routeKey,
-      });
-    }
-    return;
-  }
-
-  const messageId =
-    typeof message.message_id === "number" && Number.isFinite(message.message_id)
-      ? String(Math.trunc(message.message_id))
-      : `tg-msg:${updateId}`;
-  const inboundRouteKey = buildTelegramRouteKey(chatId, topicId);
-  const traceId = createInboundTraceId({
-    channel: "telegram",
-    tenantId: binding.tenantId,
-    routeKey: inboundRouteKey,
-    updateId,
-    messageId,
-  });
-
-  const target = resolveTenantInboundTarget(binding.tenantId);
-  if (!target) {
-    metrics.recordInboundEvent("telegram", "dropped");
-    log({
-      type: "telegram_inbound_drop_no_target",
-      tenantId: binding.tenantId,
-      updateId,
-      routeKey: binding.routeKey,
-      traceId,
-    });
-    throw new Error(`telegram inbound target missing for tenant ${binding.tenantId}`);
-  }
-
-  const inboundMedia = await extractTelegramInboundMedia({ message, updateId });
-  const forwardedBody = body ?? "";
-  if (!forwardedBody && inboundMedia.attachments.length === 0) {
-    return;
-  }
-  const fromId =
-    typeof message.from?.id === "number" && Number.isFinite(message.from.id)
-      ? String(Math.trunc(message.from.id))
-      : "unknown";
-  metrics.recordActiveUser("telegram", fromId);
-  const timestampMs =
-    typeof message.date === "number" && Number.isFinite(message.date)
-      ? Math.trunc(message.date) * 1_000
-      : Date.now();
-  const sessionKey = resolveTelegramInboundSessionKey({
-    tenantId: binding.tenantId,
-    bindingId: binding.bindingId,
-    chatId,
-    topicId,
-  });
-
-  stmtUpsertSessionRoute.run(
-    binding.tenantId,
-    "telegram",
-    sessionKey,
-    binding.bindingId,
-    JSON.stringify({ routeKey: inboundRouteKey }),
-    Date.now(),
-  );
-
-  // Compute wasMentioned: check for @botUsername entity or reply-to-bot.
-  let wasMentioned = false;
-  const botUsername = telegramBotUsername;
-  if (botUsername) {
-    const entities = Array.isArray(message.entities) ? message.entities : [];
-    wasMentioned = entities.some(
-      (e: { type?: string; offset?: number; length?: number }) =>
-        e.type === "mention" &&
-        typeof e.offset === "number" &&
-        typeof e.length === "number" &&
-        (forwardedBody ?? "").slice(e.offset, e.offset + e.length).toLowerCase() ===
-          `@${botUsername.toLowerCase()}`,
-    );
-    if (!wasMentioned && message.reply_to_message?.from?.username) {
-      wasMentioned =
-        message.reply_to_message.from.username.toLowerCase() === botUsername.toLowerCase();
-    }
-  }
-
-  const payload = buildTelegramInboundEnvelope({
-    updateId,
-    sessionKey,
-    accountId: openclawMuxAccountId,
-    rawBody: forwardedBody,
-    fromId,
-    chatId,
-    topicId,
-    chatType,
-    messageId,
-    timestampMs,
-    routeKey: inboundRouteKey,
-    rawMessage: message,
-    rawUpdate: update,
-    media: inboundMedia.media,
-    attachments: inboundMedia.attachments,
-    wasMentioned,
-  });
-  const payloadWithIdentity = {
-    ...payload,
-    openclawId: binding.tenantId,
-  };
-
-  const forwardStartedAtMs = Date.now();
-  let response: Response;
-  try {
-    response = await fetch(target.url, {
-      method: "POST",
-      headers: {
-        ...(await buildInboundAuthHeaders(target, traceId)),
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify(payloadWithIdentity),
-      signal: AbortSignal.timeout(target.timeoutMs),
-    });
-  } catch (error) {
-    metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
-    metrics.recordInboundEvent("telegram", "error");
-    throw error;
-  }
-
-  if (!response.ok) {
-    metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
-    metrics.recordInboundEvent("telegram", "error");
-    const bodyText = await response.text();
-    throw new Error(`openclaw inbound failed (${response.status}): ${bodyText || "no body"}`);
-  }
-  metrics.observeInboundForwardDuration("telegram", Date.now() - forwardStartedAtMs);
-  metrics.recordInboundEvent("telegram", "forwarded");
-
-  log({
-    type: "telegram_inbound_forwarded",
-    tenantId: binding.tenantId,
-    sessionKey,
-    updateId,
-    messageId,
-    traceId,
-  });
-}
-
-async function fetchDiscordChannelMessages(params: {
-  channelId: string;
-  afterMessageId?: string;
-  limit?: number;
-}): Promise<Record<string, unknown>[]> {
-  const token = requireDiscordBotToken();
-  const qs = new URLSearchParams();
-  qs.set("limit", String(Math.max(1, Math.min(100, params.limit ?? 50))));
-  if (params.afterMessageId) {
-    qs.set("after", params.afterMessageId);
-  }
-  const response = await fetch(`${discordApiBaseUrl}/channels/${params.channelId}/messages?${qs}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bot ${token}`,
-      "Content-Type": "application/json; charset=utf-8",
-    },
-  });
-  const bodyText = await response.text();
-  let parsed: unknown = [];
-  if (bodyText.trim()) {
-    try {
-      parsed = JSON.parse(bodyText);
-    } catch {
-      parsed = [];
-    }
-  }
-  if (!response.ok) {
-    throw new Error(`discord list messages failed (${response.status})`);
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error("discord list messages returned invalid payload");
-  }
-  return parsed.filter((item): item is Record<string, unknown> =>
-    Boolean(item && typeof item === "object"),
-  );
-}
-
-async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
-  const route = parseDiscordRouteKey(params.route_key);
-  if (!route) {
-    return;
-  }
-  let pending = params.status === "pending";
-
-  const channelId = await resolveDiscordInboundChannelId(route);
-  if (!channelId) {
-    log({
-      type: "discord_inbound_skip_unresolvable_route",
-      tenantId: params.tenant_id,
-      bindingId: params.binding_id,
-      routeKey: params.route_key,
-    });
-    return;
-  }
-
-  const existingOffset = resolveStoredDiscordOffset(params.binding_id);
-  if (!existingOffset && discordBootstrapLatest) {
-    const latest = await fetchDiscordChannelMessages({ channelId, limit: 1 });
-    const last = latest[0];
-    const lastMessageId = readUnsignedNumericString(last?.id);
-    if (lastMessageId) {
-      storeDiscordOffset(params.binding_id, lastMessageId);
-    }
-    return;
-  }
-
-  const updates = await fetchDiscordChannelMessages({
-    channelId,
-    afterMessageId: existingOffset ?? undefined,
-    limit: 50,
-  });
-  if (updates.length === 0) {
-    return;
-  }
-
-  const sorted = sortDiscordMessagesAsc(updates);
-  let lastAckedMessageId = existingOffset ?? null;
-
-  for (const message of sorted) {
-    const messageId = readUnsignedNumericString(message.id);
-    if (!messageId) {
-      continue;
-    }
-
-    const author =
-      message.author && typeof message.author === "object"
-        ? (message.author as Record<string, unknown>)
-        : undefined;
-    const fromId = readUnsignedNumericString(author?.id);
-    const isBot = author?.bot === true;
-    if (!fromId || isBot) {
-      lastAckedMessageId = messageId;
-      continue;
-    }
-
-    const body = typeof message.content === "string" ? message.content : "";
-    const botControlCommand = parseBotControlCommand(body);
-    if (botControlCommand) {
-      try {
-        const result = await handleDiscordBotControlCommand({
-          command: botControlCommand,
-          channelId,
-          routeKey: params.route_key,
-          fromId,
-          tenantId: params.tenant_id,
-          bindingId: params.binding_id,
-          status: pending ? "pending" : "active",
-        });
-        lastAckedMessageId = messageId;
-        if (typeof result.pending === "boolean") {
-          pending = result.pending;
-        }
-        if (result.routeReset) {
-          break;
-        }
-      } catch (error) {
-        log({
-          type: "discord_bot_control_error",
-          tenantId: params.tenant_id,
-          bindingId: params.binding_id,
-          routeKey: params.route_key,
-          messageId,
-          error: String(error),
-        });
-      }
-      continue;
-    }
-    const pairingToken = extractPairingTokenFromDiscordMessage(message);
-    if (pending) {
-      if (!pairingToken) {
-        const shouldSendUnpairedNotice =
-          isDiscordCommandText(body) || (route.kind === "dm" && hasDiscordMessageContent(message));
-        if (shouldSendUnpairedNotice) {
-          try {
-            const notice = renderUnpairedHintNotice("discord");
-            await sendDiscordPairingNotice({
-              channelId,
-              text: notice.text,
-            });
-          } catch (error) {
-            log({
-              type: "discord_unpaired_command_notice_error",
-              tenantId: params.tenant_id,
-              bindingId: params.binding_id,
-              messageId,
-              error: String(error),
-            });
-          }
-        }
-        lastAckedMessageId = messageId;
-        continue;
-      }
-      const tokenRow = peekActivePairingToken(pairingToken);
-      if (!tokenRow) {
-        try {
-          const notice = renderPairingInvalidNotice("discord");
-          await sendDiscordPairingNotice({
-            channelId,
-            text: notice.text,
-          });
-        } catch (error) {
-          log({
-            type: "discord_pairing_invalid_notice_error",
-            tenantId: params.tenant_id,
-            bindingId: params.binding_id,
-            messageId,
-            error: String(error),
-          });
-        }
-        log({
-          type: "discord_pairing_token_invalid",
-          tenantId: params.tenant_id,
-          bindingId: params.binding_id,
-          messageId,
-          channelId,
-        });
-        lastAckedMessageId = messageId;
-        continue;
-      }
-      const claimed = claimDiscordPairingToken({
-        token: pairingToken,
-        route,
-        channelId,
-      });
-      if (!claimed) {
-        try {
-          const notice = renderPairingInvalidNotice("discord");
-          await sendDiscordPairingNotice({
-            channelId,
-            text: notice.text,
-          });
-        } catch (error) {
-          log({
-            type: "discord_pairing_invalid_notice_error",
-            tenantId: params.tenant_id,
-            bindingId: params.binding_id,
-            messageId,
-            error: String(error),
-          });
-        }
-        log({
-          type: "discord_pairing_token_invalid",
-          tenantId: params.tenant_id,
-          bindingId: params.binding_id,
-          messageId,
-          channelId,
-        });
-        lastAckedMessageId = messageId;
-        continue;
-      }
-      try {
-        await sendPostClaimNotices({
-          channel: "discord",
-          claimed,
-          send: async (notice) => {
-            await sendDiscordPairingNotice({
-              channelId,
-              text: notice.text,
-            });
-          },
-          fromId,
-          chatId: channelId,
-          chatType: route.kind === "dm" ? "direct" : "group",
-        });
-      } catch (error) {
-        log({
-          type: "discord_pairing_notice_error",
-          tenantId: params.tenant_id,
-          bindingId: params.binding_id,
-          messageId,
-          error: String(error),
-        });
-      }
-      log({
-        type: "discord_pairing_token_claimed",
-        tenantId: claimed.tenantId,
-        bindingId: claimed.bindingId,
-        routeKey: claimed.routeKey,
-        sessionKey: claimed.sessionKey,
-        claimType: claimed.claimType,
-        ...(claimed.previousTenantId ? { previousTenantId: claimed.previousTenantId } : {}),
-        channelId,
-        messageId,
-      });
-      pending = false;
-      lastAckedMessageId = messageId;
-      continue;
-    }
-
-    if (pairingToken) {
-      const reClaimed = claimDiscordPairingToken({
-        token: pairingToken,
-        route,
-        channelId,
-      });
-      if (reClaimed) {
-        try {
-          await sendPostClaimNotices({
-            channel: "discord",
-            claimed: reClaimed,
-            send: async (notice) => {
-              await sendDiscordPairingNotice({
-                channelId,
-                text: notice.text,
-              });
-            },
-            fromId,
-            chatId: channelId,
-            chatType: route.kind === "dm" ? "direct" : "group",
-          });
-        } catch (error) {
-          log({
-            type: "discord_pairing_notice_error",
-            tenantId: reClaimed.tenantId,
-            bindingId: reClaimed.bindingId,
-            messageId,
-            error: String(error),
-          });
-        }
-        log({
-          type: "discord_pairing_token_claimed",
-          tenantId: reClaimed.tenantId,
-          bindingId: reClaimed.bindingId,
-          routeKey: reClaimed.routeKey,
-          sessionKey: reClaimed.sessionKey,
-          claimType: reClaimed.claimType,
-          ...(reClaimed.previousTenantId ? { previousTenantId: reClaimed.previousTenantId } : {}),
-          channelId,
-          messageId,
-        });
-      } else {
-        log({
-          type: "discord_pairing_token_ignored_bound_route",
-          tenantId: params.tenant_id,
-          bindingId: params.binding_id,
-          routeKey: params.route_key,
-          messageId,
-        });
-      }
-      lastAckedMessageId = messageId;
-      continue;
-    }
-
-    const forwardStatus = await forwardDiscordMessageToTenant({
-      tenantId: params.tenant_id,
-      bindingId: params.binding_id,
-      routeKey: params.route_key,
-      route,
-      channelId,
-      message,
-      messageId,
-      fromId,
-      body,
-    });
-    if (forwardStatus === "deferred") {
-      break;
-    }
-    lastAckedMessageId = messageId;
-  }
-
-  if (lastAckedMessageId && lastAckedMessageId !== existingOffset) {
-    storeDiscordOffset(params.binding_id, lastAckedMessageId);
-    log({
-      type: "discord_inbound_ack_committed",
-      tenantId: params.tenant_id,
-      bindingId: params.binding_id,
-      messageId: lastAckedMessageId,
-    });
-  }
-}
-
-async function runDiscordInboundPollPass() {
-  const bindings = stmtListActiveDiscordBindings.all() as ActiveDiscordBindingRow[];
-  for (const binding of bindings) {
-    const route = parseDiscordRouteKey(binding.route_key);
-    if (discordGatewayReady && discordGatewayDmEnabled && route?.kind === "dm") {
-      continue;
-    }
-    if (discordGatewayReady && discordGatewayGuildEnabled && route?.kind === "guild") {
-      continue;
-    }
-    try {
-      await forwardDiscordBindingInbound(binding);
-    } catch (error) {
-      const err = error instanceof Error ? error : undefined;
-      log({
-        type: "discord_inbound_forward_error",
-        tenantId: binding.tenant_id,
-        bindingId: binding.binding_id,
-        error: String(error),
-        message: err?.message,
-        cause: err?.cause instanceof Error ? err.cause.message : undefined,
-        stack: err?.stack,
-      });
-    }
-  }
-}
-
-async function runDiscordInboundLoop() {
-  if (!discordInboundEnabled) {
-    return;
-  }
-  discordBgRetryCount.clear();
-  discordBgRetryQueuedAtMs.clear();
-  discordRuntimeHealth.pollLoopStartedAtMs = Date.now();
-  let running = true;
-  process.on("SIGINT", () => {
-    running = false;
-  });
-  process.on("SIGTERM", () => {
-    running = false;
-  });
-
-  const pollMs = Math.max(200, Math.trunc(discordPollIntervalMs));
-  while (running) {
-    try {
-      await runDiscordInboundPollPass();
-      discordRuntimeHealth.lastPollSuccessAtMs = Date.now();
-      discordRuntimeHealth.lastPollErrorAtMs = null;
-      discordRuntimeHealth.lastPollError = null;
-    } catch (error) {
-      discordRuntimeHealth.lastPollErrorAtMs = Date.now();
-      discordRuntimeHealth.lastPollError = errorString(error);
-      const err = error instanceof Error ? error : undefined;
-      log({
-        type: "discord_inbound_poll_error",
-        error: String(error),
-        message: err?.message,
-        cause: err?.cause instanceof Error ? err.cause.message : undefined,
-        stack: err?.stack,
-      });
-    }
-    await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
-  }
-}
-
-// Background retry config for Discord gateway mode (same pattern as Telegram).
-const DISCORD_BG_RETRY_MAX_PER_TENANT = 3;
-const DISCORD_BG_RETRY_ATTEMPTS = 5;
-const DISCORD_BG_RETRY_INTERVAL_MS = 30_000;
 const discordBgRetryCount = new Map<string, number>();
 const discordBgRetryQueuedAtMs = new Map<string, number>();
 const telegramBgRetryCount = new Map<string, number>();
 const telegramBgRetryQueuedAtMs = new Map<string, number>();
 
-async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
-  const messageId = readUnsignedNumericString(message.id);
-  const author = asRecord(message.author);
-  const fromId = readUnsignedNumericString(author?.id);
-  const isBot = author?.bot === true;
-  if (!messageId || !fromId || isBot) {
-    return;
-  }
+const {
+  countActiveTenantInboundTargets,
+  renderMetricsPayload,
+  buildReadinessReport,
+  renderObservabilitySnapshot,
+  getWhatsAppCredentialHealth,
+} = createObservabilityRuntime({
+  metrics,
+  stmtCountActiveTenantInboundTargets: {
+    get: () => stmtCountActiveTenantInboundTargets.get() as { count?: unknown } | undefined,
+  },
+  stmtCountWhatsAppInboundQueue: {
+    get: () => stmtCountWhatsAppInboundQueue.get() as { count?: unknown } | undefined,
+  },
+  stmtSelectOldestWhatsAppInboundQueue: {
+    get: () =>
+      stmtSelectOldestWhatsAppInboundQueue.get() as { oldest_created_at_ms?: unknown } | undefined,
+  },
+  telegramBgRetryCount,
+  telegramBgRetryQueuedAtMs,
+  discordBgRetryCount,
+  discordBgRetryQueuedAtMs,
+  telegramInboundEnabled,
+  getTelegramPollConflictHealth: () => telegramPollConflictHealth,
+  telegramRuntimeHealth,
+  discordInboundEnabled,
+  discordRuntimeHealth,
+  whatsappInboundEnabled,
+  whatsappRuntimeHealth,
+  whatsappAuthDir,
+  whatsappAccountId,
+  openclawMuxAccountId,
+});
 
-  const incoming = await resolveDiscordIncomingRouteFromMessage({
-    message,
-    fromId,
-  });
-  if (!incoming) {
-    return;
-  }
-  const route = incoming.route;
-  const channelId = incoming.channelId;
-  if (route.kind === "dm" && !discordGatewayDmEnabled) {
-    return;
-  }
-  if (route.kind === "guild" && !discordGatewayGuildEnabled) {
-    return;
-  }
+const { runTelegramInboundLoop } = createTelegramInboundRuntime({
+  telegramApiBaseUrl,
+  telegramInboundEnabled,
+  telegramPollTimeoutSec,
+  telegramPollRetryMs,
+  telegramBootstrapLatest,
+  telegramBotUsername,
+  openclawMuxAccountId,
+  metrics,
+  telegramRuntimeHealth,
+  getTelegramPollConflictHealth: () => telegramPollConflictHealth,
+  setTelegramPollConflictHealth: (health) => {
+    telegramPollConflictHealth = health;
+  },
+  telegramBgRetryCount,
+  telegramBgRetryQueuedAtMs,
+  requireTelegramBotToken,
+  errorString,
+  log,
+  readNonEmptyString,
+  resolveStoredTelegramOffset,
+  storeTelegramOffset,
+  answerTelegramCallbackQuery,
+  resolveTelegramIncomingTopicId: (params) =>
+    resolveTelegramIncomingTopicId({
+      isForum: params.isForum,
+      messageThreadId: params.messageThreadId,
+    }),
+  createInboundTraceId,
+  resolveTelegramBindingForIncoming,
+  resolveTenantInboundTarget,
+  buildTelegramRouteKey,
+  resolveTelegramInboundSessionKey,
+  stmtUpsertSessionRoute,
+  buildTelegramCallbackInboundEnvelope,
+  buildTelegramInboundEnvelope,
+  buildInboundAuthHeaders,
+  extractTelegramInboundMedia,
+  parseBotControlCommand,
+  handleTelegramBotControlCommand,
+  isTelegramCommandText,
+  hasTelegramMessageContent,
+  renderUnpairedHintNotice,
+  sendTelegramPairingNotice,
+  renderPairingInvalidNotice,
+  extractPairingTokenFromTelegramMessage,
+  claimTelegramPairingToken,
+  sendPostClaimNotices,
+});
 
-  const incomingRouteKey = buildDiscordRouteKey(route);
-  const liveBinding = resolveDiscordBindingForIncoming(route);
-  const body = typeof message.content === "string" ? message.content : "";
+const { runDiscordInboundLoop, runDiscordGatewayDmLoop } = createDiscordInboundRuntime({
+  discordApiBaseUrl,
+  discordInboundEnabled,
+  discordPollIntervalMs,
+  discordBootstrapLatest,
+  discordGatewayDmEnabled,
+  discordGatewayGuildEnabled,
+  discordGatewayDefaultIntents,
+  discordGatewayIntents,
+  discordGatewayReconnectInitialMs,
+  discordGatewayReconnectMaxMs,
+  metrics,
+  discordRuntimeHealth,
+  discordBgRetryCount,
+  discordBgRetryQueuedAtMs,
+  getDiscordGatewayReady: () => discordGatewayReady,
+  setDiscordGatewayReady: (ready) => {
+    discordGatewayReady = ready;
+  },
+  getDiscordBotSelfId: () => discordBotSelfId,
+  setDiscordBotSelfId: (botSelfId) => {
+    discordBotSelfId = botSelfId;
+  },
+  requireDiscordBotToken,
+  errorString,
+  log,
+  parseDiscordRouteKey,
+  readUnsignedNumericString,
+  readPositiveInt,
+  readNonEmptyString,
+  asRecord,
+  resolveDiscordInboundChannelId,
+  resolveStoredDiscordOffset,
+  storeDiscordOffset,
+  sortDiscordMessagesAsc,
+  parseBotControlCommand,
+  handleDiscordBotControlCommand,
+  handleDiscordBotControlCommandUnbound,
+  extractPairingTokenFromDiscordMessage,
+  peekActivePairingToken,
+  claimDiscordPairingToken,
+  sendPostClaimNotices,
+  isDiscordCommandText,
+  hasDiscordMessageContent,
+  renderUnpairedHintNotice,
+  sendDiscordPairingNotice,
+  renderPairingInvalidNotice,
+  stmtListActiveDiscordBindings,
+  resolveDiscordIncomingRouteFromMessage,
+  buildDiscordRouteKey,
+  resolveDiscordBindingForIncoming,
+  forwardDiscordMessageToTenant,
+  parseDiscordGatewayPayload,
+  fetchDiscordGatewayUrl,
+});
 
-  const botControlCommand = parseBotControlCommand(body);
-  if (botControlCommand) {
-    try {
-      if (!liveBinding) {
-        await handleDiscordBotControlCommandUnbound({
-          command: botControlCommand,
-          channelId,
-          routeKey: incomingRouteKey,
-          fromId,
-        });
-      } else {
-        await handleDiscordBotControlCommand({
-          command: botControlCommand,
-          channelId,
-          routeKey: liveBinding.routeKey,
-          fromId,
-          tenantId: liveBinding.tenantId,
-          bindingId: liveBinding.bindingId,
-          status: liveBinding.status,
-        });
-      }
-    } catch (error) {
-      log({
-        type: "discord_bot_control_error",
-        tenantId: liveBinding?.tenantId,
-        bindingId: liveBinding?.bindingId,
-        routeKey: liveBinding?.routeKey ?? incomingRouteKey,
-        messageId,
-        error: String(error),
-      });
-    }
-    return;
-  }
+const { runWhatsAppInboundLoop } = createWhatsAppInboundRuntime({
+  whatsappInboundEnabled,
+  whatsappInboundRetryMs,
+  whatsappQueuePollMs,
+  whatsappQueueRetryInitialMs,
+  whatsappQueueRetryMaxMs,
+  whatsappQueueBatchSize,
+  whatsappQueueMaxAgeMs,
+  whatsappAccountId,
+  whatsappAuthDir,
+  muxPublicUrl,
+  openclawMuxAccountId,
+  whatsappRuntimeHealth,
+  getActiveWhatsAppListener: () => activeWhatsAppListener,
+  setActiveWhatsAppListener: (listener) => {
+    activeWhatsAppListener = listener;
+  },
+  loadWebRuntimeModules,
+  errorString,
+  log,
+  readNonEmptyString,
+  inferMimeTypeFromPath: (filePath) => inferMimeTypeFromPath(filePath) ?? null,
+  stmtInsertWhatsAppInboundQueue,
+  stmtSelectDueWhatsAppInboundQueue,
+  stmtDeleteWhatsAppInboundQueueById,
+  stmtDeferWhatsAppInboundQueueById,
+  stmtSelectSessionKeyByBinding,
+  stmtUpsertSessionRoute,
+  metrics,
+  classifyWhatsAppInboundDeliveryError,
+  resolveWhatsAppInboundQueueRetryState,
+  parseBotControlCommand,
+  handleWhatsAppBotControlCommand,
+  extractPairingTokenFromWhatsAppMessage,
+  isWhatsAppCommandText,
+  hasWhatsAppMessageContent,
+  renderUnpairedHintNotice,
+  sendWhatsAppPairingNotice,
+  claimWhatsAppPairingToken,
+  renderPairingInvalidNotice,
+  sendPostClaimNotices,
+  resolveWhatsAppBindingForIncoming,
+  createInboundTraceId,
+  resolveTenantInboundTarget,
+  isRetryableWhatsAppInboundStatus,
+  deriveWhatsAppSessionKey,
+  buildWhatsAppInboundEnvelope,
+  buildInboundAuthHeaders,
+});
 
-  const pairingToken = extractPairingTokenFromDiscordMessage(message);
-  if (!liveBinding || liveBinding.status === "pending") {
-    if (!pairingToken) {
-      const shouldSendUnpairedNotice =
-        isDiscordCommandText(body) || (route.kind === "dm" && hasDiscordMessageContent(message));
-      if (shouldSendUnpairedNotice) {
-        try {
-          const notice = renderUnpairedHintNotice("discord");
-          await sendDiscordPairingNotice({
-            channelId,
-            text: notice.text,
-          });
-        } catch (error) {
-          log({
-            type: "discord_unpaired_command_notice_error",
-            tenantId: liveBinding?.tenantId,
-            bindingId: liveBinding?.bindingId,
-            messageId,
-            error: String(error),
-          });
-        }
-      }
-      return;
-    }
+const { runOutboundAction, runOutboundSend } = createOutboundService({
+  outboundResolutionMode,
+  whatsappAccountId,
+  openclawMuxAccountId,
+  telegramGeneralTopicId: TELEGRAM_GENERAL_TOPIC_ID,
+  allowedTelegramMethods: ALLOWED_TELEGRAM_METHODS,
+  discordApiBaseUrl,
+  metrics,
+  log,
+  asRecord,
+  readNonEmptyString,
+  readPositiveInt,
+  readUnsignedNumericString,
+  normalizeChannel,
+  listTelegramOutboundRouteKeys,
+  listDiscordOutboundRouteKeys,
+  listWhatsAppOutboundRouteKeys,
+  resolveTelegramBoundRoute,
+  resolveDiscordBoundRoute,
+  resolveWhatsAppBoundRoute,
+  resolveDiscordOutboundChannelId,
+  sendTelegram,
+  sendTelegramWithFallbacks,
+  isTelegramMessageNotModified,
+  sendDiscordTyping,
+  discordRequest,
+  requireDiscordBotToken,
+  loadDiscordRuntimeModules,
+  loadWebRuntimeModules,
+});
 
-    const tokenRow = peekActivePairingToken(pairingToken);
-    if (!tokenRow) {
-      try {
-        const notice = renderPairingInvalidNotice("discord");
-        await sendDiscordPairingNotice({
-          channelId,
-          text: notice.text,
-        });
-      } catch (error) {
-        log({
-          type: "discord_pairing_invalid_notice_error",
-          tenantId: liveBinding?.tenantId,
-          bindingId: liveBinding?.bindingId,
-          messageId,
-          error: String(error),
-        });
-      }
-      log({
-        type: "discord_pairing_token_invalid",
-        tenantId: liveBinding?.tenantId,
-        bindingId: liveBinding?.bindingId,
-        messageId,
-        channelId,
-      });
-      return;
-    }
+const { handleRequest } = createHttpRouteHandler({
+  muxRegisterKey,
+  muxAdminToken,
+  telegramApiBaseUrl,
+  telegramBotUsername,
+  getTelegramPollConflictHealth: () => telegramPollConflictHealth,
+  runtimeJwtSigner,
+  sendJson,
+  readBody,
+  metrics,
+  log,
+  isRegisterAuthorized,
+  isAdminAuthorized,
+  resolveTenantIdentity,
+  buildReadinessReport,
+  renderMetricsPayload,
+  registerOpenClawInstance,
+  getWhatsAppCredentialHealth,
+  renderObservabilitySnapshot,
+  readNonEmptyString,
+  readPositiveInt,
+  upsertTenantInboundTargetByAdmin,
+  issuePairingTokenForTenant,
+  listPairingsForTenant,
+  claimPairingForTenant,
+  unbindPairingForTenant,
+  normalizeChannel,
+  runOutboundAction,
+  resolveTelegramFilePath,
+  requireTelegramBotToken,
+  inferMimeTypeFromPath,
+});
 
-    const claimed = claimDiscordPairingToken({
-      token: pairingToken,
-      route,
-      channelId,
-    });
-    if (!claimed) {
-      try {
-        const notice = renderPairingInvalidNotice("discord");
-        await sendDiscordPairingNotice({
-          channelId,
-          text: notice.text,
-        });
-      } catch (error) {
-        log({
-          type: "discord_pairing_notice_error",
-          tenantId: liveBinding?.tenantId,
-          bindingId: liveBinding?.bindingId,
-          messageId,
-          error: String(error),
-        });
-      }
-      return;
-    }
-    try {
-      await sendPostClaimNotices({
-        channel: "discord",
-        claimed,
-        send: async (notice) => {
-          await sendDiscordPairingNotice({
-            channelId,
-            text: notice.text,
-          });
-        },
-        fromId,
-        chatId: channelId,
-        chatType: route.kind === "dm" ? "direct" : "group",
-      });
-    } catch (error) {
-      log({
-        type: "discord_pairing_notice_error",
-        tenantId: claimed.tenantId,
-        bindingId: claimed.bindingId,
-        messageId,
-        error: String(error),
-      });
-    }
-    log({
-      type: "discord_pairing_token_claimed",
-      tenantId: claimed.tenantId,
-      bindingId: claimed.bindingId,
-      routeKey: claimed.routeKey,
-      sessionKey: claimed.sessionKey,
-      claimType: claimed.claimType,
-      ...(claimed.previousTenantId ? { previousTenantId: claimed.previousTenantId } : {}),
-      channelId,
-      messageId,
-    });
-    return;
-  }
-
-  if (pairingToken) {
-    const reClaimed = claimDiscordPairingToken({
-      token: pairingToken,
-      route,
-      channelId,
-    });
-    if (reClaimed) {
-      try {
-        await sendPostClaimNotices({
-          channel: "discord",
-          claimed: reClaimed,
-          send: async (notice) => {
-            await sendDiscordPairingNotice({
-              channelId,
-              text: notice.text,
-            });
-          },
-          fromId,
-          chatId: channelId,
-          chatType: route.kind === "dm" ? "direct" : "group",
-        });
-      } catch (error) {
-        log({
-          type: "discord_pairing_notice_error",
-          tenantId: reClaimed.tenantId,
-          bindingId: reClaimed.bindingId,
-          messageId,
-          error: String(error),
-        });
-      }
-      log({
-        type: "discord_pairing_token_claimed",
-        tenantId: reClaimed.tenantId,
-        bindingId: reClaimed.bindingId,
-        routeKey: reClaimed.routeKey,
-        sessionKey: reClaimed.sessionKey,
-        claimType: reClaimed.claimType,
-        ...(reClaimed.previousTenantId ? { previousTenantId: reClaimed.previousTenantId } : {}),
-        channelId,
-        messageId,
-      });
-    } else {
-      log({
-        type: "discord_pairing_token_ignored_bound_route",
-        tenantId: liveBinding.tenantId,
-        bindingId: liveBinding.bindingId,
-        routeKey: liveBinding.routeKey,
-        messageId,
-      });
-    }
-    return;
-  }
-
-  const forwardParams = {
-    tenantId: liveBinding.tenantId,
-    bindingId: liveBinding.bindingId,
-    routeKey: incomingRouteKey,
-    route,
-    channelId,
-    message,
-    messageId,
-    fromId,
-    body,
-  };
-  try {
-    await forwardDiscordMessageToTenant(forwardParams);
-  } catch (error) {
-    log({
-      type: "discord_inbound_forward_failed",
-      tenantId: liveBinding.tenantId,
-      messageId,
-      error: errorString(error),
-    });
-    const tid = liveBinding.tenantId;
-    const pending = discordBgRetryCount.get(tid) ?? 0;
-    if (pending < DISCORD_BG_RETRY_MAX_PER_TENANT) {
-      metrics.recordRetryScheduled("discord");
-      if (pending <= 0) {
-        discordBgRetryQueuedAtMs.set(tid, Date.now());
-      }
-      discordBgRetryCount.set(tid, pending + 1);
-      void (async () => {
-        try {
-          for (let attempt = 1; attempt <= DISCORD_BG_RETRY_ATTEMPTS; attempt++) {
-            await new Promise((r) => setTimeout(r, DISCORD_BG_RETRY_INTERVAL_MS * attempt));
-            try {
-              await forwardDiscordMessageToTenant(forwardParams);
-              log({ type: "discord_inbound_bg_retry_ok", messageId, attempt, tenantId: tid });
-              return;
-            } catch {
-              if (attempt === DISCORD_BG_RETRY_ATTEMPTS) {
-                log({ type: "discord_inbound_bg_retry_exhausted", messageId, tenantId: tid });
-              }
-            }
+const { handleOutboundSendRequest } = createOutboundRequestHandler({
+  idempotencyTtlMs,
+  idempotencyInflight,
+  stmtDeleteExpiredIdempotency,
+  stmtSelectCachedIdempotency: {
+    get: (tenantId, idempotencyKey, now) =>
+      stmtSelectCachedIdempotency.get(tenantId, idempotencyKey, now) as
+        | {
+            request_fingerprint: string;
+            response_status: number;
+            response_body: string;
           }
-        } finally {
-          const nextPending = (discordBgRetryCount.get(tid) ?? 1) - 1;
-          if (nextPending <= 0) {
-            discordBgRetryCount.delete(tid);
-            discordBgRetryQueuedAtMs.delete(tid);
-          } else {
-            discordBgRetryCount.set(tid, nextPending);
-          }
-        }
-      })();
-    } else {
-      log({ type: "discord_inbound_bg_retry_skipped_cap", messageId, tenantId: tid, pending });
-    }
-  }
-}
-
-async function runDiscordGatewayDmSession(): Promise<void> {
-  const gatewayUrl = await fetchDiscordGatewayUrl();
-  const token = requireDiscordBotToken();
-  discordGatewayReady = false;
-  discordRuntimeHealth.gatewayLastError = null;
-  discordRuntimeHealth.gatewayLastErrorAtMs = null;
-  const intents =
-    Number.isFinite(discordGatewayIntents) && discordGatewayIntents > 0
-      ? Math.trunc(discordGatewayIntents)
-      : discordGatewayDefaultIntents;
-
-  await new Promise<void>((resolve) => {
-    let seq: number | null = null;
-    let heartbeatTimer: NodeJS.Timeout | null = null;
-    let settled = false;
-    const ws = new WebSocket(gatewayUrl);
-
-    const clearHeartbeat = () => {
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
-      }
-    };
-    const finish = () => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      discordGatewayReady = false;
-      clearHeartbeat();
-      resolve();
-    };
-    const sendHeartbeat = () => {
-      if (ws.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      try {
-        ws.send(JSON.stringify({ op: 1, d: seq }));
-      } catch (error) {
-        log({
-          type: "discord_gateway_dm_heartbeat_error",
-          error: String(error),
-        });
-      }
-    };
-
-    ws.on("open", () => {
-      log({
-        type: "discord_gateway_dm_open",
-        intents,
-      });
-    });
-
-    ws.on("message", (raw) => {
-      const frame = parseDiscordGatewayPayload(raw);
-      if (!frame) {
-        return;
-      }
-
-      const op = Number(frame.op);
-      if (Number.isFinite(Number(frame.s))) {
-        seq = Math.trunc(Number(frame.s));
-      }
-
-      if (op === 10) {
-        const hello = asRecord(frame.d);
-        const heartbeatIntervalMs = readPositiveInt(hello?.heartbeat_interval) ?? 45_000;
-        clearHeartbeat();
-        heartbeatTimer = setInterval(sendHeartbeat, heartbeatIntervalMs);
-        sendHeartbeat();
-        ws.send(
-          JSON.stringify({
-            op: 2,
-            d: {
-              token,
-              intents,
-              properties: {
-                os: process.platform,
-                browser: "openclaw-mux",
-                device: "openclaw-mux",
-              },
-            },
-          }),
-        );
-        return;
-      }
-
-      if (op === 1) {
-        sendHeartbeat();
-        return;
-      }
-
-      if (op === 7 || op === 9) {
-        ws.close(4_000, op === 7 ? "gateway_reconnect" : "gateway_invalid_session");
-        return;
-      }
-
-      if (op !== 0) {
-        return;
-      }
-
-      const eventType = typeof frame.t === "string" ? frame.t : "";
-      if (eventType === "READY") {
-        const ready = asRecord(frame.d);
-        discordGatewayReady = true;
-        discordRuntimeHealth.gatewayReadyAtMs = Date.now();
-        const readyUser = asRecord(ready?.user);
-        const selfId = readNonEmptyString(readyUser?.id);
-        if (selfId) {
-          discordBotSelfId = selfId;
-        }
-        log({
-          type: "discord_gateway_dm_ready",
-          sessionId: readNonEmptyString(ready?.session_id) ?? null,
-          botSelfId: discordBotSelfId,
-        });
-        return;
-      }
-      if (eventType !== "MESSAGE_CREATE") {
-        return;
-      }
-
-      const eventData = asRecord(frame.d);
-      if (!eventData) {
-        return;
-      }
-      discordRuntimeHealth.lastInboundSeenAtMs = Date.now();
-      void handleDiscordGatewayMessage(eventData).catch((error) => {
-        log({
-          type: "discord_gateway_dm_event_error",
-          error: String(error),
-        });
-      });
-    });
-
-    ws.on("error", (error) => {
-      discordRuntimeHealth.gatewayLastErrorAtMs = Date.now();
-      discordRuntimeHealth.gatewayLastError = errorString(error);
-      log({
-        type: "discord_gateway_dm_socket_error",
-        error: String(error),
-      });
-    });
-
-    ws.on("close", (code, reason) => {
-      discordRuntimeHealth.gatewayLastCloseAtMs = Date.now();
-      log({
-        type: "discord_gateway_dm_close",
-        code,
-        reason: reason.toString(),
-      });
-      finish();
-    });
-  });
-}
-
-async function runDiscordGatewayDmLoop() {
-  if (!discordInboundEnabled || (!discordGatewayDmEnabled && !discordGatewayGuildEnabled)) {
-    return;
-  }
-  discordRuntimeHealth.gatewayLoopStartedAtMs = Date.now();
-
-  let running = true;
-  process.on("SIGINT", () => {
-    running = false;
-  });
-  process.on("SIGTERM", () => {
-    running = false;
-  });
-
-  const reconnectInitial = Math.max(100, Math.trunc(discordGatewayReconnectInitialMs));
-  const reconnectMax = Math.max(reconnectInitial, Math.trunc(discordGatewayReconnectMaxMs));
-  let reconnectMs = reconnectInitial;
-
-  while (running) {
-    const startedAt = Date.now();
-    try {
-      await runDiscordGatewayDmSession();
-    } catch (error) {
-      discordRuntimeHealth.gatewayLastErrorAtMs = Date.now();
-      discordRuntimeHealth.gatewayLastError = errorString(error);
-      log({
-        type: "discord_gateway_dm_loop_error",
-        error: String(error),
-      });
-    }
-    if (!running) {
-      break;
-    }
-
-    const lifetimeMs = Date.now() - startedAt;
-    reconnectMs = lifetimeMs >= 60_000 ? reconnectInitial : Math.min(reconnectMs * 2, reconnectMax);
-    await new Promise((resolveSleep) => setTimeout(resolveSleep, reconnectMs));
-  }
-}
-
-function parseQueuedWhatsAppInboundMessage(row: WhatsAppInboundQueueRow): WebInboundMessage | null {
-  try {
-    const parsed = JSON.parse(row.payload_json) as unknown;
-    if (!parsed || typeof parsed !== "object") {
-      return null;
-    }
-    return snapshotWhatsAppInboundMessage(parsed as WebInboundMessage);
-  } catch {
-    return null;
-  }
-}
-
-async function processWhatsAppInboundQueuePass(): Promise<void> {
-  const now = Date.now();
-  const batchSize = Math.max(1, Math.min(100, Math.trunc(whatsappQueueBatchSize)));
-  const rows = stmtSelectDueWhatsAppInboundQueue.all(now, batchSize) as WhatsAppInboundQueueRow[];
-  for (const row of rows) {
-    const message = parseQueuedWhatsAppInboundMessage(row);
-    if (!message) {
-      stmtDeleteWhatsAppInboundQueueById.run(row.id);
-      log({
-        type: "whatsapp_inbound_queue_drop_invalid_payload",
-        queueId: row.id,
-        dedupeKey: row.dedupe_key,
-      });
-      continue;
-    }
-
-    try {
-      await forwardWhatsAppInboundMessage(message);
-      stmtDeleteWhatsAppInboundQueueById.run(row.id);
-      log({
-        type: "whatsapp_inbound_ack_committed",
-        queueId: row.id,
-        dedupeKey: row.dedupe_key,
-        messageId: message.id ?? null,
-      });
-    } catch (error) {
-      const failure = classifyWhatsAppInboundDeliveryError(error, errorString);
-      const maxAgeMs = Math.max(1_000, Math.trunc(whatsappQueueMaxAgeMs));
-      const retryState = resolveWhatsAppInboundQueueRetryState({
-        row,
-        now,
-        maxAgeMs,
-        failure,
-      });
-      if (retryState.exhausted) {
-        stmtDeleteWhatsAppInboundQueueById.run(row.id);
-        metrics.recordInboundEvent("whatsapp", "dropped");
-        log({
-          type: "whatsapp_inbound_bg_retry_exhausted",
-          queueId: row.id,
-          dedupeKey: row.dedupe_key,
-          messageId: message.id ?? null,
-          attemptCount: retryState.attemptCount,
-          ageMs: retryState.ageMs,
-          maxAgeMs,
-          retryable: failure.retryable,
-          statusCode: failure.statusCode,
-          error: failure.errorMessage,
-        });
-        continue;
-      }
-
-      const retryDelayMs = computeWhatsAppQueueRetryDelayMs(retryState.attemptCount);
-      const nextAttemptAtMs = Date.now() + retryDelayMs;
-      stmtDeferWhatsAppInboundQueueById.run(
-        nextAttemptAtMs,
-        retryState.attemptCount,
-        failure.errorMessage.slice(0, 2_000),
-        Date.now(),
-        retryState.deliveryWindowStartedAtMs,
-        retryState.lastTargetUpdateAtMs,
-        row.id,
+        | undefined,
+  },
+  stmtUpsertIdempotency: {
+    run: (
+      tenantId,
+      idempotencyKey,
+      fingerprint,
+      statusCode,
+      bodyText,
+      expiresAtMs,
+      createdAtMs,
+    ) => {
+      stmtUpsertIdempotency.run(
+        tenantId,
+        idempotencyKey,
+        fingerprint,
+        statusCode,
+        bodyText,
+        expiresAtMs,
+        createdAtMs,
       );
-      log({
-        type: "whatsapp_inbound_retry_deferred",
-        queueId: row.id,
-        dedupeKey: row.dedupe_key,
-        messageId: message.id ?? null,
-        attemptCount: retryState.attemptCount,
-        retryDelayMs,
-        nextAttemptAtMs,
-        error: failure.errorMessage,
-      });
-    }
-  }
-}
-
-async function runWhatsAppInboundQueueLoop(shouldContinue: () => boolean): Promise<void> {
-  const pollMs = Math.max(100, Math.trunc(whatsappQueuePollMs));
-  while (shouldContinue()) {
-    try {
-      await processWhatsAppInboundQueuePass();
-    } catch (error) {
-      log({
-        type: "whatsapp_inbound_queue_poll_error",
-        error: String(error),
-      });
-    }
-    await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
-  }
-}
-
-async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
-  const chatJid = readNonEmptyString(message.chatId) ?? readNonEmptyString(message.from);
-  if (!chatJid) {
-    return;
-  }
-  const accountId = readNonEmptyString(message.accountId) ?? whatsappAccountId;
-  const chatType = message.chatType === "group" ? "group" : "direct";
-  const directPeerId =
-    chatType === "direct"
-      ? (readNonEmptyString(message.senderE164) ?? readNonEmptyString(message.from) ?? undefined)
-      : undefined;
-  const body = typeof message.body === "string" ? message.body : "";
-  const binding = resolveWhatsAppBindingForIncoming({
-    chatJid,
-    accountId,
-  });
-  const botControlCommand = parseBotControlCommand(body);
-  if (botControlCommand) {
-    try {
-      const fromId =
-        readNonEmptyString(message.senderE164) ?? readNonEmptyString(message.from) ?? chatJid;
-      await handleWhatsAppBotControlCommand({
-        command: botControlCommand,
-        chatJid,
-        accountId,
-        chatType,
-        fromId,
-        directPeerId,
-        binding,
-      });
-    } catch (error) {
-      log({
-        type: "whatsapp_bot_control_error",
-        chatJid,
-        accountId,
-        error: String(error),
-      });
-    }
-    return;
-  }
-  const pairingToken = extractPairingTokenFromWhatsAppMessage(message);
-
-  if (!binding) {
-    if (!pairingToken) {
-      const shouldSendUnpairedNotice =
-        isWhatsAppCommandText(body) ||
-        (chatType === "direct" && hasWhatsAppMessageContent(message));
-      if (shouldSendUnpairedNotice) {
-        try {
-          const notice = renderUnpairedHintNotice("whatsapp");
-          await sendWhatsAppPairingNotice({
-            chatJid,
-            accountId,
-            text: notice.text,
-          });
-        } catch (error) {
-          log({
-            type: "whatsapp_unpaired_command_notice_error",
-            chatJid,
-            error: String(error),
-          });
-        }
-      }
-      return;
-    }
-
-    const claimed = claimWhatsAppPairingToken({
-      token: pairingToken,
-      chatJid,
-      accountId,
-      chatType,
-      directPeerId,
-    });
-    if (!claimed) {
-      try {
-        const notice = renderPairingInvalidNotice("whatsapp");
-        await sendWhatsAppPairingNotice({
-          chatJid,
-          accountId,
-          text: notice.text,
-        });
-      } catch (error) {
-        log({
-          type: "whatsapp_pairing_invalid_notice_error",
-          chatJid,
-          error: String(error),
-        });
-      }
-      log({
-        type: "whatsapp_pairing_token_invalid",
-        chatJid,
-        accountId,
-      });
-      return;
-    }
-
-    try {
-      await sendPostClaimNotices({
-        channel: "whatsapp",
-        claimed,
-        send: async (notice) => {
-          await sendWhatsAppPairingNotice({
-            chatJid,
-            accountId,
-            text: notice.text,
-          });
-        },
-        fromId: message.from || chatJid,
-        chatId: chatJid,
-        chatType,
-      });
-    } catch (error) {
-      log({
-        type: "whatsapp_pairing_notice_error",
-        tenantId: claimed.tenantId,
-        chatJid,
-        error: String(error),
-      });
-    }
-    log({
-      type: "whatsapp_pairing_token_claimed",
-      tenantId: claimed.tenantId,
-      routeKey: claimed.routeKey,
-      sessionKey: claimed.sessionKey,
-      claimType: claimed.claimType,
-      ...(claimed.previousTenantId ? { previousTenantId: claimed.previousTenantId } : {}),
-      accountId,
-      chatJid,
-    });
-    return;
-  }
-
-  if (pairingToken) {
-    const reClaimed = claimWhatsAppPairingToken({
-      token: pairingToken,
-      chatJid,
-      accountId,
-      chatType,
-      directPeerId,
-    });
-    if (reClaimed) {
-      try {
-        await sendPostClaimNotices({
-          channel: "whatsapp",
-          claimed: reClaimed,
-          send: async (notice) => {
-            await sendWhatsAppPairingNotice({
-              chatJid,
-              accountId,
-              text: notice.text,
-            });
-          },
-          fromId: message.from || chatJid,
-          chatId: chatJid,
-          chatType,
-        });
-      } catch (error) {
-        log({
-          type: "whatsapp_pairing_notice_error",
-          tenantId: reClaimed.tenantId,
-          chatJid,
-          error: String(error),
-        });
-      }
-      log({
-        type: "whatsapp_pairing_token_claimed",
-        tenantId: reClaimed.tenantId,
-        routeKey: reClaimed.routeKey,
-        sessionKey: reClaimed.sessionKey,
-        claimType: reClaimed.claimType,
-        ...(reClaimed.previousTenantId ? { previousTenantId: reClaimed.previousTenantId } : {}),
-        accountId,
-        chatJid,
-      });
-    } else {
-      log({
-        type: "whatsapp_pairing_token_ignored_bound_route",
-        tenantId: binding.tenantId,
-        routeKey: binding.routeKey,
-        accountId,
-        chatJid,
-      });
-    }
-    return;
-  }
-
-  const messageId = readNonEmptyString(message.id) ?? `wa:${Date.now()}:${randomUUID()}`;
-  const traceId = createInboundTraceId({
-    channel: "whatsapp",
-    tenantId: binding.tenantId,
-    routeKey: binding.routeKey,
-    messageId,
-  });
-
-  const target = resolveTenantInboundTarget(binding.tenantId);
-  if (!target) {
-    metrics.recordInboundEvent("whatsapp", "error");
-    log({
-      type: "whatsapp_inbound_deferred_no_target",
-      tenantId: binding.tenantId,
-      routeKey: binding.routeKey,
-      accountId,
-      chatJid,
-      traceId,
-    });
-    throw new WhatsAppInboundDeliveryError(
-      `whatsapp inbound target missing for tenant ${binding.tenantId}`,
-      {
-        retryable: true,
-        targetUpdatedAtMs: null,
-      },
-    );
-  }
-
-  const inboundMedia = await extractWhatsAppInboundMedia({ message });
-  if (!body && inboundMedia.attachments.length === 0) {
-    return;
-  }
-
-  const fromId =
-    readNonEmptyString(message.senderE164) ??
-    readNonEmptyString(message.senderJid) ??
-    readNonEmptyString(message.from) ??
-    "unknown";
-  metrics.recordActiveUser("whatsapp", fromId);
-  const timestampMs =
-    typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
-      ? Math.trunc(message.timestamp)
-      : Date.now();
-  const existingRoute = stmtSelectSessionKeyByBinding.get(
-    binding.tenantId,
-    "whatsapp",
-    binding.bindingId,
-  ) as { session_key?: unknown } | undefined;
-  const sessionKey =
-    (typeof existingRoute?.session_key === "string" && existingRoute.session_key.trim()) ||
-    deriveWhatsAppSessionKey({
-      chatJid,
-      chatType,
-      directPeerId,
-    });
-  stmtUpsertSessionRoute.run(
-    binding.tenantId,
-    "whatsapp",
-    sessionKey,
-    binding.bindingId,
-    JSON.stringify({ routeKey: binding.routeKey, accountId, chatJid }),
-    Date.now(),
-  );
-
-  const payload = buildWhatsAppInboundEnvelope({
-    messageId,
-    sessionKey,
-    openclawAccountId: openclawMuxAccountId,
-    rawBody: body,
-    fromId,
-    chatJid,
-    routeKey: binding.routeKey,
-    accountId,
-    chatType,
-    timestampMs,
-    rawMessage: {
-      id: message.id,
-      from: message.from,
-      to: message.to,
-      body: message.body,
-      accountId: message.accountId,
-      timestamp: message.timestamp,
-      chatType: message.chatType,
-      chatId: message.chatId,
-      senderJid: message.senderJid,
-      senderE164: message.senderE164,
-      senderName: message.senderName,
-      replyToId: message.replyToId,
-      replyToBody: message.replyToBody,
-      replyToSender: message.replyToSender,
-      replyToSenderJid: message.replyToSenderJid,
-      replyToSenderE164: message.replyToSenderE164,
-      groupSubject: message.groupSubject,
-      groupParticipants: message.groupParticipants,
-      mentionedJids: message.mentionedJids,
-      mediaPath: message.mediaPath,
-      mediaType: message.mediaType,
-      mediaUrl: message.mediaUrl,
     },
-    media: inboundMedia.media,
-    attachments: inboundMedia.attachments,
-  });
-  const payloadWithIdentity = {
-    ...payload,
-    openclawId: binding.tenantId,
-  };
-
-  const forwardStartedAtMs = Date.now();
-  let response: Response;
-  try {
-    response = await fetch(target.url, {
-      method: "POST",
-      headers: {
-        ...(await buildInboundAuthHeaders(target, traceId)),
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify(payloadWithIdentity),
-      signal: AbortSignal.timeout(target.timeoutMs),
-    });
-  } catch (error) {
-    metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
-    metrics.recordInboundEvent("whatsapp", "error");
-    throw new WhatsAppInboundDeliveryError(errorString(error), {
-      retryable: true,
-      targetUpdatedAtMs: target.updatedAtMs,
-      cause: error,
-    });
-  }
-  if (!response.ok) {
-    metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
-    metrics.recordInboundEvent("whatsapp", "error");
-    const bodyText = await response.text();
-    throw new WhatsAppInboundDeliveryError(
-      `openclaw inbound failed (${response.status}): ${bodyText || "no body"}`,
-      {
-        retryable: isRetryableWhatsAppInboundStatus(response.status),
-        statusCode: response.status,
-        targetUpdatedAtMs: target.updatedAtMs,
-      },
-    );
-  }
-  metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
-  metrics.recordInboundEvent("whatsapp", "forwarded");
-
-  log({
-    type: "whatsapp_inbound_forwarded",
-    tenantId: binding.tenantId,
-    sessionKey,
-    messageId,
-    accountId,
-    chatJid,
-    traceId,
-  });
-}
-
-async function runWhatsAppInboundLoop() {
-  if (!whatsappInboundEnabled) {
-    return;
-  }
-
-  const { monitorWebInbox, setActiveWebListener } = await loadWebRuntimeModules();
-  whatsappRuntimeHealth.loopStartedAtMs = Date.now();
-  let running = true;
-  process.on("SIGINT", () => {
-    running = false;
-    whatsappRuntimeHealth.listenerActive = false;
-    void activeWhatsAppListener?.close?.();
-  });
-  process.on("SIGTERM", () => {
-    running = false;
-    whatsappRuntimeHealth.listenerActive = false;
-    void activeWhatsAppListener?.close?.();
-  });
-
-  const queueLoopPromise = runWhatsAppInboundQueueLoop(() => running);
-
-  while (running) {
-    let listener: WebMonitorListener | null = null;
-    try {
-      whatsappRuntimeHealth.lastListenerStartAtMs = Date.now();
-      const monitored = await monitorWebInbox({
-        verbose: false,
-        accountId: whatsappAccountId,
-        authDir: whatsappAuthDir,
-        // Mux owns pairing and tenant routing. Keep inbox transport raw here
-        // while still dropping outbound fromMe echoes to avoid loops.
-        resolveAccessControl: async (params) => {
-          const isSamePhone = params.from === params.selfE164;
-          const isOutboundEcho = params.isFromMe && !isSamePhone;
-          return {
-            allowed: !isOutboundEcho,
-            shouldMarkRead: true,
-            isSelfChat: false,
-            resolvedAccountId: params.accountId,
-          };
-        },
-        onMessage: async (message) => {
-          whatsappRuntimeHealth.lastInboundSeenAtMs = Date.now();
-          enqueueWhatsAppInboundMessage(message);
-        },
-      });
-      listener = monitored;
-      activeWhatsAppListener = monitored;
-      whatsappRuntimeHealth.listenerActive = true;
-      whatsappRuntimeHealth.lastListenerError = null;
-      whatsappRuntimeHealth.lastListenerErrorAtMs = null;
-      setActiveWebListener(whatsappAccountId, monitored);
-      const closeReason = await monitored.onClose;
-      whatsappRuntimeHealth.lastListenerCloseAtMs = Date.now();
-      whatsappRuntimeHealth.lastListenerCloseStatus =
-        typeof closeReason.status === "number" && Number.isFinite(closeReason.status)
-          ? Math.trunc(closeReason.status)
-          : null;
-      whatsappRuntimeHealth.lastListenerClosedLoggedOut = Boolean(closeReason.isLoggedOut);
-      const listenerError =
-        closeReason.error instanceof Error
-          ? closeReason.error.message
-          : typeof closeReason.error === "string"
-            ? closeReason.error
-            : undefined;
-      if (closeReason.error != null) {
-        whatsappRuntimeHealth.lastListenerErrorAtMs = Date.now();
-        whatsappRuntimeHealth.lastListenerError = listenerError ?? "unknown listener error";
-      }
-      log({
-        type: "whatsapp_inbound_listener_closed",
-        status: closeReason.status,
-        isLoggedOut: closeReason.isLoggedOut,
-        error: listenerError,
-      });
-      if (closeReason.isLoggedOut) {
-        running = false;
-      }
-    } catch (error) {
-      whatsappRuntimeHealth.lastListenerErrorAtMs = Date.now();
-      whatsappRuntimeHealth.lastListenerError = errorString(error);
-      whatsappRuntimeHealth.listenerActive = false;
-      log({
-        type: "whatsapp_inbound_listener_error",
-        error: errorString(error),
-      });
-    } finally {
-      if (listener) {
-        try {
-          await listener.close();
-        } catch (error) {
-          log({
-            type: "whatsapp_inbound_listener_close_error",
-            error: String(error),
-          });
-        }
-      }
-      activeWhatsAppListener = null;
-      whatsappRuntimeHealth.listenerActive = false;
-      setActiveWebListener(whatsappAccountId, null);
-    }
-
-    if (!running) {
-      break;
-    }
-    await new Promise((resolveSleep) =>
-      setTimeout(resolveSleep, Math.max(100, Math.trunc(whatsappInboundRetryMs))),
-    );
-  }
-
-  await queueLoopPromise;
-}
-
-async function runTelegramInboundLoop() {
-  if (!telegramInboundEnabled) {
-    return;
-  }
-  telegramRuntimeHealth.loopStartedAtMs = Date.now();
-
-  try {
-    await bootstrapTelegramOffsetIfNeeded();
-    clearTelegramPollConflictHealth();
-  } catch (error) {
-    updateTelegramPollConflictHealth(error);
-    telegramRuntimeHealth.lastPollErrorAtMs = Date.now();
-    telegramRuntimeHealth.lastPollError = errorString(error);
-    log({ type: "telegram_inbound_bootstrap_error", error: String(error) });
-  }
-
-  // Background retry config: cap concurrent retries per tenant to prevent snowball
-  // when a tenant stays offline. Each retry slot does up to TELEGRAM_BG_RETRY_ATTEMPTS
-  // with linear backoff (30s, 60s, 90s...).
-  const TELEGRAM_BG_RETRY_MAX_PER_TENANT = 3;
-  const TELEGRAM_BG_RETRY_ATTEMPTS = 5;
-  const TELEGRAM_BG_RETRY_INTERVAL_MS = Math.max(
-    100,
-    Number(process.env.MUX_TELEGRAM_BG_RETRY_INTERVAL_MS) || 30_000,
-  );
-  telegramBgRetryCount.clear();
-  telegramBgRetryQueuedAtMs.clear();
-
-  let running = true;
-  process.on("SIGINT", () => {
-    running = false;
-  });
-  process.on("SIGTERM", () => {
-    running = false;
-  });
-
-  while (running) {
-    try {
-      const offset = resolveStoredTelegramOffset() + 1;
-      const updates = await fetchTelegramUpdates(offset);
-      clearTelegramPollConflictHealth();
-      telegramRuntimeHealth.lastPollSuccessAtMs = Date.now();
-      telegramRuntimeHealth.lastPollErrorAtMs = null;
-      telegramRuntimeHealth.lastPollError = null;
-      for (const update of updates) {
-        const updateId =
-          typeof update.update_id === "number" && Number.isFinite(update.update_id)
-            ? Math.trunc(update.update_id)
-            : 0;
-        if (updateId <= 0) {
-          continue;
-        }
-        telegramRuntimeHealth.lastInboundSeenAtMs = Date.now();
-        try {
-          await forwardTelegramUpdateToTenant(update);
-        } catch (error) {
-          // Never block the poller — log and fire-and-forget background retries.
-          // Cap concurrent retries per tenant to avoid snowballing.
-          log({
-            type: "telegram_inbound_forward_failed",
-            updateId,
-            error: errorString(error),
-          });
-          const tenantId = resolveTenantIdForTelegramUpdate(update);
-          if (tenantId) {
-            const pending = telegramBgRetryCount.get(tenantId) ?? 0;
-            if (pending < TELEGRAM_BG_RETRY_MAX_PER_TENANT) {
-              metrics.recordRetryScheduled("telegram");
-              if (pending <= 0) {
-                telegramBgRetryQueuedAtMs.set(tenantId, Date.now());
-              }
-              telegramBgRetryCount.set(tenantId, pending + 1);
-              const capturedUpdate = update;
-              const capturedId = updateId;
-              void (async () => {
-                try {
-                  for (let attempt = 1; attempt <= TELEGRAM_BG_RETRY_ATTEMPTS; attempt++) {
-                    await new Promise((r) =>
-                      setTimeout(r, TELEGRAM_BG_RETRY_INTERVAL_MS * attempt),
-                    );
-                    try {
-                      await forwardTelegramUpdateToTenant(capturedUpdate);
-                      log({
-                        type: "telegram_inbound_bg_retry_ok",
-                        updateId: capturedId,
-                        attempt,
-                        tenantId,
-                      });
-                      return;
-                    } catch {
-                      if (attempt === TELEGRAM_BG_RETRY_ATTEMPTS) {
-                        log({
-                          type: "telegram_inbound_bg_retry_exhausted",
-                          updateId: capturedId,
-                          tenantId,
-                        });
-                      }
-                    }
-                  }
-                } finally {
-                  const nextPending = (telegramBgRetryCount.get(tenantId) ?? 1) - 1;
-                  if (nextPending <= 0) {
-                    telegramBgRetryCount.delete(tenantId);
-                    telegramBgRetryQueuedAtMs.delete(tenantId);
-                  } else {
-                    telegramBgRetryCount.set(tenantId, nextPending);
-                  }
-                }
-              })();
-            } else {
-              log({ type: "telegram_inbound_bg_retry_skipped_cap", updateId, tenantId, pending });
-            }
-          }
-        }
-        storeTelegramOffset(updateId);
-        // Avoid blocking the tight polling loop on sync IO (tests depend on quick follow-up polls).
-        queueMicrotask(() => log({ type: "telegram_inbound_ack_committed", updateId }));
-      }
-    } catch (error) {
-      updateTelegramPollConflictHealth(error);
-      telegramRuntimeHealth.lastPollErrorAtMs = Date.now();
-      telegramRuntimeHealth.lastPollError = errorString(error);
-      log({ type: "telegram_inbound_poll_error", error: String(error) });
-      await new Promise((resolveSleep) =>
-        setTimeout(resolveSleep, Math.max(100, Math.trunc(telegramPollRetryMs))),
-      );
-    }
-  }
-}
+  },
+  readBody,
+  sendJson,
+  normalizeChannel,
+  metrics,
+  log,
+  runOutboundSend,
+});
 
 const server = http.createServer(async (req, res) => {
   try {
     const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
-    const pathname = requestUrl.pathname;
-
-    if (pathname === "/health") {
-      const telegramInboundHealth = telegramPollConflictHealth
-        ? {
-            status: "degraded",
-            code: "poll_conflict",
-            message: "Telegram getUpdates returned 409; another poller is using this bot token.",
-            lastConflictAtMs: telegramPollConflictHealth.lastConflictAtMs,
-            lastError: telegramPollConflictHealth.lastError,
-          }
-        : undefined;
-      sendJson(res, 200, {
-        ok: true,
-        ...(telegramBotUsername ? { telegramBotUsername } : {}),
-        ...(telegramInboundHealth ? { telegramInbound: telegramInboundHealth } : {}),
-      });
+    const handled = await handleRequest({ req, res, requestUrl });
+    if (handled.handled) {
       return;
     }
-
-    if (req.method === "GET" && pathname === "/health/live") {
-      sendJson(res, 200, { ok: true, live: true, ts: Date.now() });
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/health/ready") {
-      const readiness = buildReadinessReport(Date.now());
-      sendJson(res, readiness.ready ? 200 : 503, {
-        ok: readiness.ready,
-        ready: readiness.ready,
-        channels: readiness.channels,
-        queues: readiness.queues,
-        degraded: readiness.degraded,
-      });
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/metrics") {
-      const body = await renderMetricsPayload();
-      res.writeHead(200, {
-        "content-type": "text/plain; version=0.0.4; charset=utf-8",
-      });
-      res.end(body);
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/.well-known/jwks.json") {
-      sendJson(res, 200, runtimeJwtSigner.jwks());
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/instances/register") {
-      if (!muxRegisterKey) {
-        sendJson(res, 404, { ok: false, error: "not found" });
-        return;
-      }
-      if (!isRegisterAuthorized(req)) {
-        metrics.recordAuthFailure("register");
-        log({ type: "auth_unauthorized", surface: "register" });
-        sendJson(res, 401, { ok: false, error: "unauthorized" });
-        return;
-      }
-      const body = await readBody<Record<string, unknown>>(req);
-      const result = await registerOpenClawInstance({
-        openclawId: body.openclawId,
-        inboundUrl: body.inboundUrl,
-        inboundTimeoutMs: body.inboundTimeoutMs,
-      });
-      sendJson(res, result.statusCode, result.payload);
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/v1/admin/info") {
-      if (!muxAdminToken) {
-        sendJson(res, 404, { ok: false, error: "not found" });
-        return;
-      }
-      if (!isAdminAuthorized(req)) {
-        metrics.recordAuthFailure("admin");
-        log({ type: "auth_unauthorized", surface: "admin" });
-        sendJson(res, 401, { ok: false, error: "unauthorized" });
-        return;
-      }
-      const readiness = buildReadinessReport(Date.now());
-      sendJson(res, 200, {
-        ok: true,
-        ...(telegramBotUsername ? { telegramBotUsername } : {}),
-        channels: readiness.channels,
-        ready: readiness.ready,
-        degraded: readiness.degraded,
-      });
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/v1/admin/whatsapp/health") {
-      if (!muxAdminToken) {
-        sendJson(res, 404, { ok: false, error: "not found" });
-        return;
-      }
-      if (!isAdminAuthorized(req)) {
-        metrics.recordAuthFailure("admin");
-        log({ type: "auth_unauthorized", surface: "admin" });
-        sendJson(res, 401, { ok: false, error: "unauthorized" });
-        return;
-      }
-      sendJson(res, 200, { ok: true, whatsapp: getWhatsAppCredentialHealth() });
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/v1/admin/observability/snapshot") {
-      if (!muxAdminToken) {
-        sendJson(res, 404, { ok: false, error: "not found" });
-        return;
-      }
-      if (!isAdminAuthorized(req)) {
-        metrics.recordAuthFailure("admin");
-        log({ type: "auth_unauthorized", surface: "admin" });
-        sendJson(res, 401, { ok: false, error: "unauthorized" });
-        return;
-      }
-      const tenantId = readNonEmptyString(requestUrl.searchParams.get("tenantId"));
-      const snapshot = renderObservabilitySnapshot({
-        tenantId: tenantId ?? undefined,
-      });
-      sendJson(res, 200, { ok: true, ...snapshot });
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/admin/pairings/token") {
-      if (!muxAdminToken) {
-        sendJson(res, 404, { ok: false, error: "not found" });
-        return;
-      }
-      if (!isAdminAuthorized(req)) {
-        metrics.recordAuthFailure("admin");
-        log({ type: "auth_unauthorized", surface: "admin" });
-        sendJson(res, 401, { ok: false, error: "unauthorized" });
-        return;
-      }
-      const body = await readBody<Record<string, unknown>>(req);
-      const openclawId = readNonEmptyString(body.openclawId);
-      if (!openclawId) {
-        sendJson(res, 400, { ok: false, error: "openclawId required" });
-        return;
-      }
-      const sessionKey = readNonEmptyString(body.sessionKey) ?? undefined;
-      const ttlSec = readPositiveInt(body.ttlSec);
-
-      const inboundUrl = readNonEmptyString(body.inboundUrl);
-      const inboundTimeoutMs = readPositiveInt(body.inboundTimeoutMs);
-      if (inboundUrl) {
-        const now = Date.now();
-        const syntheticApiKey = `instance:${openclawId}`;
-        try {
-          stmtUpsertTenantInboundTargetByAdmin.run(
-            openclawId,
-            openclawId,
-            hashApiKey(syntheticApiKey),
-            inboundUrl,
-            inboundTimeoutMs ?? 15_000,
-            now,
-            now,
-          );
-        } catch (error) {
-          if (String(error).includes("UNIQUE constraint failed: tenants.api_key_hash")) {
-            sendJson(res, 409, { ok: false, error: "instance id conflict" });
-            return;
-          }
-          throw error;
-        }
-      }
-
-      const result = issuePairingTokenForTenant({
-        tenant: {
-          id: openclawId,
-          name: openclawId,
-          authToken: muxAdminToken,
-          authKind: "admin",
-        },
-        sessionKey,
-        ttlSec,
-      });
-      sendJson(res, result.statusCode, result.payload);
-      return;
-    }
-
-    const tenant = await resolveTenantIdentity(req);
-    if (!tenant) {
-      metrics.recordAuthFailure("tenant");
-      log({ type: "auth_unauthorized", surface: "tenant" });
-      sendJson(res, 401, { ok: false, error: "unauthorized" });
-      return;
-    }
-
-    if (req.method === "GET" && pathname === "/v1/pairings") {
-      const result = listPairingsForTenant(tenant);
-      sendJson(res, result.statusCode, result.payload);
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/pairings/claim") {
-      const body = await readBody<Record<string, unknown>>(req);
-      const code = readNonEmptyString(body.code);
-      if (!code) {
-        sendJson(res, 400, { ok: false, error: "code required" });
-        return;
-      }
-      const sessionKey = readNonEmptyString(body.sessionKey) ?? undefined;
-      const result = claimPairingForTenant(tenant, code, sessionKey);
-      sendJson(res, result.statusCode, result.payload);
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/pairings/unbind") {
-      const body = await readBody<Record<string, unknown>>(req);
-      const bindingId = readNonEmptyString(body.bindingId);
-      if (!bindingId) {
-        sendJson(res, 400, { ok: false, error: "bindingId required" });
-        return;
-      }
-      const result = unbindPairingForTenant(tenant, bindingId);
-      sendJson(res, result.statusCode, result.payload);
-      return;
-    }
-
-    if (req.method === "POST" && pathname === "/v1/mux/outbound/typing") {
-      const body = await readBody<Record<string, unknown>>(req);
-      const channel = normalizeChannel(body.channel);
-      const sessionKey = readNonEmptyString(body.sessionKey);
-      const payloadOpenClawId = readNonEmptyString(body.openclawId);
-      if (!channel) {
-        sendJson(res, 400, { ok: false, error: "channel required" });
-        return;
-      }
-      if (!sessionKey) {
-        sendJson(res, 400, { ok: false, error: "sessionKey required" });
-        return;
-      }
-      if (tenant.authKind === "runtime-jwt") {
-        if (!payloadOpenClawId || payloadOpenClawId !== tenant.id) {
-          metrics.recordAuthFailure("tenant");
-          log({ type: "auth_unauthorized", surface: "tenant", reason: "openclaw_id_mismatch" });
-          sendJson(res, 401, { ok: false, error: "openclawId mismatch" });
-          return;
-        }
-      }
-      const typingStartedAtMs = Date.now();
-      const typingResult = await runOutboundAction({
-        tenant,
-        channel,
-        sessionKey,
-        action: "typing",
-      });
-      metrics.recordOutboundRequest({
-        channel,
-        method: "typing",
-        statusCode: typingResult.statusCode,
-        durationMs: Date.now() - typingStartedAtMs,
-      });
-      res.writeHead(typingResult.statusCode, { "content-type": "application/json; charset=utf-8" });
-      res.end(typingResult.bodyText);
-      return;
-    }
-
-    if (req.method === "GET" && pathname.startsWith("/v1/mux/files/")) {
-      const channel = pathname.slice("/v1/mux/files/".length).toLowerCase();
-      if (channel === "telegram") {
-        const fileId = requestUrl.searchParams.get("fileId");
-        if (!fileId) {
-          sendJson(res, 400, { ok: false, error: "fileId query param required" });
-          return;
-        }
-        try {
-          const filePath = await resolveTelegramFilePath(fileId);
-          if (!filePath) {
-            sendJson(res, 404, { ok: false, error: "file not found" });
-            return;
-          }
-          const token = requireTelegramBotToken();
-          const normalizedPath = filePath.replace(/^\/+/, "");
-          const upstream = await fetch(`${telegramApiBaseUrl}/file/bot${token}/${normalizedPath}`);
-          if (!upstream.ok || !upstream.body) {
-            sendJson(res, 502, { ok: false, error: "upstream fetch failed" });
-            return;
-          }
-          const mime =
-            inferMimeTypeFromPath(filePath) ||
-            upstream.headers.get("content-type") ||
-            "application/octet-stream";
-          const fileName = path.basename(filePath);
-          res.writeHead(200, {
-            "content-type": mime,
-            "content-disposition": `inline; filename="${fileName}"`,
-            ...(upstream.headers.get("content-length")
-              ? { "content-length": upstream.headers.get("content-length")! }
-              : {}),
-          });
-          const reader = upstream.body.getReader();
-          const pump = async () => {
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) {
-                break;
-              }
-              res.write(value);
-            }
-            res.end();
-          };
-          await pump();
-        } catch (error) {
-          if (!res.headersSent) {
-            sendJson(res, 500, { ok: false, error: String(error) });
-          }
-        }
-        return;
-      }
-      if (channel === "whatsapp") {
-        const filePath = requestUrl.searchParams.get("path");
-        if (!filePath) {
-          sendJson(res, 400, { ok: false, error: "path query param required" });
-          return;
-        }
-        const resolved = path.resolve(filePath);
-        try {
-          const stat = fs.statSync(resolved);
-          if (!stat.isFile()) {
-            sendJson(res, 404, { ok: false, error: "not a file" });
-            return;
-          }
-          const mime = inferMimeTypeFromPath(resolved) || "application/octet-stream";
-          const fileName = path.basename(resolved);
-          res.writeHead(200, {
-            "content-type": mime,
-            "content-disposition": `inline; filename="${fileName}"`,
-            "content-length": String(stat.size),
-          });
-          const stream = fs.createReadStream(resolved);
-          stream.pipe(res);
-        } catch (error) {
-          log({ type: "whatsapp_file_proxy_error", filePath: resolved, error: String(error) });
-          if (!res.headersSent) {
-            sendJson(res, 404, { ok: false, error: "file not found" });
-          }
-        }
-        return;
-      }
-      sendJson(res, 400, { ok: false, error: `unsupported channel: ${channel}` });
-      return;
-    }
-
-    if (req.method !== "POST" || pathname !== "/v1/mux/outbound/send") {
-      sendJson(res, 404, { ok: false, error: "not found" });
-      return;
-    }
-
-    const payload = await readBody<MuxPayload>(req);
-    const idempotencyKey =
-      typeof req.headers["idempotency-key"] === "string"
-        ? req.headers["idempotency-key"]
-        : undefined;
-    const fingerprint = JSON.stringify(payload);
-
-    const now = Date.now();
-    purgeExpiredIdempotency(now);
-    if (idempotencyKey) {
-      const cached = loadCachedIdempotency({
-        tenantId: tenant.id,
-        idempotencyKey,
-        fingerprint,
-        now,
-      });
-      if (cached === "mismatch") {
-        sendJson(res, 409, {
-          ok: false,
-          error: "idempotency key reused with different payload",
-        });
-        return;
-      }
-      if (cached) {
-        log({
-          type: "idempotency_hit_cached",
-          tenantId: tenant.id,
-          idempotencyKey,
-          status: cached.statusCode,
-        });
-        res.writeHead(cached.statusCode, { "content-type": "application/json; charset=utf-8" });
-        res.end(cached.bodyText);
-        return;
-      }
-
-      const inflightKey = resolveInflightKey(tenant.id, idempotencyKey);
-      const inflight = idempotencyInflight.get(inflightKey);
-      if (inflight) {
-        if (inflight.fingerprint !== fingerprint) {
-          sendJson(res, 409, {
-            ok: false,
-            error: "idempotency key reused with different payload",
-          });
-          return;
-        }
-        const result = await inflight.promise;
-        log({
-          type: "idempotency_hit_inflight",
-          tenantId: tenant.id,
-          idempotencyKey,
-          status: result.statusCode,
-        });
-        res.writeHead(result.statusCode, { "content-type": "application/json; charset=utf-8" });
-        res.end(result.bodyText);
-        return;
-      }
-    }
-
-    const runSend = async (): Promise<SendResult> => {
-      log({
-        type: "outbound_request",
-        tenantId: tenant.id,
-        tenantName: tenant.name,
-        idempotencyKey,
-        payload,
-      });
-
-      const channel = normalizeChannel(payload.channel);
-      const sessionKey = readNonEmptyString(payload.sessionKey);
-      const operation = readOutboundOperation(payload);
-      const rawOutbound = readOutboundRaw(payload);
-      const { text, hasText } = readOutboundText(payload);
-      const mediaUrls = collectOutboundMediaUrls(payload);
-      const requestedThreadId = readPositiveInt(payload.threadId);
-      const requestedDiscordThreadId = readUnsignedNumericString(payload.threadId);
-      const payloadOpenClawId = readNonEmptyString(payload.openclawId);
-
-      if (tenant.authKind === "runtime-jwt") {
-        if (!payloadOpenClawId || payloadOpenClawId !== tenant.id) {
-          metrics.recordAuthFailure("tenant");
-          log({ type: "auth_unauthorized", surface: "tenant", reason: "openclaw_id_mismatch" });
-          return {
-            statusCode: 401,
-            bodyText: JSON.stringify({
-              ok: false,
-              error: "openclawId mismatch",
-            }),
-          };
-        }
-      }
-
-      if (!channel) {
-        return {
-          statusCode: 400,
-          bodyText: JSON.stringify({ ok: false, error: "channel required" }),
-        };
-      }
-      if (!sessionKey) {
-        return {
-          statusCode: 400,
-          bodyText: JSON.stringify({ ok: false, error: "sessionKey required" }),
-        };
-      }
-      if (operation.op === "action") {
-        return await runOutboundAction({
-          tenant,
-          channel,
-          sessionKey,
-          action: operation.action,
-          requestedTo: payload.to,
-          requestedThreadId,
-          requestedDiscordThreadId,
-          accountId: readNonEmptyString(payload.accountId),
-          mode: outboundResolutionMode,
-        });
-      }
-      if (!hasText && mediaUrls.length === 0 && !rawOutbound) {
-        return {
-          statusCode: 400,
-          bodyText: JSON.stringify({ ok: false, error: "text or mediaUrl(s) required" }),
-        };
-      }
-      if (channel === "telegram") {
-        const telegramRaw = asRecord(rawOutbound?.telegram);
-        const telegramRawMethod = readNonEmptyString(telegramRaw?.method);
-        const telegramRawBody = asRecord(telegramRaw?.body);
-        const resolvedRoute = resolveTelegramBoundRoute({
-          tenantId: tenant.id,
-          channel,
-          sessionKey,
-          mode: outboundResolutionMode,
-          routeKeys: listTelegramOutboundRouteKeys({
-            requestedTo: payload.to,
-            rawBody: telegramRawBody ?? undefined,
-            requestedThreadId,
-          }),
-        });
-        if (!resolvedRoute) {
-          return {
-            statusCode: 403,
-            bodyText: JSON.stringify({
-              ok: false,
-              error: "route not bound",
-              code: "ROUTE_NOT_BOUND",
-            }),
-          };
-        }
-        metrics.recordOutboundRouteResolution({
-          channel: "telegram",
-          mode: outboundResolutionMode,
-          via: resolvedRoute.via,
-        });
-        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
-          log({
-            type: "outbound_route_fallback",
-            tenantId: tenant.id,
-            channel,
-            sessionKey,
-            routeKey: resolvedRoute.routeKey,
-          });
-        }
-
-        const boundRoute = resolvedRoute.route;
-        const to = boundRoute.chatId;
-        const messageThreadId = boundRoute.topicId ?? requestedThreadId;
-        const isGeneralForumTopic =
-          boundRoute.topicId === TELEGRAM_GENERAL_TOPIC_ID && to.startsWith("-");
-        if (telegramRawMethod && telegramRawBody) {
-          const telegramMethod = ALLOWED_TELEGRAM_METHODS.has(telegramRawMethod)
-            ? telegramRawMethod
-            : null;
-          if (!telegramMethod) {
-            return {
-              statusCode: 400,
-              bodyText: JSON.stringify({
-                ok: false,
-                error: "unsupported telegram raw method",
-              }),
-            };
-          }
-          // Methods that don't target a specific chat
-          const NO_CHAT_ID_METHODS = new Set([
-            "answerCallbackQuery",
-            "setMyCommands",
-            "deleteMyCommands",
-          ]);
-
-          // Methods that support message_thread_id (forum topics)
-          const THREAD_ID_METHODS = new Set([
-            "sendMessage",
-            "sendPhoto",
-            "sendDocument",
-            "sendAnimation",
-            "sendVideo",
-            "sendVideoNote",
-            "sendVoice",
-            "sendAudio",
-            "sendSticker",
-            "sendPoll",
-            "sendChatAction",
-            "createForumTopic",
-          ]);
-
-          const finalBody: Record<string, unknown> = { ...telegramRawBody };
-          if (!NO_CHAT_ID_METHODS.has(telegramMethod)) {
-            finalBody.chat_id = to;
-            if (THREAD_ID_METHODS.has(telegramMethod)) {
-              if (boundRoute.topicId) {
-                if (isGeneralForumTopic && telegramMethod !== "sendChatAction") {
-                  delete finalBody.message_thread_id;
-                } else {
-                  finalBody.message_thread_id = boundRoute.topicId;
-                }
-              } else if (messageThreadId && !readPositiveInt(finalBody.message_thread_id)) {
-                finalBody.message_thread_id = messageThreadId;
-              }
-            }
-          }
-          const { response, result } = await sendTelegramWithFallbacks({
-            method: telegramMethod,
-            body: finalBody,
-          });
-          if (!response.ok || result.ok !== true) {
-            // Telegram returns 400 "message is not modified" when an editMessageText
-            // call produces the same rendered text.  The direct bot path (grammY)
-            // silently swallows this — treat it as success here so the mux path
-            // behaves identically (keeps the preview message instead of deleting it).
-            if (!isTelegramMessageNotModified(telegramMethod, result)) {
-              return {
-                statusCode: 502,
-                bodyText: JSON.stringify({
-                  ok: false,
-                  error: "telegram raw send failed",
-                  details: result,
-                }),
-              };
-            }
-          }
-          const resultData =
-            typeof result.result === "object" && result.result
-              ? (result.result as Record<string, unknown>)
-              : {};
-          const messageId =
-            typeof resultData.message_id === "number" || typeof resultData.message_id === "string"
-              ? String(resultData.message_id)
-              : typeof finalBody.message_id === "number" || typeof finalBody.message_id === "string"
-                ? String(finalBody.message_id)
-                : "unknown";
-          return {
-            statusCode: 200,
-            bodyText: JSON.stringify({
-              ok: true,
-              messageId,
-              providerMessageIds: [messageId],
-              rawPassthrough: true,
-              ...(telegramRawMethod === "createForumTopic" &&
-              typeof resultData.message_thread_id === "number"
-                ? {
-                    topicId: resultData.message_thread_id,
-                    name:
-                      typeof resultData.name === "string" && resultData.name.trim()
-                        ? resultData.name.trim()
-                        : undefined,
-                  }
-                : {}),
-            }),
-          };
-        }
-        return {
-          statusCode: 400,
-          bodyText: JSON.stringify({
-            ok: false,
-            error: "telegram outbound requires raw.telegram.method and raw.telegram.body",
-          }),
-        };
-      }
-
-      if (channel === "discord") {
-        const discordRaw = asRecord(rawOutbound?.discord);
-        const discordRawBody = asRecord(discordRaw?.body);
-        const discordRawSend = asRecord(discordRaw?.send);
-        const resolvedRoute = await resolveDiscordBoundRoute({
-          tenantId: tenant.id,
-          channel,
-          sessionKey,
-          mode: outboundResolutionMode,
-          routeKeys: await listDiscordOutboundRouteKeys({
-            requestedTo: payload.to,
-            requestedThreadId: requestedDiscordThreadId,
-          }),
-        });
-        if (!resolvedRoute) {
-          return {
-            statusCode: 403,
-            bodyText: JSON.stringify({
-              ok: false,
-              error: "route not bound",
-              code: "ROUTE_NOT_BOUND",
-            }),
-          };
-        }
-        metrics.recordOutboundRouteResolution({
-          channel: "discord",
-          mode: outboundResolutionMode,
-          via: resolvedRoute.via,
-        });
-        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
-          log({
-            type: "outbound_route_fallback",
-            tenantId: tenant.id,
-            channel,
-            sessionKey,
-            routeKey: resolvedRoute.routeKey,
-          });
-        }
-
-        const boundRoute = resolvedRoute.route;
-        if (!discordRawBody && !discordRawSend) {
-          return {
-            statusCode: 400,
-            bodyText: JSON.stringify({
-              ok: false,
-              error: "discord outbound requires raw.discord.body or raw.discord.send",
-            }),
-          };
-        }
-
-        const resolvedTarget = await resolveDiscordOutboundChannelId({
-          boundRoute,
-          requestedTo: payload.to,
-          requestedThreadId: requestedDiscordThreadId,
-        });
-        if (!resolvedTarget.ok) {
-          return {
-            statusCode: resolvedTarget.statusCode,
-            bodyText: JSON.stringify({ ok: false, error: resolvedTarget.error }),
-          };
-        }
-        if (discordRawBody) {
-          const { response, result } = await discordRequest({
-            method: "POST",
-            path: `/channels/${resolvedTarget.channelId}/messages`,
-            body: discordRawBody,
-          });
-          if (!response.ok) {
-            return {
-              statusCode: 502,
-              bodyText: JSON.stringify({
-                ok: false,
-                error: "discord raw send failed",
-                details: result,
-              }),
-            };
-          }
-          const messageId = readUnsignedNumericString(result.id) ?? "unknown";
-          const channelId =
-            readUnsignedNumericString(result.channel_id) ?? resolvedTarget.channelId;
-          return {
-            statusCode: 200,
-            bodyText: JSON.stringify({
-              ok: true,
-              messageId,
-              channelId,
-              providerMessageIds: [messageId],
-              rawPassthrough: true,
-            }),
-          };
-        }
-
-        const { sendMessageDiscord } = await loadDiscordRuntimeModules();
-        const outboundTarget = `channel:${resolvedTarget.channelId}`;
-        const sendText =
-          typeof discordRawSend?.text === "string"
-            ? discordRawSend.text
-            : typeof text === "string"
-              ? text
-              : "";
-        const sendMediaUrl =
-          readNonEmptyString(discordRawSend?.mediaUrl) ??
-          (mediaUrls.length > 0 ? mediaUrls[0] : undefined);
-        const sendReplyTo = readUnsignedNumericString(discordRawSend?.replyTo);
-        const discordToken = requireDiscordBotToken();
-        const discordRest = new RequestClient(discordToken, {
-          baseUrl: discordApiBaseUrl,
-          apiVersion: 10,
-        });
-        try {
-          const sent = await sendMessageDiscord(outboundTarget, sendText, {
-            token: discordToken,
-            rest: discordRest,
-            verbose: false,
-            ...(sendMediaUrl ? { mediaUrl: sendMediaUrl } : {}),
-            ...(sendReplyTo ? { replyTo: sendReplyTo } : {}),
-          });
-          const messageId = sent.messageId || "unknown";
-          const channelId = sent.channelId || resolvedTarget.channelId;
-          return {
-            statusCode: 200,
-            bodyText: JSON.stringify({
-              ok: true,
-              messageId,
-              channelId,
-              providerMessageIds: [messageId],
-              rawPassthrough: true,
-            }),
-          };
-        } catch (error) {
-          return {
-            statusCode: 502,
-            bodyText: JSON.stringify({
-              ok: false,
-              error: "discord send failed",
-              details: String(error),
-            }),
-          };
-        }
-      }
-
-      if (channel === "whatsapp") {
-        const whatsappRaw = asRecord(rawOutbound?.whatsapp);
-        const whatsappRawSend = asRecord(whatsappRaw?.send);
-        const resolvedRoute = resolveWhatsAppBoundRoute({
-          tenantId: tenant.id,
-          channel,
-          sessionKey,
-          mode: outboundResolutionMode,
-          routeKeys: listWhatsAppOutboundRouteKeys({
-            requestedTo: payload.to,
-            accountId: readNonEmptyString(payload.accountId),
-            rawSend: whatsappRawSend,
-          }),
-        });
-        if (!resolvedRoute) {
-          return {
-            statusCode: 403,
-            bodyText: JSON.stringify({
-              ok: false,
-              error: "route not bound",
-              code: "ROUTE_NOT_BOUND",
-            }),
-          };
-        }
-        metrics.recordOutboundRouteResolution({
-          channel: "whatsapp",
-          mode: outboundResolutionMode,
-          via: resolvedRoute.via,
-        });
-        if (resolvedRoute.via === "route" && outboundResolutionMode === "session-first") {
-          log({
-            type: "outbound_route_fallback",
-            tenantId: tenant.id,
-            channel,
-            sessionKey,
-            routeKey: resolvedRoute.routeKey,
-          });
-        }
-        const boundRoute = resolvedRoute.route;
-        const whatsappText =
-          typeof whatsappRawSend?.text === "string"
-            ? whatsappRawSend.text
-            : typeof text === "string"
-              ? text
-              : "";
-        const whatsappRawSingleMedia = readNonEmptyString(whatsappRawSend?.mediaUrl);
-        const whatsappRawMediaList =
-          Array.isArray(whatsappRawSend?.mediaUrls) && whatsappRawSend
-            ? (whatsappRawSend.mediaUrls as unknown[])
-                .filter((item) => typeof item === "string")
-                .map((item) => item.trim())
-                .filter((item) => item.length > 0)
-            : mediaUrls;
-        const whatsappMediaUrls = (() => {
-          const ordered = [
-            ...(whatsappRawSingleMedia ? [whatsappRawSingleMedia] : []),
-            ...whatsappRawMediaList,
-          ];
-          const seen = new Set<string>();
-          const deduped: string[] = [];
-          for (const media of ordered) {
-            if (seen.has(media)) {
-              continue;
-            }
-            seen.add(media);
-            deduped.push(media);
-          }
-          return deduped;
-        })();
-        if (!whatsappText.trim() && whatsappMediaUrls.length === 0) {
-          return {
-            statusCode: 400,
-            bodyText: JSON.stringify({
-              ok: false,
-              error: "whatsapp outbound requires text/media or raw.whatsapp.send",
-            }),
-          };
-        }
-        const whatsappGifPlayback = whatsappRawSend?.gifPlayback === true;
-
-        const providerMessageIds: string[] = [];
-        let firstMessageId = "unknown";
-        let firstToJid = boundRoute.chatJid;
-        try {
-          const { sendMessageWhatsApp } = await loadWebRuntimeModules();
-          if (whatsappMediaUrls.length === 0) {
-            const sent = await sendMessageWhatsApp(boundRoute.chatJid, whatsappText, {
-              verbose: false,
-              accountId: boundRoute.accountId,
-            });
-            firstMessageId = sent.messageId || "unknown";
-            firstToJid = sent.toJid || boundRoute.chatJid;
-            providerMessageIds.push(firstMessageId);
-          } else {
-            const first = await sendMessageWhatsApp(boundRoute.chatJid, whatsappText, {
-              verbose: false,
-              mediaUrl: whatsappMediaUrls[0],
-              ...(whatsappGifPlayback ? { gifPlayback: true } : {}),
-              accountId: boundRoute.accountId,
-            });
-            firstMessageId = first.messageId || "unknown";
-            firstToJid = first.toJid || boundRoute.chatJid;
-            providerMessageIds.push(firstMessageId);
-            for (const extraMediaUrl of whatsappMediaUrls.slice(1)) {
-              const extra = await sendMessageWhatsApp(boundRoute.chatJid, "", {
-                verbose: false,
-                mediaUrl: extraMediaUrl,
-                ...(whatsappGifPlayback ? { gifPlayback: true } : {}),
-                accountId: boundRoute.accountId,
-              });
-              providerMessageIds.push(extra.messageId || "unknown");
-            }
-          }
-        } catch (error) {
-          return {
-            statusCode: 502,
-            bodyText: JSON.stringify({
-              ok: false,
-              error: "whatsapp send failed",
-              details: String(error),
-            }),
-          };
-        }
-
-        return {
-          statusCode: 200,
-          bodyText: JSON.stringify({
-            ok: true,
-            messageId: firstMessageId,
-            toJid: firstToJid,
-            providerMessageIds,
-            rawPassthrough: Boolean(whatsappRawSend),
-          }),
-        };
-      }
-
-      return {
-        statusCode: 400,
-        bodyText: JSON.stringify({ ok: false, error: "unsupported channel" }),
-      };
-    };
-
-    const inflightKey = idempotencyKey ? resolveInflightKey(tenant.id, idempotencyKey) : undefined;
-    const outboundChannel = normalizeChannel(payload.channel);
-    const outboundOperation = readOutboundOperation(payload);
-    const outboundMethod =
-      outboundOperation.op === "action"
-        ? outboundOperation.action === "typing"
-          ? "typing"
-          : "action"
-        : "send";
-    const outboundStartedAtMs = Date.now();
-    const inflightEntry: InflightEntry = {
-      fingerprint,
-      promise: runSend().then((result) => {
-        metrics.recordOutboundRequest({
-          channel: outboundChannel,
-          method: outboundMethod,
-          statusCode: result.statusCode,
-          durationMs: Date.now() - outboundStartedAtMs,
-        });
-        return result;
-      }),
-    };
-    if (inflightKey) {
-      idempotencyInflight.set(inflightKey, inflightEntry);
-    }
-
-    const sendResult = await inflightEntry.promise;
-    if (inflightKey && idempotencyKey) {
-      idempotencyInflight.delete(inflightKey);
-      storeIdempotency({
-        tenantId: tenant.id,
-        idempotencyKey,
-        fingerprint,
-        result: sendResult,
-        now: Date.now(),
-      });
-    }
-
-    res.writeHead(sendResult.statusCode, { "content-type": "application/json; charset=utf-8" });
-    res.end(sendResult.bodyText);
+    await handleOutboundSendRequest({
+      req,
+      res,
+      tenant: handled.tenant,
+    });
   } catch (error) {
     if (error instanceof HttpBodyError) {
       sendJson(res, error.statusCode, { ok: false, error: error.message });
@@ -9298,104 +3440,47 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(port, host, async () => {
-  const tenantTargetCount = countActiveTenantInboundTargets();
-  log({
-    type: "relay_started",
-    host,
-    port,
-    dbPath,
-    openclawMuxAccountId,
-    tenantCount: tenantSeeds.length,
-    pairingCodeSeedCount: pairingCodeSeeds.length,
-  });
-  console.log(`mux server listening on http://${host}:${port}`);
-  if (whatsappInboundEnabled) {
-    log({
-      type: "whatsapp_inbound_started",
-      tenantTargetCount,
-      openclawAccountId: openclawMuxAccountId,
-      accountId: whatsappAccountId,
-      authDir: whatsappAuthDir,
-      retryMs: Math.max(100, Math.trunc(whatsappInboundRetryMs)),
-    });
-    void runWhatsAppInboundLoop().catch((error) => {
-      log({ type: "whatsapp_inbound_loop_fatal", error: String(error) });
-    });
-  }
-  if (telegramInboundEnabled) {
-    // Auto-resolve bot username via getMe if not provided via env.
-    if (!telegramBotUsername && telegramBotToken) {
-      try {
-        const getMeRes = await fetch(`https://api.telegram.org/bot${telegramBotToken}/getMe`, {
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (getMeRes.ok) {
-          const getMeData = (await getMeRes.json()) as {
-            result?: { username?: string };
-          };
-          const resolved = getMeData?.result?.username;
-          if (resolved) {
-            telegramBotUsername = resolved;
-          }
-        }
-      } catch {
-        // Best-effort — wasMentioned will stay false without it.
-      }
-    }
-    log({
-      type: "telegram_inbound_started",
-      tenantTargetCount,
-      openclawAccountId: openclawMuxAccountId,
-      pollTimeoutSec: Math.max(1, Math.trunc(telegramPollTimeoutSec)),
-      pollRetryMs: Math.max(100, Math.trunc(telegramPollRetryMs)),
-      bootstrapLatest: telegramBootstrapLatest,
-      botUsername: telegramBotUsername ?? null,
-    });
-    void runTelegramInboundLoop().catch((error) => {
-      log({ type: "telegram_inbound_loop_fatal", error: String(error) });
-    });
-  }
-  if (discordInboundEnabled) {
-    // Best-effort fetch of bot's own user ID for wasMentioned computation.
-    // The gateway READY event also sets this, but the polling path needs it too.
-    if (!discordBotSelfId) {
-      try {
-        const { response, result } = await discordRequest({
-          method: "GET",
-          path: "/users/@me",
-        });
-        if (response.ok) {
-          const selfId = readNonEmptyString(result.id);
-          if (selfId) {
-            discordBotSelfId = selfId;
-          }
-        }
-      } catch {
-        // Best-effort — wasMentioned will stay false without it.
-      }
-    }
-    log({
-      type: "discord_inbound_started",
-      tenantTargetCount,
-      openclawAccountId: openclawMuxAccountId,
-      pollIntervalMs: Math.max(200, Math.trunc(discordPollIntervalMs)),
-      bootstrapLatest: discordBootstrapLatest,
-      gatewayDmEnabled: discordGatewayDmEnabled,
-      gatewayGuildEnabled: discordGatewayGuildEnabled,
-      botSelfId: discordBotSelfId,
-      gatewayIntents:
-        Number.isFinite(discordGatewayIntents) && discordGatewayIntents > 0
-          ? Math.trunc(discordGatewayIntents)
-          : discordGatewayDefaultIntents,
-    });
-    void runDiscordInboundLoop().catch((error) => {
-      log({ type: "discord_inbound_loop_fatal", error: String(error) });
-    });
-    if (discordGatewayDmEnabled || discordGatewayGuildEnabled) {
-      void runDiscordGatewayDmLoop().catch((error) => {
-        log({ type: "discord_gateway_dm_loop_fatal", error: String(error) });
-      });
-    }
-  }
+export const { startMuxServerRuntime } = createRuntimeLauncher({
+  server,
+  host,
+  port,
+  dbPath,
+  openclawMuxAccountId,
+  tenantSeedCount: tenantSeeds.length,
+  pairingCodeSeedCount: pairingCodeSeeds.length,
+  countActiveTenantInboundTargets,
+  log,
+  whatsappInboundEnabled,
+  whatsappAccountId,
+  whatsappAuthDir,
+  whatsappInboundRetryMs,
+  runWhatsAppInboundLoop,
+  telegramInboundEnabled,
+  telegramBotToken,
+  getTelegramBotUsername: () => telegramBotUsername,
+  setTelegramBotUsername: (username) => {
+    telegramBotUsername = username;
+  },
+  telegramPollTimeoutSec,
+  telegramPollRetryMs,
+  telegramBootstrapLatest,
+  runTelegramInboundLoop,
+  discordInboundEnabled,
+  getDiscordBotSelfId: () => discordBotSelfId,
+  setDiscordBotSelfId: (botSelfId) => {
+    discordBotSelfId = botSelfId;
+  },
+  discordPollIntervalMs,
+  discordBootstrapLatest,
+  discordGatewayDmEnabled,
+  discordGatewayGuildEnabled,
+  discordGatewayIntents,
+  discordGatewayDefaultIntents,
+  discordRequest,
+  readNonEmptyString,
+  runDiscordInboundLoop,
+  runDiscordGatewayDmLoop,
 });
+
+const context = createMuxAppContext();
+await startMuxServer(context);
