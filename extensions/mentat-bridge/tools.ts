@@ -2,6 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { Type } from "@sinclair/typebox";
 import type { MentatClient } from "./client.js";
 import type { MentatBridgeConfig } from "./config.js";
+import { summarizeDiscordMessages, type DiscrawlDiscordHistoryBridge } from "./discord-history.js";
 import type { ActiveSessionTracker } from "./session-state.js";
 
 type PluginApi = {
@@ -27,6 +28,7 @@ export function registerMentatTools(
   _cfg: MentatBridgeConfig,
   activeSessionTracker: ActiveSessionTracker,
   indexedDir: string,
+  discordHistory?: DiscrawlDiscordHistoryBridge,
 ) {
   // 1. search_memory — unified search (replaces memory_recall + memory_search + memory_get)
   api.registerTool(
@@ -681,5 +683,262 @@ export function registerMentatTools(
       },
     },
     { name: "read_chat_history" },
+  );
+
+  // 10. search_discord_history — search discrawl-backed Discord archive
+  api.registerTool(
+    {
+      name: "search_discord_history",
+      label: "Search Discord History",
+      description:
+        "Search the connected Discord server history mirrored by discrawl and indexed into Mentat. This covers overall guild chat history, not just the current agent session.",
+      parameters: Type.Object({
+        query: Type.String({ description: "Natural language search query" }),
+        top_k: Type.Optional(Type.Number({ description: "Maximum results (default: 5)" })),
+        channel: Type.Optional(
+          Type.String({
+            description:
+              "Optional channel name/id hint; applied as a lightweight post-filter on search results",
+          }),
+        ),
+      }),
+      async execute(
+        _toolCallId: string,
+        params: { query: string; top_k?: number; channel?: string },
+      ) {
+        if (!discordHistory?.isAvailable()) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  discordHistory?.describeAvailability() ??
+                  "Discord history archive is not configured.",
+              },
+            ],
+            details: { error: "discord_history_unavailable" },
+          };
+        }
+        if (!client.isHealthy()) return unhealthyResult("search_discord_history");
+
+        const channelHint = params.channel?.trim().toLowerCase();
+        const rawResults = await client.search({
+          query: params.query,
+          top_k: Math.max(params.top_k ?? 5, 1),
+          collection: discordHistory.collectionName,
+          hybrid: true,
+        });
+        if (!rawResults || rawResults.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: "No matching Discord history found." }],
+            details: { count: 0 },
+          };
+        }
+
+        const filtered = channelHint
+          ? rawResults.filter((result) => {
+              const haystack =
+                `${result.filename ?? ""}\n${result.content ?? ""}\n${result.summary ?? ""}`.toLowerCase();
+              return haystack.includes(channelHint);
+            })
+          : rawResults;
+
+        if (filtered.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `No Discord history matched channel hint "${params.channel}".`,
+              },
+            ],
+            details: { count: 0 },
+          };
+        }
+
+        const text = filtered
+          .map((result, index) => {
+            const snippet = result.content ?? result.summary ?? "";
+            return `${index + 1}. ${result.filename} [score: ${result.score.toFixed(4)}]\n${snippet}`;
+          })
+          .join("\n\n");
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Found ${filtered.length} Discord history result(s):\n\n${text}`,
+            },
+          ],
+          details: { count: filtered.length, results: filtered },
+        };
+      },
+    },
+    { name: "search_discord_history" },
+  );
+
+  // 11. read_discord_history — read exact messages from discrawl SQLite
+  api.registerTool(
+    {
+      name: "read_discord_history",
+      label: "Read Discord History",
+      description:
+        "Read exact messages from the discrawl Discord archive by channel, author, or recent time window. Useful after search_discord_history when you need raw surrounding chat.",
+      parameters: Type.Object({
+        channel: Type.Optional(
+          Type.String({
+            description: "Channel id or name (for example 'test' or '1489512128640585728')",
+          }),
+        ),
+        author: Type.Optional(
+          Type.String({ description: "Optional author id or display name filter" }),
+        ),
+        last_n: Type.Optional(
+          Type.Number({ description: "Number of messages to return (default: 50, max: 200)" }),
+        ),
+        since: Type.Optional(
+          Type.String({ description: "RFC3339 timestamp lower bound, e.g. 2026-04-01T00:00:00Z" }),
+        ),
+        hours: Type.Optional(
+          Type.Number({ description: "Shortcut for messages from the last N hours" }),
+        ),
+        days: Type.Optional(
+          Type.Number({ description: "Shortcut for messages from the last N days" }),
+        ),
+      }),
+      async execute(
+        _toolCallId: string,
+        params: {
+          channel?: string;
+          author?: string;
+          last_n?: number;
+          since?: string;
+          hours?: number;
+          days?: number;
+        },
+      ) {
+        if (!discordHistory) {
+          return {
+            content: [
+              { type: "text" as const, text: "Discord history archive is not configured." },
+            ],
+            details: { error: "discord_history_unavailable" },
+          };
+        }
+
+        const result = await discordHistory.readHistory(params);
+        if (!result.available) {
+          return {
+            content: [
+              { type: "text" as const, text: result.error ?? "Discord history is unavailable." },
+            ],
+            details: { error: "discord_history_unavailable" },
+          };
+        }
+        if (!result.messages || result.messages.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: "No Discord messages matched that request." }],
+            details: { count: 0 },
+          };
+        }
+
+        return {
+          content: [{ type: "text" as const, text: summarizeDiscordMessages(result.messages) }],
+          details: {
+            count: result.messages.length,
+            total: result.total,
+            messages: result.messages,
+          },
+        };
+      },
+    },
+    { name: "read_discord_history" },
+  );
+
+  // 12. read_wiki_link — resolve a Mentat wiki URL and read its content
+  api.registerTool(
+    {
+      name: "read_wiki_link",
+      label: "Read Wiki Link",
+      description:
+        "Read content from a Mentat wiki URL the user pasted. Resolves the URL to the indexed source document and (optionally) the specific section, then returns the content. Accepts full URLs (http://localhost:7832/wiki/pages/<id>#section), path-only (/wiki/pages/<id>#section), or short form (<id>#section).",
+      parameters: Type.Object({
+        url: Type.String({ description: "Wiki URL or page id (with optional #section anchor)" }),
+      }),
+      async execute(_toolCallId: string, params: { url: string }) {
+        if (!client.isHealthy()) return unhealthyResult("read_wiki_link");
+
+        const resolved = await client.resolveWikiUrl(params.url);
+        if (!resolved) {
+          const wikiText = await client.fetchWikiText(params.url);
+          if (wikiText) {
+            return {
+              content: [{ type: "text" as const, text: wikiText }],
+              details: { mode: "wiki_html_fallback", url: params.url },
+            };
+          }
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Could not resolve wiki URL: ${params.url}`,
+              },
+            ],
+            details: { error: "resolve_failed" },
+          };
+        }
+
+        // If no section, fall back to doc meta + brief overview
+        if (!resolved.section_path) {
+          const meta = await client.getDocMeta(resolved.doc_id);
+          if (!meta) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Resolved to ${resolved.filename} (${resolved.doc_id}) but document metadata is unavailable.`,
+                },
+              ],
+              details: { resolved },
+            };
+          }
+          const tocList = (meta.toc_entries ?? []).map((e) => `  - ${e.title}`).join("\n");
+          const text = `Wiki page: ${meta.filename} (${resolved.doc_id})\n\n${meta.brief_intro ?? ""}\n\nSections:\n${tocList || "  (none)"}\n\nUse \`read_segment\` with a section name to read content.`;
+          return {
+            content: [{ type: "text" as const, text }],
+            details: { resolved, meta },
+          };
+        }
+
+        // Section specified — read it directly
+        const segment = await client.readSegment({
+          doc_id: resolved.doc_id,
+          section_path: resolved.section_path,
+        });
+
+        if (!segment) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Resolved to ${resolved.filename} > ${resolved.section_path}, but section read failed.`,
+              },
+            ],
+            details: { resolved, error: "read_segment_failed" },
+          };
+        }
+
+        const parts: string[] = [`Wiki: ${resolved.filename} > ${resolved.section_path}`, ""];
+        for (const chunk of segment.chunks) {
+          if (chunk.content) parts.push(chunk.content);
+        }
+        if (segment.note) parts.push(`\n_${segment.note}_`);
+
+        return {
+          content: [{ type: "text" as const, text: parts.join("\n") }],
+          details: { resolved, segment },
+        };
+      },
+    },
+    { name: "read_wiki_link" },
   );
 }

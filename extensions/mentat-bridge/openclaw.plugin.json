@@ -32,6 +32,22 @@
       "placeholder": "2000",
       "advanced": true,
       "help": "Files smaller than this are kept as-is"
+    },
+    "discordHistory": {
+      "label": "Enable Discord History",
+      "help": "Index discrawl's mirrored Discord archive into Mentat for agent search"
+    },
+    "discrawlDbPath": {
+      "label": "discrawl DB Path",
+      "placeholder": "~/.discrawl/discrawl.db",
+      "advanced": true,
+      "help": "Path to the discrawl SQLite database"
+    },
+    "discordHistoryExportDir": {
+      "label": "Discord Export Dir",
+      "placeholder": "~/.openclaw/mentat/discord-history",
+      "advanced": true,
+      "help": "Directory where mentat-bridge writes append-mode JSONL files for Mentat watcher"
     }
   },
   "configSchema": {
@@ -44,7 +60,11 @@
       "autoRecall": { "type": "boolean" },
       "autoCapture": { "type": "boolean" },
       "compressResults": { "type": "boolean" },
-      "compressThresholdTokens": { "type": "number", "minimum": 500, "maximum": 50000 }
+      "compressThresholdTokens": { "type": "number", "minimum": 500, "maximum": 50000 },
+      "chatHistory": { "type": "boolean" },
+      "discordHistory": { "type": "boolean" },
+      "discrawlDbPath": { "type": "string" },
+      "discordHistoryExportDir": { "type": "string" }
     }
   }
 }
