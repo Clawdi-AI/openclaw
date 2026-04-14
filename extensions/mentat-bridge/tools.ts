@@ -575,7 +575,7 @@ export function registerMentatTools(
 
         // Log result session_ids for debugging exclusion
         const resultSessionIds = results.map(
-          (r) => r.session_id ?? r.metadata?.session_id ?? "no-session-id",
+          (r) => (r.metadata?.session_id as string | undefined) ?? "no-session-id",
         );
         api.logger.info(
           `search_chat_history: ${rawResults.length} raw → ${results.length} after threshold, session_ids=${JSON.stringify(resultSessionIds)}, currentSessionId=${currentSessionId ?? "NULL"}`,

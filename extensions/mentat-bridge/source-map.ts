@@ -92,6 +92,47 @@ export function extractContentFromResult(result: unknown): string | null {
   return null;
 }
 
+/** Simple FNV-1a hash returning a hex string. */
+function fnv1aHex(str: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  return hash.toString(16);
+}
+
+/**
+ * Generate a stable filename for composio tool results.
+ * Uses resource ID params when available, falls back to param hash, then toolCallId.
+ */
+export function composioFilename(
+  toolName: string,
+  params: Record<string, unknown>,
+  toolCallId: string | undefined,
+): string {
+  const base = toolName.replace(/:/g, "_");
+
+  // Look for a param that represents a resource ID (e.g. message_id, id, fileId)
+  const idKey = Object.keys(params).find(
+    (k) => k === "id" || k.endsWith("_id") || k.endsWith("Id"),
+  );
+  if (idKey != null && params[idKey] != null) {
+    return `${base}-${String(params[idKey])}.md`;
+  }
+
+  // Hash scalar params for a stable name
+  const scalars = Object.entries(params)
+    .filter(([, v]) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (scalars.length > 0) {
+    return `${base}-${fnv1aHex(JSON.stringify(scalars))}.md`;
+  }
+
+  // Fallback to toolCallId
+  return `${base}-${toolCallId ?? "unknown"}.md`;
+}
+
 /** Convert a URL to a filename-safe string. */
 export function urlToFilename(url: string): string {
   try {
