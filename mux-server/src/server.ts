@@ -7,8 +7,6 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { RequestClient } from "@buape/carbon";
 import WebSocket from "ws";
-import { startMuxServer } from "./app/bootstrap.js";
-import { createMuxAppContext } from "./app/context.js";
 import { createRuntimeLauncher } from "./app/runtime-launcher.js";
 import { createAuthService, hashApiKey } from "./auth/service.js";
 import { createDiscordInboundRuntime } from "./channels/discord/inbound.js";
@@ -3482,5 +3480,4 @@ export const { startMuxServerRuntime } = createRuntimeLauncher({
   runDiscordGatewayDmLoop,
 });
 
-const context = createMuxAppContext();
-await startMuxServer(context);
+await startMuxServerRuntime();
