@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /** Map OpenClaw tool names to Mentat source tags for provenance tracking. */
 export function toolToSource(toolName: string): string {
   if (toolName === "WebFetch" || toolName === "web_fetch") return "web_fetch";
@@ -21,6 +23,48 @@ export function isWebFetchTool(toolName: string): boolean {
 
 export function isComposioTool(toolName: string): boolean {
   return toolName.startsWith("composio:");
+}
+
+function sanitizeFilenamePart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80);
+}
+
+function stableScalarParamHash(params: Record<string, unknown>): string | null {
+  const scalars = Object.entries(params)
+    .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  if (scalars.length === 0) return null;
+
+  const payload = JSON.stringify(Object.fromEntries(scalars));
+  return createHash("sha1").update(payload).digest("hex").slice(0, 10);
+}
+
+/**
+ * Build a stable filename for Composio tool outputs so repeated reads of the
+ * same resource dedupe cleanly in Mentat.
+ */
+export function composioFilename(
+  toolName: string,
+  params: Record<string, unknown>,
+  toolCallId?: string,
+): string {
+  const base = sanitizeFilenamePart(toolName.replace(/:/g, "_"));
+
+  for (const [key, value] of Object.entries(params)) {
+    if (
+      typeof value === "string" &&
+      value &&
+      (key === "id" || key.endsWith("_id") || /[a-z]Id$/.test(key))
+    ) {
+      return `${base}-${sanitizeFilenamePart(value)}.md`;
+    }
+  }
+
+  const hash = stableScalarParamHash(params);
+  if (hash) return `${base}-${hash}.md`;
+
+  return `${base}-${sanitizeFilenamePart(toolCallId ?? "unknown")}.md`;
 }
 
 /**

@@ -28,6 +28,10 @@ describe("config", () => {
     expect(cfg.autoCapture).toBe(false);
     expect(cfg.compressResults).toBe(true);
     expect(cfg.compressThresholdTokens).toBe(2000);
+    expect(cfg.chatHistory).toBe(true);
+    expect(cfg.discordHistory).toBe(false);
+    expect(cfg.discrawlDbPath).toContain(".discrawl/discrawl.db");
+    expect(cfg.discordHistoryExportDir).toContain(".openclaw/mentat/discord-history");
   });
 
   test("returns defaults for empty object", async () => {
@@ -44,11 +48,17 @@ describe("config", () => {
       enabled: false,
       autoCapture: true,
       compressThresholdTokens: 5000,
+      discordHistory: true,
+      discrawlDbPath: "/tmp/discrawl.db",
+      discordHistoryExportDir: "/tmp/discord-export",
     });
     expect(cfg.mentatUrl).toBe("http://mentat:9000");
     expect(cfg.enabled).toBe(false);
     expect(cfg.autoCapture).toBe(true);
     expect(cfg.compressThresholdTokens).toBe(5000);
+    expect(cfg.discordHistory).toBe(true);
+    expect(cfg.discrawlDbPath).toBe("/tmp/discrawl.db");
+    expect(cfg.discordHistoryExportDir).toBe("/tmp/discord-export");
   });
 
   test("resolves env vars in mentatUrl", async () => {
@@ -376,7 +386,7 @@ describe("prompt", () => {
     const { fetchSkillPrompt } = await import("./prompt.js");
     const mockClient = { getSkillPrompt: vi.fn(async () => null) };
     const result = await fetchSkillPrompt(mockClient as never);
-    expect(result).toContain("Memory System (Mentat)");
+    expect(result).toContain("Document Intelligence System (Mentat)");
     expect(result).toContain("search_memory");
   });
 
@@ -561,6 +571,44 @@ describe("MentatClient", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2); // health + skill (second call used cache)
   });
 
+  test("resolveWikiUrl sends GET to /wiki/resolve", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        doc_id: "doc-123",
+        section_path: "Setup",
+        filename: "guide.md",
+      }),
+    });
+    const { client } = await createClient();
+    await client.checkHealth();
+
+    const res = await client.resolveWikiUrl("/wiki/pages/abc12345#setup");
+    expect(res).toEqual({
+      doc_id: "doc-123",
+      section_path: "Setup",
+      filename: "guide.md",
+    });
+    const [url, opts] = fetchSpy.mock.calls[1];
+    expect(url).toBe("http://localhost:7832/wiki/resolve?url=%2Fwiki%2Fpages%2Fabc12345%23setup");
+    expect(opts.method).toBe("GET");
+  });
+
+  test("fetchWikiText normalizes relative wiki paths and strips HTML", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({
+      ok: true,
+      text: async () =>
+        "<html><body><nav>Nav</nav><h1>Topic</h1><p>Hello <strong>wiki</strong>.</p></body></html>",
+    });
+    const { client } = await createClient();
+    await client.checkHealth();
+
+    const text = await client.fetchWikiText("/wiki/topics/authentication");
+    expect(text).toContain("Topic");
+    expect(text).toContain("Hello wiki.");
+    expect(fetchSpy.mock.calls[1]?.[0]).toBe("http://localhost:7832/wiki/topics/authentication");
+  });
+
   test("listCollections handles wrapped { collections: [...] } response", async () => {
     fetchSpy
       .mockResolvedValueOnce({ ok: true }) // health
@@ -633,11 +681,14 @@ describe("MentatClient", () => {
 describe("tools", () => {
   function createMockClient(healthy = true) {
     return {
+      ensureStarted: vi.fn(async () => {}),
       isHealthy: vi.fn(() => healthy),
       search: vi.fn(),
       searchGrouped: vi.fn(),
       getDocMeta: vi.fn(),
       readSegment: vi.fn(),
+      resolveWikiUrl: vi.fn(),
+      fetchWikiText: vi.fn(),
       indexFile: vi.fn(),
       indexContent: vi.fn(),
       getStatus: vi.fn(),
@@ -677,6 +728,9 @@ describe("tools", () => {
       compressResults: true,
       compressThresholdTokens: 2000,
       chatHistory: true,
+      discordHistory: false,
+      discrawlDbPath: "/tmp/discrawl.db",
+      discordHistoryExportDir: "/tmp/discord-export",
     };
   }
 
@@ -696,10 +750,10 @@ describe("tools", () => {
     );
   }
 
-  test("registers 9 tools", async () => {
+  test("registers 12 tools", async () => {
     const { api, tools } = createMockApi();
     await callRegisterTools(api, createMockClient());
-    expect(tools).toHaveLength(9);
+    expect(tools).toHaveLength(12);
     const names = tools.map((t) => t.opts.name);
     expect(names).toContain("search_memory");
     expect(names).toContain("memory_store");
@@ -708,6 +762,9 @@ describe("tools", () => {
     expect(names).toContain("read_segment");
     expect(names).toContain("index_file");
     expect(names).toContain("memory_status");
+    expect(names).toContain("search_discord_history");
+    expect(names).toContain("read_discord_history");
+    expect(names).toContain("read_wiki_link");
   });
 
   test("all tools return unhealthyResult when server is down", async () => {
@@ -723,6 +780,7 @@ describe("tools", () => {
       "read_segment",
       "index_file",
       "memory_status",
+      "read_wiki_link",
     ]) {
       const result = (await getTool(name).execute("call-1", {
         query: "test",
@@ -730,6 +788,7 @@ describe("tools", () => {
         text: "t",
         section_path: "s",
         path: "/f",
+        url: "/wiki/pages/abc12345#setup",
       })) as { details: { error: string } };
       expect(result.details.error).toBe("mentat_unavailable");
     }
@@ -1005,6 +1064,60 @@ describe("tools", () => {
     expect(result.content[0].text).toContain("50%");
     expect(result.content[0].text).toContain("processing");
   });
+
+  test("read_wiki_link resolves a section and reads it via read_segment", async () => {
+    const client = createMockClient();
+    client.resolveWikiUrl.mockResolvedValue({
+      doc_id: "d1",
+      section_path: "Setup",
+      filename: "guide.md",
+    });
+    client.readSegment.mockResolvedValue({
+      doc_id: "d1",
+      filename: "guide.md",
+      section_path: "Setup",
+      chunks: [{ chunk_id: "c1", section: "Setup", content: "Run npm install" }],
+      toc_context: [{ level: 2, title: "Setup" }],
+      token_estimate: 12,
+      expanded: false,
+    });
+    const { api, getTool } = createMockApi();
+    await callRegisterTools(api, client);
+
+    const result = (await getTool("read_wiki_link").execute("c1", {
+      url: "/wiki/pages/abc12345#setup",
+    })) as {
+      content: Array<{ text: string }>;
+      details: { resolved: { doc_id: string } };
+    };
+
+    expect(client.resolveWikiUrl).toHaveBeenCalledWith("/wiki/pages/abc12345#setup");
+    expect(client.readSegment).toHaveBeenCalledWith({
+      doc_id: "d1",
+      section_path: "Setup",
+    });
+    expect(result.content[0].text).toContain("Run npm install");
+    expect(result.details.resolved.doc_id).toBe("d1");
+  });
+
+  test("read_wiki_link falls back to rendered wiki content for topic pages", async () => {
+    const client = createMockClient();
+    client.resolveWikiUrl.mockResolvedValue(null);
+    client.fetchWikiText.mockResolvedValue("Authentication\n\nVerified: 10/12");
+    const { api, getTool } = createMockApi();
+    await callRegisterTools(api, client);
+
+    const result = (await getTool("read_wiki_link").execute("c1", {
+      url: "/wiki/topics/authentication",
+    })) as {
+      content: Array<{ text: string }>;
+      details: { mode: string; url: string };
+    };
+
+    expect(client.fetchWikiText).toHaveBeenCalledWith("/wiki/topics/authentication");
+    expect(result.content[0].text).toContain("Authentication");
+    expect(result.details.mode).toBe("wiki_html_fallback");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1025,6 +1138,7 @@ describe("hooks", () => {
         logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(async () => {}),
         isHealthy: vi.fn(() => true),
         indexFileAsync: vi.fn(),
         getDocMeta: vi.fn(async () => ({ doc_id: "d1", filename: "test.ts" })),
@@ -1099,6 +1213,7 @@ describe("hooks", () => {
         logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(async () => {}),
         isHealthy: vi.fn(() => false),
         indexFileAsync: vi.fn(),
       };
@@ -1121,6 +1236,7 @@ describe("hooks", () => {
         logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(async () => {}),
         isHealthy: vi.fn(() => true),
         indexFileAsync: vi.fn(),
       };
@@ -1625,6 +1741,7 @@ describe("hooks", () => {
         logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(async () => {}),
         isHealthy: vi.fn(() => true),
         indexContent: vi.fn(async () => ({ doc_id: "c1", filename: "auto.md", status: "ok" })),
       };
@@ -1663,6 +1780,7 @@ describe("hooks", () => {
         logger: { info: vi.fn(), warn: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(async () => {}),
         isHealthy: vi.fn(() => true),
         indexContent: vi.fn(async () => ({ doc_id: "c1", filename: "auto.md", status: "ok" })),
       };
@@ -1697,7 +1815,11 @@ describe("hooks", () => {
         },
         logger: { info: vi.fn(), warn: vi.fn() },
       };
-      const client = { isHealthy: vi.fn(() => false), indexContent: vi.fn() };
+      const client = {
+        ensureStarted: vi.fn(async () => {}),
+        isHealthy: vi.fn(() => false),
+        indexContent: vi.fn(),
+      };
 
       registerAgentEndHook(api, client as never);
 
@@ -1718,7 +1840,11 @@ describe("hooks", () => {
         },
         logger: { info: vi.fn(), warn: vi.fn() },
       };
-      const client = { isHealthy: vi.fn(() => true), indexContent: vi.fn() };
+      const client = {
+        ensureStarted: vi.fn(async () => {}),
+        isHealthy: vi.fn(() => true),
+        indexContent: vi.fn(),
+      };
 
       registerAgentEndHook(api, client as never);
 
@@ -1739,7 +1865,11 @@ describe("hooks", () => {
         },
         logger: { info: vi.fn(), warn: vi.fn() },
       };
-      const client = { isHealthy: vi.fn(() => true), indexContent: vi.fn() };
+      const client = {
+        ensureStarted: vi.fn(async () => {}),
+        isHealthy: vi.fn(() => true),
+        indexContent: vi.fn(),
+      };
 
       registerAgentEndHook(api, client as never);
 
@@ -2122,6 +2252,9 @@ describe("read_chat_history tool", () => {
         compressResults: true,
         compressThresholdTokens: 2000,
         chatHistory: true,
+        discordHistory: false,
+        discrawlDbPath: "/tmp/discrawl.db",
+        discordHistoryExportDir: "/tmp/discord-export",
       },
       new ActiveSessionTracker(),
       tmpIndexed,
@@ -2170,6 +2303,9 @@ describe("read_chat_history tool", () => {
         compressResults: true,
         compressThresholdTokens: 2000,
         chatHistory: true,
+        discordHistory: false,
+        discrawlDbPath: "/tmp/discrawl.db",
+        discordHistoryExportDir: "/tmp/discord-export",
       },
       new ActiveSessionTracker(),
       "/tmp/nonexistent-indexed-dir",
@@ -2186,6 +2322,250 @@ describe("read_chat_history tool", () => {
 
     expect(result.details.error).toBe("not_found");
     expect(result.content[0].text).toContain("not found");
+  });
+});
+
+describe("discrawl discord history bridge", () => {
+  test("exports SQLite messages into append-only JSONL and can read them back", async () => {
+    const { mkdirSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { requireNodeSqlite } = await import("../../src/memory/sqlite.js");
+    const { DiscrawlDiscordHistoryBridge } = await import("./discord-history.js");
+
+    const root = join("/tmp", `mentat-discrawl-${Date.now()}`);
+    const dbPath = join(root, "discrawl.db");
+    const exportDir = join(root, "export");
+    mkdirSync(root, { recursive: true });
+
+    const { DatabaseSync } = requireNodeSqlite();
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      create table channels (
+        id text primary key,
+        guild_id text not null,
+        parent_id text,
+        kind text not null,
+        name text not null,
+        topic text,
+        position integer,
+        is_nsfw integer not null default 0,
+        is_archived integer not null default 0,
+        is_locked integer not null default 0,
+        is_private_thread integer not null default 0,
+        thread_parent_id text,
+        archive_timestamp text,
+        raw_json text,
+        updated_at text
+      );
+      create table members (
+        guild_id text not null,
+        user_id text not null,
+        username text not null,
+        global_name text,
+        display_name text,
+        nick text,
+        discriminator text,
+        avatar text,
+        bot integer not null default 0,
+        joined_at text,
+        role_ids_json text,
+        raw_json text,
+        updated_at text,
+        primary key (guild_id, user_id)
+      );
+      create table messages (
+        id text primary key,
+        guild_id text not null,
+        channel_id text not null,
+        author_id text,
+        message_type integer not null default 0,
+        created_at text not null,
+        edited_at text,
+        deleted_at text,
+        content text not null default '',
+        normalized_content text not null default '',
+        reply_to_message_id text,
+        pinned integer not null default 0,
+        has_attachments integer not null default 0,
+        raw_json text not null default '{}',
+        updated_at text
+      );
+    `);
+    db.prepare(
+      "insert into channels (id, guild_id, kind, name, raw_json, updated_at) values (?, ?, ?, ?, '{}', ?)",
+    ).run("c1", "g1", "text", "general", "2026-04-07T00:00:00Z");
+    db.prepare(
+      "insert into members (guild_id, user_id, username, display_name, role_ids_json, raw_json, updated_at) values (?, ?, ?, ?, '[]', '{}', ?)",
+    ).run("g1", "u1", "alice", "Alice", "2026-04-07T00:00:00Z");
+    db.prepare(
+      "insert into messages (id, guild_id, channel_id, author_id, created_at, content, normalized_content, raw_json, updated_at) values (?, ?, ?, ?, ?, ?, ?, '{}', ?)",
+    ).run(
+      "m1",
+      "g1",
+      "c1",
+      "u1",
+      "2026-04-07T01:00:00Z",
+      "Need to ship the Discord bridge",
+      "Need to ship the Discord bridge",
+      "2026-04-07T01:00:00Z",
+    );
+    db.close();
+
+    const bridge = new DiscrawlDiscordHistoryBridge(
+      {
+        enabled: true,
+        dbPath,
+        exportDir,
+      },
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+    );
+
+    const sync = await bridge.syncNow();
+    expect(sync.messages).toBe(1);
+
+    const exported = await import("node:fs/promises").then((fs) =>
+      fs.readFile(join(exportDir, "guild-g1", "channel-c1-general.jsonl"), "utf8"),
+    );
+    expect(exported).toContain("Need to ship the Discord bridge");
+    expect(exported).toContain('"channel_name":"general"');
+
+    const read = await bridge.readHistory({ channel: "general", last_n: 10 });
+    expect(read.available).toBe(true);
+    expect(read.messages).toHaveLength(1);
+    expect(read.messages?.[0].authorName).toBe("Alice");
+    expect(read.messages?.[0].content).toContain("Discord bridge");
+
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("discord history tools", () => {
+  test("search_discord_history queries mentat discord_history collection", async () => {
+    const { registerMentatTools } = await import("./tools.js");
+    const { ActiveSessionTracker } = await import("./session-state.js");
+
+    const tools: { tool: unknown; opts: { name: string } }[] = [];
+    const api = {
+      registerTool: (tool: unknown, opts: unknown) => {
+        tools.push({ tool: tool as never, opts: opts as { name: string } });
+      },
+      logger: { info: vi.fn(), warn: vi.fn() },
+    };
+    const client = {
+      isHealthy: vi.fn(() => true),
+      search: vi.fn(async () => [
+        {
+          doc_id: "doc-1",
+          filename: "guild-g1/channel-c1-general.jsonl@0",
+          content: "[2026-04-07T01:00:00Z] #general Alice: Need to ship the Discord bridge",
+          score: 0.12,
+        },
+      ]),
+    };
+    const discordHistory = {
+      collectionName: "discord_history",
+      isAvailable: () => true,
+      describeAvailability: () => "ok",
+    };
+
+    registerMentatTools(
+      api,
+      client as never,
+      {
+        mentatUrl: "http://localhost:7832",
+        enabled: true,
+        autoIndex: true,
+        autoRecall: true,
+        autoCapture: false,
+        compressResults: true,
+        compressThresholdTokens: 2000,
+        chatHistory: true,
+        discordHistory: true,
+        discrawlDbPath: "/tmp/discrawl.db",
+        discordHistoryExportDir: "/tmp/discord-export",
+      },
+      new ActiveSessionTracker(),
+      "/tmp/indexed",
+      discordHistory as never,
+    );
+
+    const tool = tools.find((item) => item.opts.name === "search_discord_history")!;
+    const result = await (
+      tool.tool as { execute: (id: string, params: unknown) => Promise<unknown> }
+    ).execute("call1", { query: "Discord bridge" });
+    expect(client.search).toHaveBeenCalledWith({
+      query: "Discord bridge",
+      top_k: 5,
+      collection: "discord_history",
+      hybrid: true,
+    });
+    expect((result as { content: Array<{ text: string }> }).content[0].text).toContain("#general");
+  });
+
+  test("read_discord_history returns exact messages from the bridge", async () => {
+    const { registerMentatTools } = await import("./tools.js");
+    const { ActiveSessionTracker } = await import("./session-state.js");
+
+    const tools: { tool: unknown; opts: { name: string } }[] = [];
+    const api = {
+      registerTool: (tool: unknown, opts: unknown) => {
+        tools.push({ tool: tool as never, opts: opts as { name: string } });
+      },
+      logger: { info: vi.fn(), warn: vi.fn() },
+    };
+    const client = { isHealthy: vi.fn(() => true) };
+    const discordHistory = {
+      isAvailable: () => true,
+      describeAvailability: () => "ok",
+      readHistory: vi.fn(async () => ({
+        available: true,
+        total: 1,
+        messages: [
+          {
+            messageId: "m1",
+            guildId: "g1",
+            channelId: "c1",
+            channelName: "general",
+            authorId: "u1",
+            authorName: "Alice",
+            content: "Need to ship the Discord bridge",
+            createdAt: "2026-04-07T01:00:00Z",
+            hasAttachments: false,
+            pinned: false,
+          },
+        ],
+      })),
+    };
+
+    registerMentatTools(
+      api,
+      client as never,
+      {
+        mentatUrl: "http://localhost:7832",
+        enabled: true,
+        autoIndex: true,
+        autoRecall: true,
+        autoCapture: false,
+        compressResults: true,
+        compressThresholdTokens: 2000,
+        chatHistory: true,
+        discordHistory: true,
+        discrawlDbPath: "/tmp/discrawl.db",
+        discordHistoryExportDir: "/tmp/discord-export",
+      },
+      new ActiveSessionTracker(),
+      "/tmp/indexed",
+      discordHistory as never,
+    );
+
+    const tool = tools.find((item) => item.opts.name === "read_discord_history")!;
+    const result = await (
+      tool.tool as { execute: (id: string, params: unknown) => Promise<unknown> }
+    ).execute("call1", { channel: "general", last_n: 20 });
+    expect(discordHistory.readHistory).toHaveBeenCalledWith({ channel: "general", last_n: 20 });
+    expect((result as { content: Array<{ text: string }> }).content[0].text).toContain(
+      "Need to ship the Discord bridge",
+    );
   });
 });
 
@@ -2249,6 +2629,7 @@ describe("regression: graceful degradation", () => {
     const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
 
     const unhealthyClient = {
+      ensureStarted: vi.fn(async () => {}),
       isHealthy: () => false,
       indexFileAsync: vi.fn(),
       indexContentAsync: vi.fn(),

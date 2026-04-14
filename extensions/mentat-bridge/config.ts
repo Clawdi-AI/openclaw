@@ -7,6 +7,9 @@ export type MentatBridgeConfig = {
   compressResults: boolean;
   compressThresholdTokens: number;
   chatHistory: boolean;
+  discordHistory: boolean;
+  discrawlDbPath: string;
+  discordHistoryExportDir: string;
 };
 
 const DEFAULTS: MentatBridgeConfig = {
@@ -18,6 +21,9 @@ const DEFAULTS: MentatBridgeConfig = {
   compressResults: true,
   compressThresholdTokens: 2000,
   chatHistory: true,
+  discordHistory: false,
+  discrawlDbPath: "~/.discrawl/discrawl.db",
+  discordHistoryExportDir: "~/.openclaw/mentat/discord-history",
 };
 
 const ALLOWED_KEYS = [
@@ -29,6 +35,9 @@ const ALLOWED_KEYS = [
   "compressResults",
   "compressThresholdTokens",
   "chatHistory",
+  "discordHistory",
+  "discrawlDbPath",
+  "discordHistoryExportDir",
 ] as const;
 
 function assertAllowedKeys(
@@ -52,17 +61,40 @@ function resolveEnvVars(value: string): string {
   });
 }
 
+function expandHome(value: string): string {
+  if (value === "~") return process.env.HOME ?? value;
+  if (value.startsWith("~/")) {
+    const home = process.env.HOME;
+    return home ? `${home}/${value.slice(2)}` : value;
+  }
+  return value;
+}
+
 export const mentatBridgeConfigSchema = {
   parse(value: unknown): MentatBridgeConfig {
+    const defaultDiscrawlDbPath = expandHome(DEFAULTS.discrawlDbPath);
+    const defaultDiscordHistoryExportDir = expandHome(DEFAULTS.discordHistoryExportDir);
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       // No config provided — use all defaults
-      return { ...DEFAULTS };
+      return {
+        ...DEFAULTS,
+        discrawlDbPath: defaultDiscrawlDbPath,
+        discordHistoryExportDir: defaultDiscordHistoryExportDir,
+      };
     }
     const cfg = value as Record<string, unknown>;
     assertAllowedKeys(cfg, ALLOWED_KEYS, "mentat-bridge config");
 
     const mentatUrl =
       typeof cfg.mentatUrl === "string" ? resolveEnvVars(cfg.mentatUrl) : DEFAULTS.mentatUrl;
+    const discrawlDbPath =
+      typeof cfg.discrawlDbPath === "string"
+        ? expandHome(resolveEnvVars(cfg.discrawlDbPath))
+        : defaultDiscrawlDbPath;
+    const discordHistoryExportDir =
+      typeof cfg.discordHistoryExportDir === "string"
+        ? expandHome(resolveEnvVars(cfg.discordHistoryExportDir))
+        : defaultDiscordHistoryExportDir;
 
     const compressThresholdTokens =
       typeof cfg.compressThresholdTokens === "number"
@@ -82,6 +114,10 @@ export const mentatBridgeConfigSchema = {
         typeof cfg.compressResults === "boolean" ? cfg.compressResults : DEFAULTS.compressResults,
       compressThresholdTokens,
       chatHistory: typeof cfg.chatHistory === "boolean" ? cfg.chatHistory : DEFAULTS.chatHistory,
+      discordHistory:
+        typeof cfg.discordHistory === "boolean" ? cfg.discordHistory : DEFAULTS.discordHistory,
+      discrawlDbPath,
+      discordHistoryExportDir,
     };
   },
   uiHints: {
@@ -114,6 +150,22 @@ export const mentatBridgeConfigSchema = {
       label: "Compression Threshold (tokens)",
       placeholder: "2000",
       help: "Files smaller than this are kept as-is",
+      advanced: true,
+    },
+    discordHistory: {
+      label: "Enable Discord History",
+      help: "Index discrawl's mirrored Discord archive into a Mentat collection for agent search",
+    },
+    discrawlDbPath: {
+      label: "discrawl DB Path",
+      placeholder: "~/.discrawl/discrawl.db",
+      help: "Path to the discrawl SQLite database to mirror into Mentat",
+      advanced: true,
+    },
+    discordHistoryExportDir: {
+      label: "Discord Export Dir",
+      placeholder: "~/.openclaw/mentat/discord-history",
+      help: "Directory where mentat-bridge writes append-only JSONL files for Mentat watcher",
       advanced: true,
     },
   },

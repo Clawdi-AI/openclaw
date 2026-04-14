@@ -4,6 +4,10 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk/mentat-bridge";
 import { registerMentatCli } from "./cli.js";
 import { MentatClient } from "./client.js";
 import { mentatBridgeConfigSchema } from "./config.js";
+import {
+  buildDiscordHistoryCollectionConfig,
+  DiscrawlDiscordHistoryBridge,
+} from "./discord-history.js";
 import { registerAfterToolCallHook } from "./hooks/after-tool-call.js";
 import { registerAgentEndHook } from "./hooks/agent-end.js";
 import { registerCompactionHooks } from "./hooks/compaction.js";
@@ -27,7 +31,11 @@ import {
 } from "./session-state.js";
 import { registerMentatTools } from "./tools.js";
 
-async function ensureDefaultCollections(client: MentatClient, chatHistory: boolean) {
+async function ensureDefaultCollections(
+  client: MentatClient,
+  chatHistory: boolean,
+  discordHistoryExportDir?: string,
+) {
   // memory: auto-collect memory_store + memory file changes
   await client.createCollection("memory", {
     metadata: { type: "system", description: "Long-term memory" },
@@ -64,6 +72,13 @@ async function ensureDefaultCollections(client: MentatClient, chatHistory: boole
       watch_ignore: ["_offsets.json"],
     });
   }
+
+  if (discordHistoryExportDir) {
+    await client.createCollection(
+      "discord_history",
+      buildDiscordHistoryCollectionConfig(discordHistoryExportDir),
+    );
+  }
 }
 
 const mentatBridgePlugin = {
@@ -87,6 +102,14 @@ const mentatBridgePlugin = {
     const sessionsDir = join(homedir(), ".openclaw", "agents", "main", "sessions");
     const continuationStore = new ContinuationBriefStore(join(sessionsDir, ".continuation"));
     const sessionCleaner = new SessionCleaner(sessionsDir, api.logger);
+    const discordHistory = new DiscrawlDiscordHistoryBridge(
+      {
+        enabled: cfg.discordHistory,
+        dbPath: cfg.discrawlDbPath,
+        exportDir: cfg.discordHistoryExportDir,
+      },
+      api.logger,
+    );
 
     // ── Service lifecycle ──────────────────────────────────────────
 
@@ -95,7 +118,14 @@ const mentatBridgePlugin = {
       async start() {
         await client.start();
         if (client.isHealthy()) {
-          await ensureDefaultCollections(client, cfg.chatHistory);
+          if (cfg.discordHistory) {
+            await discordHistory.start();
+          }
+          await ensureDefaultCollections(
+            client,
+            cfg.chatHistory,
+            cfg.discordHistory ? cfg.discordHistoryExportDir : undefined,
+          );
           if (cfg.chatHistory) {
             await sessionCleaner.start();
           }
@@ -105,6 +135,7 @@ const mentatBridgePlugin = {
         }
       },
       stop() {
+        discordHistory.stop();
         sessionCleaner.stop();
         client.stop();
         api.logger.info("mentat-bridge: stopped");
@@ -200,6 +231,7 @@ const mentatBridgePlugin = {
       cfg,
       activeSessionTracker,
       indexedDir,
+      discordHistory,
     );
 
     // ── CLI ─────────────────────────────────────────────────────────

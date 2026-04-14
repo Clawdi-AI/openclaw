@@ -178,6 +178,14 @@ export type HealthResponse = {
   version?: string;
 };
 
+// ── Wiki ─────────────────────────────────────────────────────────────
+
+export type WikiResolveResponse = {
+  doc_id: string;
+  section_path: string | null;
+  filename: string;
+};
+
 // ── Stats ────────────────────────────────────────────────────────────
 
 export type StatsResponse = {

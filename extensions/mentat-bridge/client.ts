@@ -16,6 +16,7 @@ import type {
   SearchResponse,
   SkillResponse,
   StatsResponse,
+  WikiResolveResponse,
 } from "./types.js";
 
 type Logger = {
@@ -229,6 +230,34 @@ export class MentatClient {
     return res?.removed_doc_ids ?? [];
   }
 
+  // ── Wiki ─────────────────────────────────────────────────────────
+
+  /** Resolve a wiki URL (or short page id with optional fragment) to doc_id + section. */
+  async resolveWikiUrl(url: string): Promise<WikiResolveResponse | null> {
+    return this.request<WikiResolveResponse>("GET", `/wiki/resolve?url=${encodeURIComponent(url)}`);
+  }
+
+  /**
+   * Fetch rendered wiki content for agent-owned pages like /wiki/topics/<slug>
+   * or /wiki/ when resolveWikiUrl is not applicable.
+   */
+  async fetchWikiText(url: string): Promise<string | null> {
+    if (!this.healthy) return null;
+    const target = this.normalizeWikiUrl(url);
+    if (!target) return null;
+
+    try {
+      const res = await fetch(target, {
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) return null;
+      const html = await res.text();
+      return htmlToText(html);
+    } catch {
+      return null;
+    }
+  }
+
   // ── Stats ────────────────────────────────────────────────────────
 
   async getStats(): Promise<StatsResponse | null> {
@@ -259,4 +288,41 @@ export class MentatClient {
       return null;
     }
   }
+
+  private normalizeWikiUrl(url: string): string | null {
+    const trimmed = url.trim();
+    if (!trimmed) return null;
+
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+
+    if (trimmed.startsWith("/")) {
+      return `${this.baseUrl}${trimmed}`;
+    }
+
+    if (trimmed.startsWith("wiki/")) {
+      return `${this.baseUrl}/${trimmed}`;
+    }
+
+    return `${this.baseUrl}/wiki/pages/${encodeURIComponent(trimmed)}`;
+  }
+}
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<\/(p|div|section|article|nav|li|h1|h2|h3|h4|h5|h6|pre|blockquote|tr)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([.,;:!?])/g, "$1")
+    .trim();
 }
