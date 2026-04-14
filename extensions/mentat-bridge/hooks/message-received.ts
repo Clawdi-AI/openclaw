@@ -1,10 +1,7 @@
 import type { MentatClient } from "../client.js";
 
 type PluginApi = {
-  on: (
-    hookName: string,
-    handler: (event: MessageReceivedEvent, ctx: MessageContext) => Promise<void> | void,
-  ) => void;
+  on: (hookName: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => void;
   logger: { debug?: (msg: string) => void };
 };
 
@@ -55,14 +52,17 @@ function mimeToContentType(mime: string): string {
 
 export function registerMessageReceivedHook(api: PluginApi, client: MentatClient) {
   api.on("message_received", async (event, ctx) => {
+    const messageEvent = event as MessageReceivedEvent;
+    const messageCtx = ctx as MessageContext;
+
     await client.ensureStarted();
     if (!client.isHealthy()) return;
-    if (!event.content || event.content.length < 50) return;
+    if (!messageEvent.content || messageEvent.content.length < 50) return;
 
-    const blocks = extractFileBlocks(event.content);
+    const blocks = extractFileBlocks(messageEvent.content);
     if (blocks.length === 0) return;
 
-    const source = `channel:${ctx.channelId}`;
+    const source = `channel:${messageCtx.channelId}`;
 
     for (const block of blocks) {
       client.indexContentAsync({
@@ -72,7 +72,7 @@ export function registerMessageReceivedHook(api: PluginApi, client: MentatClient
         content_type: mimeToContentType(block.mime),
       });
       api.logger.debug?.(
-        `mentat-bridge: indexed channel attachment: ${block.name} (${block.mime}) from ${ctx.channelId}`,
+        `mentat-bridge: indexed channel attachment: ${block.name} (${block.mime}) from ${messageCtx.channelId}`,
       );
     }
   });

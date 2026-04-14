@@ -8,7 +8,7 @@ import { buildCompressedSummary, estimateTokens } from "./util.js";
 type PluginApi = {
   on: (
     hookName: string,
-    handler: (event: MediaFileTransformEvent) => Promise<MediaFileTransformResult | undefined>,
+    handler: (event: unknown) => Promise<MediaFileTransformResult | undefined>,
   ) => void;
   logger: { debug?: (msg: string) => void };
 };
@@ -31,17 +31,19 @@ export function registerMediaFileTransformHook(
   cfg: MentatBridgeConfig,
 ) {
   api.on("media_file_transform", async (event) => {
+    const mediaEvent = event as MediaFileTransformEvent;
+
     await client.ensureStarted();
     if (!client.isHealthy()) return undefined;
 
     // When raw file data is available, index the full file via indexFile
     // so mentat can parse the complete content (e.g. all PDF pages).
-    if (event.rawBase64) {
+    if (mediaEvent.rawBase64) {
       let tmpPath: string | undefined;
       try {
         const dir = await mkdtemp(join(tmpdir(), "mentat-media-"));
-        tmpPath = join(dir, event.filename);
-        await writeFile(tmpPath, Buffer.from(event.rawBase64, "base64"));
+        tmpPath = join(dir, mediaEvent.filename);
+        await writeFile(tmpPath, Buffer.from(mediaEvent.rawBase64, "base64"));
 
         const result = await client.indexFile({
           path: tmpPath,
@@ -54,7 +56,7 @@ export function registerMediaFileTransformHook(
 
         const summary = buildCompressedSummary(meta, { tagStyle: "bracket" });
         api.logger.debug?.(
-          `mentat-bridge: indexed full file ${event.filename} via indexFile (doc_id: ${meta.doc_id})`,
+          `mentat-bridge: indexed full file ${mediaEvent.filename} via indexFile (doc_id: ${meta.doc_id})`,
         );
         return { content: summary };
       } finally {
@@ -65,13 +67,13 @@ export function registerMediaFileTransformHook(
     }
 
     // Fallback: index extracted text content (for non-binary files or when rawBase64 absent)
-    if (estimateTokens(event.content) < cfg.compressThresholdTokens) return undefined;
+    if (estimateTokens(mediaEvent.content) < cfg.compressThresholdTokens) return undefined;
 
     const result = await client.indexContent({
-      content: event.content,
-      filename: event.filename,
+      content: mediaEvent.content,
+      filename: mediaEvent.filename,
       source: "channel:attachment",
-      content_type: event.mime.startsWith("text/") ? event.mime : "text/plain",
+      content_type: mediaEvent.mime.startsWith("text/") ? mediaEvent.mime : "text/plain",
     });
 
     if (!result?.doc_id) return undefined;
@@ -81,7 +83,7 @@ export function registerMediaFileTransformHook(
 
     const summary = buildCompressedSummary(meta, { tagStyle: "bracket" });
     api.logger.debug?.(
-      `mentat-bridge: compressed channel attachment ${event.filename} (${estimateTokens(event.content)} → ~${estimateTokens(summary)} tokens)`,
+      `mentat-bridge: compressed channel attachment ${mediaEvent.filename} (${estimateTokens(mediaEvent.content)} → ~${estimateTokens(summary)} tokens)`,
     );
     return { content: summary };
   });

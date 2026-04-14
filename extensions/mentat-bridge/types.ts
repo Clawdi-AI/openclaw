@@ -52,6 +52,7 @@ export type MentatChunkResult = {
 
 export type MentatSearchResult = {
   doc_id: string;
+  session_id?: string;
   chunk_id?: string;
   filename: string;
   section?: string;

@@ -29,12 +29,9 @@ async function fetchRawHtml(url: string): Promise<string | null> {
 type PluginApi = {
   on: (
     hookName: string,
-    handler: (
-      event: TransformToolResultEvent,
-      ctx: ToolContext,
-    ) => Promise<TransformToolResultResult | void>,
+    handler: (event: unknown, ctx: unknown) => Promise<TransformToolResultResult | void>,
   ) => void;
-  logger: { info: (msg: string) => void; debug?: (msg: string) => void };
+  logger: { info?: (msg: string) => void; debug?: (msg: string) => void };
 };
 
 type ToolResultContent = { type: string; text: string }[];
@@ -70,19 +67,22 @@ export function registerTransformToolResultHook(
   readTracker: SessionReadTracker,
   docMetaCache: DocMetaCache,
 ) {
-  api.logger.info(`mentat-bridge: transform_tool_result hook registered`);
+  api.logger.info?.(`mentat-bridge: transform_tool_result hook registered`);
 
   api.on("transform_tool_result", async (event, ctx) => {
-    api.logger.info(
-      `mentat-bridge: transform_tool_result fired for ${event.toolName} (healthy=${client.isHealthy()})`,
+    const toolEvent = event as TransformToolResultEvent;
+    const toolCtx = ctx as ToolContext;
+
+    api.logger.info?.(
+      `mentat-bridge: transform_tool_result fired for ${toolEvent.toolName} (healthy=${client.isHealthy()})`,
     );
 
-    if (!isWebFetchTool(event.toolName)) return;
+    if (!isWebFetchTool(toolEvent.toolName)) return;
     if (!client.isHealthy()) return;
 
-    const url = (event.params.url as string) || "";
+    const url = (toolEvent.params.url as string) || "";
     if (!url) {
-      api.logger.info(`mentat-bridge: transform_tool_result skipped — no url`);
+      api.logger.info?.(`mentat-bridge: transform_tool_result skipped — no url`);
       return;
     }
 
@@ -91,15 +91,15 @@ export function registerTransformToolResultHook(
     // tool result would almost always skip.  The compressThresholdTokens gate
     // remains for file reads in tool_result_persist.
     const resultText =
-      event.result.content?.map((b) => (b.type === "text" ? b.text : "")).join("\n") ?? "";
+      toolEvent.result.content?.map((b) => (b.type === "text" ? b.text : "")).join("\n") ?? "";
     const tokens = estimateTokens(resultText);
-    api.logger.info(`mentat-bridge: transform_tool_result web_fetch url=${url} tokens=${tokens}`);
+    api.logger.info?.(`mentat-bridge: transform_tool_result web_fetch url=${url} tokens=${tokens}`);
 
     // Re-fetch raw HTML — the tool result only has extracted markdown
     const html = await fetchRawHtml(url);
     if (!html || html.length <= 50) return;
 
-    const sessionCollection = ctx.sessionId ? `ses_${ctx.sessionId}` : undefined;
+    const sessionCollection = toolCtx.sessionId ? `ses_${toolCtx.sessionId}` : undefined;
     const indexRes = await client.indexContent({
       content: html,
       filename: urlToFilename(url),
@@ -109,11 +109,11 @@ export function registerTransformToolResultHook(
     });
 
     if (!indexRes?.doc_id) {
-      api.logger.info(`mentat-bridge: web fetch indexing returned no doc_id for ${url}`);
+      api.logger.info?.(`mentat-bridge: web fetch indexing returned no doc_id for ${url}`);
       return;
     }
 
-    api.logger.info(
+    api.logger.info?.(
       `mentat-bridge: indexed web fetch → ${urlToFilename(url)} (doc_id: ${indexRes.doc_id})`,
     );
 
@@ -128,26 +128,26 @@ export function registerTransformToolResultHook(
     if (!meta) return;
 
     // Track read for hot context injection
-    if (ctx.sessionKey) {
-      readTracker.trackRead(ctx.sessionKey, meta.doc_id);
+    if (toolCtx.sessionKey) {
+      readTracker.trackRead(toolCtx.sessionKey, meta.doc_id);
     }
 
     // Cache for any downstream hooks that may still reference it
-    if (event.toolCallId) {
-      docMetaCache.set(`__toolcall__:${event.toolCallId}`, meta);
+    if (toolEvent.toolCallId) {
+      docMetaCache.set(`__toolcall__:${toolEvent.toolCallId}`, meta);
     }
 
     // Build compressed replacement result
     const compressedText = buildCompressedSummary(meta);
     const compressedTokens = estimateTokens(compressedText);
-    api.logger.info(
-      `mentat-bridge: compressed ${event.toolName} result → ${meta.filename} (~${tokens} → ~${compressedTokens} tokens)`,
+    api.logger.info?.(
+      `mentat-bridge: compressed ${toolEvent.toolName} result → ${meta.filename} (~${tokens} → ~${compressedTokens} tokens)`,
     );
 
     return {
       result: {
         content: [{ type: "text", text: compressedText }],
-        details: event.result.details,
+        details: toolEvent.result.details,
       },
     };
   });

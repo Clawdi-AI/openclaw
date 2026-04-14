@@ -2,13 +2,10 @@ import type { MentatClient } from "../client.js";
 import { looksLikePromptInjection, shouldCapture } from "../prompt.js";
 
 type PluginApi = {
-  on: (
-    hookName: string,
-    handler: (event: AgentEndEvent, ctx: AgentContext) => Promise<void> | void,
-  ) => void;
+  on: (hookName: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => void;
   logger: {
-    info: (msg: string) => void;
-    warn: (msg: string) => void;
+    info?: (msg: string) => void;
+    warn?: (msg: string) => void;
     debug?: (msg: string) => void;
   };
 };
@@ -58,12 +55,14 @@ function extractUserTexts(messages: unknown[]): string[] {
 
 export function registerAgentEndHook(api: PluginApi, client: MentatClient) {
   api.on("agent_end", async (event, _ctx) => {
-    await client.ensureStarted();
+    const agentEvent = event as AgentEndEvent;
+
+    await client.ensureStarted?.();
     if (!client.isHealthy()) return;
-    if (!event.success || !event.messages || event.messages.length === 0) return;
+    if (!agentEvent.success || !agentEvent.messages || agentEvent.messages.length === 0) return;
 
     try {
-      const texts = extractUserTexts(event.messages);
+      const texts = extractUserTexts(agentEvent.messages);
       const toCapture = texts.filter(
         (text) => shouldCapture(text) && !looksLikePromptInjection(text),
       );
@@ -81,10 +80,10 @@ export function registerAgentEndHook(api: PluginApi, client: MentatClient) {
       }
 
       if (stored > 0) {
-        api.logger.info(`mentat-bridge: auto-captured ${stored} memories`);
+        api.logger.info?.(`mentat-bridge: auto-captured ${stored} memories`);
       }
     } catch (err) {
-      api.logger.warn(`mentat-bridge: auto-capture failed: ${String(err)}`);
+      api.logger.warn?.(`mentat-bridge: auto-capture failed: ${String(err)}`);
     }
   });
 }

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /** Map OpenClaw tool names to Mentat source tags for provenance tracking. */
 export function toolToSource(toolName: string): string {
   if (toolName === "WebFetch" || toolName === "web_fetch") return "web_fetch";
@@ -21,6 +23,57 @@ export function isWebFetchTool(toolName: string): boolean {
 
 export function isComposioTool(toolName: string): boolean {
   return toolName.startsWith("composio:");
+}
+
+function sanitizeFilenamePart(value: string): string {
+  return value
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+}
+
+function stableToolPrefix(toolName: string): string {
+  return sanitizeFilenamePart(toolName.replace(/:/g, "_")) || "composio";
+}
+
+function findResourceId(params: Record<string, unknown>): string | null {
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value !== "string" || value.length === 0) continue;
+    if (key === "id" || key.endsWith("_id") || /Id$/.test(key)) {
+      return sanitizeFilenamePart(value);
+    }
+  }
+  return null;
+}
+
+function stableScalarHash(params: Record<string, unknown>): string | null {
+  const scalars = Object.entries(params)
+    .filter(
+      ([, value]) =>
+        typeof value === "string" || typeof value === "number" || typeof value === "boolean",
+    )
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (scalars.length === 0) return null;
+  const payload = JSON.stringify(scalars);
+  return createHash("sha256").update(payload).digest("hex").slice(0, 12);
+}
+
+/** Build a stable synthetic filename for composio tool results. */
+export function composioFilename(
+  toolName: string,
+  params: Record<string, unknown>,
+  toolCallId?: string,
+): string {
+  const prefix = stableToolPrefix(toolName);
+  const resourceId = findResourceId(params);
+  if (resourceId) return `${prefix}-${resourceId}.md`;
+
+  const hashedParams = stableScalarHash(params);
+  if (hashedParams) return `${prefix}-${hashedParams}.md`;
+
+  const fallback = sanitizeFilenamePart(toolCallId ?? "unknown") || "unknown";
+  return `${prefix}-${fallback}.md`;
 }
 
 /**

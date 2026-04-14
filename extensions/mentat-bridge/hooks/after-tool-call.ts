@@ -10,11 +10,8 @@ import {
 } from "../source-map.js";
 
 type PluginApi = {
-  on: (
-    hookName: string,
-    handler: (event: AfterToolCallEvent, ctx: ToolContext) => Promise<void> | void,
-  ) => void;
-  logger: { info: (msg: string) => void; debug?: (msg: string) => void };
+  on: (hookName: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => void;
+  logger: { info?: (msg: string) => void; debug?: (msg: string) => void };
 };
 
 type AfterToolCallEvent = {
@@ -38,18 +35,21 @@ export function registerAfterToolCallHook(
   docMetaCache: DocMetaCache,
 ) {
   api.on("after_tool_call", async (event, ctx) => {
-    if (event.error) return;
+    const toolEvent = event as AfterToolCallEvent;
+    const toolCtx = ctx as ToolContext;
+
+    if (toolEvent.error) return;
 
     // Lazy-start: the [plugins] subsystem may register hooks before service start
-    await client.ensureStarted();
+    await client.ensureStarted?.();
     if (!client.isHealthy()) return;
 
-    const source = toolToSource(event.toolName);
-    const sessionCollection = ctx.sessionId ? `ses_${ctx.sessionId}` : undefined;
+    const source = toolToSource(toolEvent.toolName);
+    const sessionCollection = toolCtx.sessionId ? `ses_${toolCtx.sessionId}` : undefined;
 
     // File reads: index by path (fire-and-forget)
-    if (isFileReadTool(event.toolName) && typeof event.params.path === "string") {
-      const filePath = event.params.path;
+    if (isFileReadTool(toolEvent.toolName) && typeof toolEvent.params.path === "string") {
+      const filePath = toolEvent.params.path;
       client.indexFileAsync({
         path: filePath,
         source,
@@ -61,33 +61,33 @@ export function registerAfterToolCallHook(
       client
         .getDocMeta(filePath)
         .then((meta) => {
-          if (meta && ctx.sessionKey) {
+          if (meta && toolCtx.sessionKey) {
             docMetaCache.set(filePath, meta);
-            readTracker.trackRead(ctx.sessionKey, meta.doc_id);
+            readTracker.trackRead(toolCtx.sessionKey, meta.doc_id);
           }
         })
         .catch(() => {});
 
-      api.logger.info(`mentat-bridge: indexed file read → ${filePath}`);
+      api.logger.info?.(`mentat-bridge: indexed file read → ${filePath}`);
       return;
     }
 
     // Web fetches: handled by transform_tool_result hook (runs synchronously
     // within tool execution, before the result reaches the agent framework).
     // See hooks/transform-tool-result.ts.
-    if (isWebFetchTool(event.toolName)) return;
+    if (isWebFetchTool(toolEvent.toolName)) return;
 
     // Composio tools: index content with stable filename for dedup
-    if (isComposioTool(event.toolName)) {
-      const content = extractContentFromResult(event.result);
+    if (isComposioTool(toolEvent.toolName)) {
+      const content = extractContentFromResult(toolEvent.result);
       if (content && content.length > 200) {
         client.indexContentAsync({
           content,
-          filename: composioFilename(event.toolName, event.params, event.toolCallId),
+          filename: composioFilename(toolEvent.toolName, toolEvent.params, toolEvent.toolCallId),
           source,
           collection: sessionCollection,
         });
-        api.logger.info(`mentat-bridge: indexed composio result → ${event.toolName}`);
+        api.logger.info?.(`mentat-bridge: indexed composio result → ${toolEvent.toolName}`);
       }
     }
   });

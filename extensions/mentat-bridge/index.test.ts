@@ -1025,6 +1025,7 @@ describe("hooks", () => {
         logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(),
         isHealthy: vi.fn(() => true),
         indexFileAsync: vi.fn(),
         getDocMeta: vi.fn(async () => ({ doc_id: "d1", filename: "test.ts" })),

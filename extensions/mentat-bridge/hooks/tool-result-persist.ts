@@ -7,12 +7,9 @@ import { buildCompressedSummary, estimateTokens } from "./util.js";
 type PluginApi = {
   on: (
     hookName: string,
-    handler: (
-      event: ToolResultPersistEvent,
-      ctx: ToolResultPersistContext,
-    ) => ToolResultPersistResult | void,
+    handler: (event: unknown, ctx: unknown) => ToolResultPersistResult | void,
   ) => void;
-  logger: { info: (msg: string) => void; debug?: (msg: string) => void };
+  logger: { info?: (msg: string) => void; debug?: (msg: string) => void };
 };
 
 type AgentMessage = {
@@ -87,12 +84,14 @@ export function registerToolResultPersistHook(
   // This hook is SYNCHRONOUS — cannot await any async operations.
   // Doc metadata must be pre-cached by after_tool_call.
   api.on("tool_result_persist", (event, _ctx) => {
-    if (!client.isHealthy()) return;
-    const toolName = event.toolName ?? "";
-    if (!isFileReadTool(toolName) && !isWebFetchTool(toolName)) return;
-    if (event.isSynthetic) return;
+    const persistEvent = event as ToolResultPersistEvent;
 
-    const content = extractTextFromMessage(event.message);
+    if (!client.isHealthy()) return;
+    const toolName = persistEvent.toolName ?? "";
+    if (!isFileReadTool(toolName) && !isWebFetchTool(toolName)) return;
+    if (persistEvent.isSynthetic) return;
+
+    const content = extractTextFromMessage(persistEvent.message);
     if (!content) return;
 
     const tokens = estimateTokens(content);
@@ -100,10 +99,10 @@ export function registerToolResultPersistHook(
 
     // Try to find cached doc meta — keyed by file path (reads) or toolCallId (web fetch)
     let meta: DocMeta | undefined;
-    if (isWebFetchTool(toolName) && event.toolCallId) {
-      meta = docMetaCache.get(`__toolcall__:${event.toolCallId}`);
+    if (isWebFetchTool(toolName) && persistEvent.toolCallId) {
+      meta = docMetaCache.get(`__toolcall__:${persistEvent.toolCallId}`);
     } else {
-      const filePath = extractPathFromMessage(event.message);
+      const filePath = extractPathFromMessage(persistEvent.message);
       meta = filePath ? docMetaCache.get(filePath) : undefined;
     }
     if (!meta) {
@@ -113,13 +112,13 @@ export function registerToolResultPersistHook(
       return;
     }
 
-    const compressed = compressToolResultMessage(event.message, meta);
+    const compressed = compressToolResultMessage(persistEvent.message, meta);
     const compressedTokens = estimateTokens(
       typeof compressed.content === "string"
         ? compressed.content
         : JSON.stringify(compressed.content),
     );
-    api.logger.info(
+    api.logger.info?.(
       `mentat-bridge: compressed ${toolName} result → ${meta.filename} (~${tokens} → ~${compressedTokens} tokens)`,
     );
 

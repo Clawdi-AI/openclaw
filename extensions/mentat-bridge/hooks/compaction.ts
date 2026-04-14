@@ -2,11 +2,8 @@ import type { MentatClient } from "../client.js";
 import type { SessionReadTracker } from "../session-state.js";
 
 type PluginApi = {
-  on: (
-    hookName: string,
-    handler: (event: unknown, ctx: AgentContext) => Promise<void> | void,
-  ) => void;
-  logger: { info: (msg: string) => void; debug?: (msg: string) => void };
+  on: (hookName: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => void;
+  logger: { info?: (msg: string) => void; debug?: (msg: string) => void };
 };
 
 type AgentContext = {
@@ -21,11 +18,12 @@ export function registerCompactionHooks(
   readTracker: SessionReadTracker,
 ) {
   api.on("before_compaction", async (_event, ctx) => {
-    if (!ctx.sessionKey) return;
-    const docIds = readTracker.getReadDocIds(ctx.sessionKey);
+    const agentCtx = ctx as AgentContext;
+    if (!agentCtx.sessionKey) return;
+    const docIds = readTracker.getReadDocIds(agentCtx.sessionKey);
     if (docIds.length > 0) {
-      api.logger.info(
-        `mentat-bridge: before_compaction — ${docIds.length} docs tracked for session ${ctx.sessionKey}`,
+      api.logger.info?.(
+        `mentat-bridge: before_compaction — ${docIds.length} docs tracked for session ${agentCtx.sessionKey}`,
       );
     }
     // Hot-context re-injection happens in before_prompt_build (which runs after compaction too).

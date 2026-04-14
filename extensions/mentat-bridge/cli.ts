@@ -36,12 +36,10 @@ export function registerMentatCli(api: PluginApi, client: MentatClient) {
 
           const stats = await client.getStats();
           if (stats) {
-            console.log(`  Documents: ${stats.total_docs}`);
-            console.log(`  Chunks: ${stats.total_chunks}`);
-            console.log(`  Collections: ${stats.total_collections}`);
-            if (stats.pending_tasks != null) {
-              console.log(`  Pending tasks: ${stats.pending_tasks}`);
-            }
+            console.log(`  Documents: ${stats.docs_indexed}`);
+            console.log(`  Chunks: ${stats.chunks_stored}`);
+            console.log(`  Collections: ${stats.collections}`);
+            console.log(`  Cached hashes: ${stats.cached_hashes}`);
           }
         });
 
