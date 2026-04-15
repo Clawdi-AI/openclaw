@@ -23,6 +23,42 @@ export function isComposioTool(toolName: string): boolean {
   return toolName.startsWith("composio:");
 }
 
+/** Build a stable, dedup-friendly filename for a Composio tool result. */
+export function composioFilename(
+  toolName: string,
+  params: Record<string, unknown>,
+  toolCallId?: string,
+): string {
+  const prefix = toolName.replace(/:/g, "_");
+
+  // Look for an ID-like param (exact "id", ends with "_id", or camelCase "Id")
+  const idKey = Object.keys(params).find(
+    (k) => k === "id" || k.endsWith("_id") || k.endsWith("Id"),
+  );
+  if (idKey && typeof params[idKey] === "string") {
+    return `${prefix}-${params[idKey]}.md`;
+  }
+
+  // Hash scalar params for stable dedup when no explicit ID
+  const scalars = Object.entries(params)
+    .filter(([, v]) => typeof v === "string" || typeof v === "number")
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("&");
+  if (scalars) {
+    // Simple FNV-1a-like hash to keep filenames short
+    let h = 0x811c9dc5;
+    for (let i = 0; i < scalars.length; i++) {
+      h ^= scalars.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return `${prefix}-${(h >>> 0).toString(16)}.md`;
+  }
+
+  // Fallback to toolCallId
+  return `${prefix}-${toolCallId ?? "unknown"}.md`;
+}
+
 /**
  * Try to unwrap a JSON string into its nested text content.
  * Tool results like WebFetch arrive as `{ content: [{ type: "text", text: JSON.stringify(payload) }] }`
