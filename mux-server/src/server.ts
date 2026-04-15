@@ -458,6 +458,9 @@ const openclawMuxAccountId = readNonEmptyString(process.env.MUX_OPENCLAW_ACCOUNT
 const whatsappAccountId = readNonEmptyString(process.env.MUX_WHATSAPP_ACCOUNT_ID) || "default";
 const whatsappAuthDir =
   readNonEmptyString(process.env.MUX_WHATSAPP_AUTH_DIR) || resolveDefaultWhatsAppAuthDir();
+const whatsappAllowedFileDirs: string[] = [os.tmpdir(), whatsappAuthDir].map((d) =>
+  path.resolve(d),
+);
 
 const telegramInboundEnabled = Boolean(readNonEmptyString(telegramBotToken));
 const telegramPollTimeoutSec = Number(process.env.MUX_TELEGRAM_POLL_TIMEOUT_SEC || 25);
@@ -3344,7 +3347,7 @@ const { handleRequest } = createHttpRouteHandler({
   muxRegisterKey,
   muxAdminToken,
   telegramApiBaseUrl,
-  telegramBotUsername,
+  getTelegramBotUsername: () => telegramBotUsername,
   getTelegramPollConflictHealth: () => telegramPollConflictHealth,
   runtimeJwtSigner,
   sendJson,
@@ -3370,6 +3373,7 @@ const { handleRequest } = createHttpRouteHandler({
   runOutboundAction,
   resolveTelegramFilePath,
   requireTelegramBotToken,
+  whatsappAllowedFileDirs,
   inferMimeTypeFromPath,
 });
 

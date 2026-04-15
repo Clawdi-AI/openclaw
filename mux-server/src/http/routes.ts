@@ -17,7 +17,7 @@ export function createHttpRouteHandler(deps: {
   muxRegisterKey: string | null;
   muxAdminToken: string | null;
   telegramApiBaseUrl: string;
-  telegramBotUsername: string | null;
+  getTelegramBotUsername: () => string | null;
   getTelegramPollConflictHealth: () => { lastConflictAtMs: number; lastError: string } | null;
   runtimeJwtSigner: {
     jwks: () => unknown;
@@ -100,6 +100,7 @@ export function createHttpRouteHandler(deps: {
   }) => Promise<SendResult>;
   resolveTelegramFilePath: (fileId: string) => Promise<string | null>;
   requireTelegramBotToken: () => string;
+  whatsappAllowedFileDirs: string[];
   inferMimeTypeFromPath: (filePath: string) => string | undefined;
 }): {
   handleRequest: (params: {
@@ -127,9 +128,10 @@ export function createHttpRouteHandler(deps: {
             lastError: telegramPollConflictHealth.lastError,
           }
         : undefined;
+      const telegramBotUsername = deps.getTelegramBotUsername();
       deps.sendJson(res, 200, {
         ok: true,
-        ...(deps.telegramBotUsername ? { telegramBotUsername: deps.telegramBotUsername } : {}),
+        ...(telegramBotUsername ? { telegramBotUsername } : {}),
         ...(telegramInboundHealth ? { telegramInbound: telegramInboundHealth } : {}),
       });
       return { handled: true };
@@ -199,9 +201,10 @@ export function createHttpRouteHandler(deps: {
         return { handled: true };
       }
       const readiness = deps.buildReadinessReport(Date.now());
+      const adminTelegramBotUsername = deps.getTelegramBotUsername();
       deps.sendJson(res, 200, {
         ok: true,
-        ...(deps.telegramBotUsername ? { telegramBotUsername: deps.telegramBotUsername } : {}),
+        ...(adminTelegramBotUsername ? { telegramBotUsername: adminTelegramBotUsername } : {}),
         channels: readiness.channels,
         ready: readiness.ready,
         degraded: readiness.degraded,
@@ -429,6 +432,14 @@ export function createHttpRouteHandler(deps: {
           return { handled: true };
         }
         const resolved = path.resolve(filePath);
+        // Prevent path traversal: only serve files within allowed directories.
+        const withinAllowed = deps.whatsappAllowedFileDirs.some(
+          (dir) => resolved === dir || resolved.startsWith(dir + path.sep),
+        );
+        if (!withinAllowed) {
+          deps.sendJson(res, 403, { ok: false, error: "path not within allowed directories" });
+          return { handled: true };
+        }
         try {
           const stat = fs.statSync(resolved);
           if (!stat.isFile()) {
