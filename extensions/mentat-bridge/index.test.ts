@@ -376,7 +376,7 @@ describe("prompt", () => {
     const { fetchSkillPrompt } = await import("./prompt.js");
     const mockClient = { getSkillPrompt: vi.fn(async () => null) };
     const result = await fetchSkillPrompt(mockClient as never);
-    expect(result).toContain("Memory System (Mentat)");
+    expect(result).toContain("Document Intelligence System (Mentat)");
     expect(result).toContain("search_memory");
   });
 
@@ -1025,6 +1025,7 @@ describe("hooks", () => {
         logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(),
         isHealthy: vi.fn(() => true),
         indexFileAsync: vi.fn(),
         getDocMeta: vi.fn(async () => ({ doc_id: "d1", filename: "test.ts" })),
@@ -1032,7 +1033,7 @@ describe("hooks", () => {
       const tracker = new SessionReadTracker();
       const cache = new DocMetaCache();
 
-      registerAfterToolCallHook(api, client as never, tracker, cache);
+      registerAfterToolCallHook(api as never, client as never, tracker, cache);
       expect(handlers).toHaveLength(1);
 
       await handlers[0](
@@ -1071,7 +1072,12 @@ describe("hooks", () => {
         })),
       };
 
-      registerAfterToolCallHook(api, client as never, new SessionReadTracker(), new DocMetaCache());
+      registerAfterToolCallHook(
+        api as never,
+        client as never,
+        new SessionReadTracker(),
+        new DocMetaCache(),
+      );
 
       await handlers[0](
         {
@@ -1099,11 +1105,17 @@ describe("hooks", () => {
         logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(),
         isHealthy: vi.fn(() => false),
         indexFileAsync: vi.fn(),
       };
 
-      registerAfterToolCallHook(api, client as never, new SessionReadTracker(), new DocMetaCache());
+      registerAfterToolCallHook(
+        api as never,
+        client as never,
+        new SessionReadTracker(),
+        new DocMetaCache(),
+      );
 
       await handlers[0]({ toolName: "Read", params: { path: "/test.ts" } }, { sessionKey: "s1" });
       expect(client.indexFileAsync).not.toHaveBeenCalled();
@@ -1121,11 +1133,17 @@ describe("hooks", () => {
         logger: { info: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(),
         isHealthy: vi.fn(() => true),
         indexFileAsync: vi.fn(),
       };
 
-      registerAfterToolCallHook(api, client as never, new SessionReadTracker(), new DocMetaCache());
+      registerAfterToolCallHook(
+        api as never,
+        client as never,
+        new SessionReadTracker(),
+        new DocMetaCache(),
+      );
 
       await handlers[0](
         { toolName: "Read", params: { path: "/test.ts" }, error: "file not found" },
@@ -1151,7 +1169,12 @@ describe("hooks", () => {
         indexContentAsync: vi.fn(),
       };
 
-      registerAfterToolCallHook(api, client as never, new SessionReadTracker(), new DocMetaCache());
+      registerAfterToolCallHook(
+        api as never,
+        client as never,
+        new SessionReadTracker(),
+        new DocMetaCache(),
+      );
 
       // With resource ID param → stable filename
       await handlers[0](
@@ -1237,7 +1260,13 @@ describe("hooks", () => {
       })) as unknown as typeof fetch;
 
       try {
-        registerTransformToolResultHook(api, client as never, cfg as never, tracker, cache);
+        registerTransformToolResultHook(
+          api as never,
+          client as never,
+          cfg as never,
+          tracker,
+          cache,
+        );
         expect(handlers).toHaveLength(1);
 
         // Simulate a large WebFetch result (> 100 tokens = 400 chars)
@@ -1305,7 +1334,7 @@ describe("hooks", () => {
       const cfg = { compressThresholdTokens: 5000 }; // high threshold
 
       registerTransformToolResultHook(
-        api,
+        api as never,
         client as never,
         cfg as never,
         new SessionReadTracker(),
@@ -1348,7 +1377,7 @@ describe("hooks", () => {
       };
 
       registerTransformToolResultHook(
-        api,
+        api as never,
         client as never,
         { compressThresholdTokens: 100 } as never,
         new SessionReadTracker(),
@@ -1389,7 +1418,7 @@ describe("hooks", () => {
       };
 
       registerTransformToolResultHook(
-        api,
+        api as never,
         client as never,
         { compressThresholdTokens: 100 } as never,
         new SessionReadTracker(),
@@ -1434,7 +1463,7 @@ describe("hooks", () => {
 
       try {
         registerTransformToolResultHook(
-          api,
+          api as never,
           client as never,
           { compressThresholdTokens: 100 } as never,
           new SessionReadTracker(),
@@ -1485,7 +1514,7 @@ describe("hooks", () => {
         ],
       });
 
-      registerToolResultPersistHook(api, client, cfg as never, cache);
+      registerToolResultPersistHook(api as never, client, cfg as never, cache);
 
       // Simulate large file read result (> 100 tokens = 400 chars)
       const bigContent = "File: /big-file.ts\n" + "x".repeat(600);
@@ -1518,7 +1547,7 @@ describe("hooks", () => {
       };
 
       registerToolResultPersistHook(
-        api,
+        api as never,
         { isHealthy: () => true },
         { compressThresholdTokens: 100 } as never,
         new DocMetaCache(),
@@ -1547,7 +1576,7 @@ describe("hooks", () => {
       };
 
       registerToolResultPersistHook(
-        api,
+        api as never,
         { isHealthy: () => true },
         { compressThresholdTokens: 100 } as never,
         new DocMetaCache(),
@@ -1573,7 +1602,7 @@ describe("hooks", () => {
       };
 
       registerToolResultPersistHook(
-        api,
+        api as never,
         { isHealthy: () => true },
         { compressThresholdTokens: 2000 } as never,
         new DocMetaCache(),
@@ -1599,7 +1628,7 @@ describe("hooks", () => {
       };
 
       registerToolResultPersistHook(
-        api,
+        api as never,
         { isHealthy: () => false },
         { compressThresholdTokens: 100 } as never,
         new DocMetaCache(),
@@ -1625,11 +1654,12 @@ describe("hooks", () => {
         logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(),
         isHealthy: vi.fn(() => true),
         indexContent: vi.fn(async () => ({ doc_id: "c1", filename: "auto.md", status: "ok" })),
       };
 
-      registerAgentEndHook(api, client as never);
+      registerAgentEndHook(api as never, client as never);
 
       await handlers[0](
         {
@@ -1663,11 +1693,12 @@ describe("hooks", () => {
         logger: { info: vi.fn(), warn: vi.fn() },
       };
       const client = {
+        ensureStarted: vi.fn(),
         isHealthy: vi.fn(() => true),
         indexContent: vi.fn(async () => ({ doc_id: "c1", filename: "auto.md", status: "ok" })),
       };
 
-      registerAgentEndHook(api, client as never);
+      registerAgentEndHook(api as never, client as never);
 
       await handlers[0](
         {
@@ -1697,9 +1728,13 @@ describe("hooks", () => {
         },
         logger: { info: vi.fn(), warn: vi.fn() },
       };
-      const client = { isHealthy: vi.fn(() => false), indexContent: vi.fn() };
+      const client = {
+        ensureStarted: vi.fn(),
+        isHealthy: vi.fn(() => false),
+        indexContent: vi.fn(),
+      };
 
-      registerAgentEndHook(api, client as never);
+      registerAgentEndHook(api as never, client as never);
 
       await handlers[0](
         { success: true, messages: [{ role: "user", content: "I prefer dark mode always" }] },
@@ -1718,9 +1753,13 @@ describe("hooks", () => {
         },
         logger: { info: vi.fn(), warn: vi.fn() },
       };
-      const client = { isHealthy: vi.fn(() => true), indexContent: vi.fn() };
+      const client = {
+        ensureStarted: vi.fn(),
+        isHealthy: vi.fn(() => true),
+        indexContent: vi.fn(),
+      };
 
-      registerAgentEndHook(api, client as never);
+      registerAgentEndHook(api as never, client as never);
 
       await handlers[0](
         { success: false, messages: [{ role: "user", content: "I prefer dark mode always" }] },
@@ -1739,9 +1778,13 @@ describe("hooks", () => {
         },
         logger: { info: vi.fn(), warn: vi.fn() },
       };
-      const client = { isHealthy: vi.fn(() => true), indexContent: vi.fn() };
+      const client = {
+        ensureStarted: vi.fn(),
+        isHealthy: vi.fn(() => true),
+        indexContent: vi.fn(),
+      };
 
-      registerAgentEndHook(api, client as never);
+      registerAgentEndHook(api as never, client as never);
 
       await handlers[0](
         {
@@ -1772,7 +1815,7 @@ describe("hooks", () => {
       tracker.trackRead("s1", "d1");
       tracker.trackRead("s1", "d2");
 
-      registerCompactionHooks(api, {} as never, tracker);
+      registerCompactionHooks(api as never, {} as never, tracker);
 
       await handlers[0]({}, { sessionKey: "s1" });
       expect(api.logger.info).toHaveBeenCalledWith(expect.stringContaining("2 docs tracked"));
@@ -1790,7 +1833,7 @@ describe("hooks", () => {
         logger: { info: vi.fn(), debug: vi.fn() },
       };
 
-      registerCompactionHooks(api, {} as never, new SessionReadTracker());
+      registerCompactionHooks(api as never, {} as never, new SessionReadTracker());
 
       await handlers[0]({}, {});
       expect(api.logger.info).not.toHaveBeenCalled();
@@ -2250,6 +2293,7 @@ describe("regression: graceful degradation", () => {
 
     const unhealthyClient = {
       isHealthy: () => false,
+      ensureStarted: vi.fn(),
       indexFileAsync: vi.fn(),
       indexContentAsync: vi.fn(),
       indexContent: vi.fn(),
@@ -2265,7 +2309,7 @@ describe("regression: graceful degradation", () => {
         logger: { debug: vi.fn() },
       };
       registerAfterToolCallHook(
-        api,
+        api as never,
         unhealthyClient as never,
         new SessionReadTracker(),
         new DocMetaCache(),
@@ -2282,7 +2326,7 @@ describe("regression: graceful degradation", () => {
           handlers.push(h),
         logger: { info: vi.fn(), warn: vi.fn() },
       };
-      registerAgentEndHook(api, unhealthyClient as never);
+      registerAgentEndHook(api as never, unhealthyClient as never);
       await handlers[0](
         { success: true, messages: [{ role: "user", content: "I prefer dark mode always" }] },
         {},

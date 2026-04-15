@@ -61,6 +61,7 @@ export type MentatSearchResult = {
   instructions?: string;
   score: number;
   source?: string;
+  session_id?: string;
   metadata?: Record<string, unknown>;
 };
 
