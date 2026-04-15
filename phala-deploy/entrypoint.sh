@@ -12,7 +12,7 @@ if [ -n "$MASTER_KEY" ]; then
       const c = require('crypto');
       const key = c.hkdfSync('sha256', process.argv[1], '', process.argv[2], 32);
       process.stdout.write(Buffer.from(key).toString('base64'));
-    " "$MASTER_KEY" "$1"
+    " -- "$MASTER_KEY" "$1"
   }
 
   GATEWAY_AUTH_TOKEN=$(derive_key gateway-auth-token | tr -d '/+=' | head -c 32)
