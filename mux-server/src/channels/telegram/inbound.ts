@@ -1,6 +1,14 @@
-import type { StatementSync } from "node:sqlite";
+import type { MuxConfig } from "../../config/env.js";
+import type { PreparedStatements } from "../../db/statements.js";
 import type { ClaimResult, StyledNotice, TenantInboundTarget } from "../../domain/types.js";
-import type { MuxInboundAttachment } from "../../mux-envelope.js";
+import { errorString, readNonEmptyString } from "../../domain/values.js";
+import {
+  buildTelegramCallbackInboundEnvelope,
+  buildTelegramInboundEnvelope,
+  type MuxInboundAttachment,
+} from "../../mux-envelope.js";
+import { createInboundTraceId } from "../../observability/tracing.js";
+import { buildTelegramRouteKey } from "../../routing/keys.js";
 
 type TelegramIncomingMessage = {
   message_id?: number;
@@ -30,44 +38,6 @@ type TelegramCallbackQuery = {
 
 type TelegramParseMode = "HTML";
 
-type TelegramCallbackInboundEnvelopeParams = {
-  updateId: number;
-  sessionKey: string;
-  accountId: string;
-  rawBody: string;
-  fromId: string;
-  chatId: string;
-  topicId?: number;
-  chatType: "direct" | "group";
-  messageId: string;
-  timestampMs: number;
-  routeKey: string;
-  callbackData: string;
-  callbackQueryId?: string;
-  rawCallbackQuery: unknown;
-  rawMessage: unknown;
-  rawUpdate: unknown;
-};
-
-type TelegramInboundEnvelopeParams = {
-  updateId: number;
-  sessionKey: string;
-  accountId: string;
-  rawBody: string;
-  fromId: string;
-  chatId: string;
-  topicId?: number;
-  chatType: "direct" | "group";
-  messageId: string;
-  timestampMs: number;
-  routeKey: string;
-  rawMessage: unknown;
-  rawUpdate: unknown;
-  media: unknown;
-  attachments: MuxInboundAttachment[];
-  wasMentioned?: boolean;
-};
-
 type TelegramBotControlCommand =
   | { kind: "help" }
   | { kind: "status" }
@@ -95,13 +65,16 @@ type Metrics = {
 };
 
 export function createTelegramInboundRuntime(deps: {
-  telegramApiBaseUrl: string;
-  telegramInboundEnabled: boolean;
-  telegramPollTimeoutSec: number;
-  telegramPollRetryMs: number;
-  telegramBootstrapLatest: boolean;
+  config: Pick<
+    MuxConfig,
+    | "telegramApiBaseUrl"
+    | "telegramInboundEnabled"
+    | "telegramPollTimeoutSec"
+    | "telegramPollRetryMs"
+    | "telegramBootstrapLatest"
+    | "openclawMuxAccountId"
+  >;
   telegramBotUsername: string | null;
-  openclawMuxAccountId: string;
   metrics: Metrics;
   telegramRuntimeHealth: TelegramRuntimeHealth;
   getTelegramPollConflictHealth: () => TelegramPollConflictHealth | null;
@@ -109,9 +82,7 @@ export function createTelegramInboundRuntime(deps: {
   telegramBgRetryCount: Map<string, number>;
   telegramBgRetryQueuedAtMs: Map<string, number>;
   requireTelegramBotToken: () => string;
-  errorString: (error: unknown) => string;
   log: (entry: Record<string, unknown>) => void;
-  readNonEmptyString: (value: unknown) => string | null;
   resolveStoredTelegramOffset: () => number;
   storeTelegramOffset: (lastUpdateId: number) => void;
   answerTelegramCallbackQuery: (params: {
@@ -122,13 +93,6 @@ export function createTelegramInboundRuntime(deps: {
     isForum: boolean;
     messageThreadId?: unknown;
   }) => number | undefined;
-  createInboundTraceId: (params: {
-    channel: "telegram";
-    tenantId?: string;
-    routeKey?: string;
-    updateId?: number;
-    messageId?: string;
-  }) => string;
   resolveTelegramBindingForIncoming: (
     chatId: string,
     topicId?: number,
@@ -138,18 +102,13 @@ export function createTelegramInboundRuntime(deps: {
     routeKey: string;
   } | null;
   resolveTenantInboundTarget: (tenantId: string) => TenantInboundTarget | null;
-  buildTelegramRouteKey: (chatId: string, topicId?: number) => string;
   resolveTelegramInboundSessionKey: (params: {
     tenantId: string;
     bindingId: string;
     chatId: string;
     topicId?: number;
   }) => string;
-  stmtUpsertSessionRoute: StatementSync;
-  buildTelegramCallbackInboundEnvelope: (
-    params: TelegramCallbackInboundEnvelopeParams,
-  ) => Record<string, unknown>;
-  buildTelegramInboundEnvelope: (params: TelegramInboundEnvelopeParams) => Record<string, unknown>;
+  db: Pick<PreparedStatements, "stmtUpsertSessionRoute">;
   buildInboundAuthHeaders: (
     target: TenantInboundTarget,
     traceId?: string,
@@ -214,12 +173,12 @@ export function createTelegramInboundRuntime(deps: {
 
   async function fetchTelegramUpdates(offset: number): Promise<TelegramUpdate[]> {
     const token = deps.requireTelegramBotToken();
-    const response = await fetch(`${deps.telegramApiBaseUrl}/bot${token}/getUpdates`, {
+    const response = await fetch(`${deps.config.telegramApiBaseUrl}/bot${token}/getUpdates`, {
       method: "POST",
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify({
         offset,
-        timeout: Math.max(1, Math.trunc(deps.telegramPollTimeoutSec)),
+        timeout: Math.max(1, Math.trunc(deps.config.telegramPollTimeoutSec)),
         allowed_updates: ["message", "edited_message", "callback_query"],
       }),
     });
@@ -284,7 +243,7 @@ export function createTelegramInboundRuntime(deps: {
   }
 
   async function bootstrapTelegramOffsetIfNeeded() {
-    if (!deps.telegramBootstrapLatest) {
+    if (!deps.config.telegramBootstrapLatest) {
       return;
     }
     const current = deps.resolveStoredTelegramOffset();
@@ -292,7 +251,7 @@ export function createTelegramInboundRuntime(deps: {
       return;
     }
     const token = deps.requireTelegramBotToken();
-    const response = await fetch(`${deps.telegramApiBaseUrl}/bot${token}/getUpdates`, {
+    const response = await fetch(`${deps.config.telegramApiBaseUrl}/bot${token}/getUpdates`, {
       method: "POST",
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify({
@@ -323,12 +282,12 @@ export function createTelegramInboundRuntime(deps: {
     update: TelegramUpdate;
     callbackQuery: TelegramCallbackQuery;
   }) {
-    const callbackData = deps.readNonEmptyString(params.callbackQuery.data);
+    const callbackData = readNonEmptyString(params.callbackQuery.data);
     const callbackMessage =
       params.callbackQuery.message && typeof params.callbackQuery.message === "object"
         ? params.callbackQuery.message
         : null;
-    const callbackQueryId = deps.readNonEmptyString(params.callbackQuery.id);
+    const callbackQueryId = readNonEmptyString(params.callbackQuery.id);
     if (!callbackData || !callbackMessage) {
       if (callbackQueryId) {
         try {
@@ -360,7 +319,7 @@ export function createTelegramInboundRuntime(deps: {
       typeof callbackMessage.message_id === "number" && Number.isFinite(callbackMessage.message_id)
         ? String(Math.trunc(callbackMessage.message_id))
         : undefined;
-    const traceId = deps.createInboundTraceId({
+    const traceId = createInboundTraceId({
       channel: "telegram",
       updateId: params.updateId,
       messageId: callbackMessageIdSeed,
@@ -413,7 +372,7 @@ export function createTelegramInboundRuntime(deps: {
         ? Math.trunc(callbackMessage.date) * 1_000
         : Date.now();
     const chatType = callbackMessage.chat?.type === "private" ? "direct" : "group";
-    const inboundRouteKey = deps.buildTelegramRouteKey(chatId, topicId);
+    const inboundRouteKey = buildTelegramRouteKey(chatId, topicId);
     const sessionKey = deps.resolveTelegramInboundSessionKey({
       tenantId: binding.tenantId,
       bindingId: binding.bindingId,
@@ -421,7 +380,7 @@ export function createTelegramInboundRuntime(deps: {
       topicId,
     });
 
-    deps.stmtUpsertSessionRoute.run(
+    deps.db.stmtUpsertSessionRoute.run(
       binding.tenantId,
       "telegram",
       sessionKey,
@@ -430,10 +389,10 @@ export function createTelegramInboundRuntime(deps: {
       Date.now(),
     );
 
-    const payload = deps.buildTelegramCallbackInboundEnvelope({
+    const payload = buildTelegramCallbackInboundEnvelope({
       updateId: params.updateId,
       sessionKey,
-      accountId: deps.openclawMuxAccountId,
+      accountId: deps.config.openclawMuxAccountId,
       rawBody: callbackData,
       fromId,
       chatId,
@@ -452,7 +411,7 @@ export function createTelegramInboundRuntime(deps: {
       ...payload,
       openclawId: binding.tenantId,
     };
-    const tenantTraceId = deps.createInboundTraceId({
+    const tenantTraceId = createInboundTraceId({
       channel: "telegram",
       tenantId: binding.tenantId,
       routeKey: inboundRouteKey,
@@ -732,8 +691,8 @@ export function createTelegramInboundRuntime(deps: {
       typeof message.message_id === "number" && Number.isFinite(message.message_id)
         ? String(Math.trunc(message.message_id))
         : `tg-msg:${updateId}`;
-    const inboundRouteKey = deps.buildTelegramRouteKey(chatId, topicId);
-    const traceId = deps.createInboundTraceId({
+    const inboundRouteKey = buildTelegramRouteKey(chatId, topicId);
+    const traceId = createInboundTraceId({
       channel: "telegram",
       tenantId: binding.tenantId,
       routeKey: inboundRouteKey,
@@ -775,7 +734,7 @@ export function createTelegramInboundRuntime(deps: {
       topicId,
     });
 
-    deps.stmtUpsertSessionRoute.run(
+    deps.db.stmtUpsertSessionRoute.run(
       binding.tenantId,
       "telegram",
       sessionKey,
@@ -802,10 +761,10 @@ export function createTelegramInboundRuntime(deps: {
       }
     }
 
-    const payload = deps.buildTelegramInboundEnvelope({
+    const payload = buildTelegramInboundEnvelope({
       updateId,
       sessionKey,
-      accountId: deps.openclawMuxAccountId,
+      accountId: deps.config.openclawMuxAccountId,
       rawBody: forwardedBody,
       fromId,
       chatId,
@@ -863,7 +822,7 @@ export function createTelegramInboundRuntime(deps: {
   }
 
   async function runTelegramInboundLoop() {
-    if (!deps.telegramInboundEnabled) {
+    if (!deps.config.telegramInboundEnabled) {
       return;
     }
     deps.telegramRuntimeHealth.loopStartedAtMs = Date.now();
@@ -874,7 +833,7 @@ export function createTelegramInboundRuntime(deps: {
     } catch (error) {
       updateTelegramPollConflictHealth(error);
       deps.telegramRuntimeHealth.lastPollErrorAtMs = Date.now();
-      deps.telegramRuntimeHealth.lastPollError = deps.errorString(error);
+      deps.telegramRuntimeHealth.lastPollError = errorString(error);
       deps.log({ type: "telegram_inbound_bootstrap_error", error: String(error) });
     }
 
@@ -918,7 +877,7 @@ export function createTelegramInboundRuntime(deps: {
             deps.log({
               type: "telegram_inbound_forward_failed",
               updateId,
-              error: deps.errorString(error),
+              error: errorString(error),
             });
             const tenantId = resolveTenantIdForTelegramUpdate(update);
             if (tenantId) {
@@ -982,10 +941,10 @@ export function createTelegramInboundRuntime(deps: {
       } catch (error) {
         updateTelegramPollConflictHealth(error);
         deps.telegramRuntimeHealth.lastPollErrorAtMs = Date.now();
-        deps.telegramRuntimeHealth.lastPollError = deps.errorString(error);
+        deps.telegramRuntimeHealth.lastPollError = errorString(error);
         deps.log({ type: "telegram_inbound_poll_error", error: String(error) });
         await new Promise((resolveSleep) =>
-          setTimeout(resolveSleep, Math.max(100, Math.trunc(deps.telegramPollRetryMs))),
+          setTimeout(resolveSleep, Math.max(100, Math.trunc(deps.config.telegramPollRetryMs))),
         );
       }
     }

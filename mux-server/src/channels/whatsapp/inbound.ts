@@ -1,9 +1,19 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { StatementSync } from "node:sqlite";
+import type { MuxConfig } from "../../config/env.js";
+import type { PreparedStatements } from "../../db/statements.js";
 import type { ClaimResult, StyledNotice, TenantInboundTarget } from "../../domain/types.js";
-import { WhatsAppInboundDeliveryError } from "../../whatsapp-inbound-queue.js";
+import { errorString, readNonEmptyString } from "../../domain/values.js";
+import { buildWhatsAppInboundEnvelope } from "../../mux-envelope.js";
+import { createInboundTraceId } from "../../observability/tracing.js";
+import { deriveWhatsAppSessionKey } from "../../routing/keys.js";
+import {
+  classifyWhatsAppInboundDeliveryError,
+  resolveWhatsAppInboundQueueRetryState,
+  WhatsAppInboundDeliveryError,
+} from "../../whatsapp-inbound-queue.js";
+import { inferMimeTypeFromPath } from "../telegram/media.js";
 
 type WhatsAppInboundQueueRow = {
   id: number;
@@ -127,58 +137,35 @@ type BotControlCommand =
   | { kind: "switch"; token?: string };
 
 export function createWhatsAppInboundRuntime(deps: {
-  whatsappInboundEnabled: boolean;
-  whatsappInboundRetryMs: number;
-  whatsappQueuePollMs: number;
-  whatsappQueueRetryInitialMs: number;
-  whatsappQueueRetryMaxMs: number;
-  whatsappQueueBatchSize: number;
-  whatsappQueueMaxAgeMs: number;
-  whatsappAccountId: string;
-  whatsappAuthDir: string;
-  muxPublicUrl: string;
-  openclawMuxAccountId: string;
+  config: Pick<
+    MuxConfig,
+    | "whatsappInboundEnabled"
+    | "whatsappInboundRetryMs"
+    | "whatsappQueuePollMs"
+    | "whatsappQueueRetryInitialMs"
+    | "whatsappQueueRetryMaxMs"
+    | "whatsappQueueBatchSize"
+    | "whatsappQueueMaxAgeMs"
+    | "whatsappAccountId"
+    | "whatsappAuthDir"
+    | "muxPublicUrl"
+    | "openclawMuxAccountId"
+  >;
   whatsappRuntimeHealth: WhatsAppRuntimeHealth;
   getActiveWhatsAppListener: () => ActiveWebListener | null;
   setActiveWhatsAppListener: (listener: ActiveWebListener | null) => void;
   loadWebRuntimeModules: () => Promise<WebRuntimeModules>;
-  errorString: (error: unknown) => string;
   log: (entry: Record<string, unknown>) => void;
-  readNonEmptyString: (value: unknown) => string | null;
-  inferMimeTypeFromPath: (filePath: string) => string | null;
-  stmtInsertWhatsAppInboundQueue: StatementSync;
-  stmtSelectDueWhatsAppInboundQueue: StatementSync;
-  stmtDeleteWhatsAppInboundQueueById: StatementSync;
-  stmtDeferWhatsAppInboundQueueById: StatementSync;
-  stmtSelectSessionKeyByBinding: StatementSync;
-  stmtUpsertSessionRoute: StatementSync;
+  db: Pick<
+    PreparedStatements,
+    | "stmtInsertWhatsAppInboundQueue"
+    | "stmtSelectDueWhatsAppInboundQueue"
+    | "stmtDeleteWhatsAppInboundQueueById"
+    | "stmtDeferWhatsAppInboundQueueById"
+    | "stmtSelectSessionKeyByBinding"
+    | "stmtUpsertSessionRoute"
+  >;
   metrics: Metrics;
-  classifyWhatsAppInboundDeliveryError: (
-    error: unknown,
-    errorString: (error: unknown) => string,
-  ) => {
-    retryable: boolean;
-    statusCode: number | null;
-    errorMessage: string;
-    targetUpdatedAtMs: number | null;
-  };
-  resolveWhatsAppInboundQueueRetryState: (params: {
-    row: WhatsAppInboundQueueRow;
-    now: number;
-    maxAgeMs: number;
-    failure: {
-      retryable: boolean;
-      statusCode: number | null;
-      errorMessage: string;
-      targetUpdatedAtMs: number | null;
-    };
-  }) => {
-    exhausted: boolean;
-    attemptCount: number;
-    ageMs: number;
-    deliveryWindowStartedAtMs: number;
-    lastTargetUpdateAtMs: number;
-  };
   parseBotControlCommand: (input: string) => BotControlCommand | null;
   handleWhatsAppBotControlCommand: (params: {
     command: BotControlCommand;
@@ -218,43 +205,16 @@ export function createWhatsAppInboundRuntime(deps: {
     chatJid: string;
     accountId: string;
   }) => { tenantId: string; bindingId: string; routeKey: string } | null;
-  createInboundTraceId: (params: {
-    channel: "whatsapp";
-    tenantId?: string;
-    routeKey?: string;
-    updateId?: number;
-    messageId?: string;
-  }) => string;
   resolveTenantInboundTarget: (tenantId: string) => TenantInboundTarget | null;
   isRetryableWhatsAppInboundStatus: (statusCode: number) => boolean;
-  deriveWhatsAppSessionKey: (params: {
-    chatJid: string;
-    chatType: "direct" | "group";
-    directPeerId?: string;
-  }) => string;
-  buildWhatsAppInboundEnvelope: (params: {
-    messageId: string;
-    sessionKey: string;
-    openclawAccountId: string;
-    rawBody: string;
-    fromId: string;
-    chatJid: string;
-    routeKey: string;
-    accountId: string;
-    chatType: "direct" | "group";
-    timestampMs: number;
-    rawMessage: Record<string, unknown>;
-    media: WhatsAppInboundMediaSummary[] | null;
-    attachments: WhatsAppInboundAttachment[];
-  }) => Record<string, unknown>;
   buildInboundAuthHeaders: (
     target: TenantInboundTarget,
     traceId?: string,
   ) => Promise<Record<string, string>>;
 }) {
   function computeWhatsAppQueueRetryDelayMs(attemptCount: number): number {
-    const base = Math.max(100, Math.trunc(deps.whatsappQueueRetryInitialMs));
-    const maxDelay = Math.max(base, Math.trunc(deps.whatsappQueueRetryMaxMs));
+    const base = Math.max(100, Math.trunc(deps.config.whatsappQueueRetryInitialMs));
+    const maxDelay = Math.max(base, Math.trunc(deps.config.whatsappQueueRetryMaxMs));
     const exp = Math.max(0, Math.min(10, Math.trunc(attemptCount)));
     const delay = base * 2 ** exp;
     return Math.min(maxDelay, delay);
@@ -262,36 +222,35 @@ export function createWhatsAppInboundRuntime(deps: {
 
   function snapshotWhatsAppInboundMessage(message: WebInboundMessage): WebInboundMessage {
     return {
-      id: deps.readNonEmptyString(message.id) ?? undefined,
+      id: readNonEmptyString(message.id) ?? undefined,
       from: typeof message.from === "string" ? message.from : "",
       to: typeof message.to === "string" ? message.to : "",
-      accountId: deps.readNonEmptyString(message.accountId) ?? deps.whatsappAccountId,
+      accountId: readNonEmptyString(message.accountId) ?? deps.config.whatsappAccountId,
       body: typeof message.body === "string" ? message.body : "",
       timestamp:
         typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
           ? Math.trunc(message.timestamp)
           : undefined,
       chatType: message.chatType === "group" ? "group" : "direct",
-      chatId:
-        deps.readNonEmptyString(message.chatId) ?? deps.readNonEmptyString(message.from) ?? "",
-      senderJid: deps.readNonEmptyString(message.senderJid) ?? undefined,
-      senderE164: deps.readNonEmptyString(message.senderE164) ?? undefined,
-      senderName: deps.readNonEmptyString(message.senderName) ?? undefined,
-      replyToId: deps.readNonEmptyString(message.replyToId) ?? undefined,
-      replyToBody: deps.readNonEmptyString(message.replyToBody) ?? undefined,
-      replyToSender: deps.readNonEmptyString(message.replyToSender) ?? undefined,
-      replyToSenderJid: deps.readNonEmptyString(message.replyToSenderJid) ?? undefined,
-      replyToSenderE164: deps.readNonEmptyString(message.replyToSenderE164) ?? undefined,
-      groupSubject: deps.readNonEmptyString(message.groupSubject) ?? undefined,
+      chatId: readNonEmptyString(message.chatId) ?? readNonEmptyString(message.from) ?? "",
+      senderJid: readNonEmptyString(message.senderJid) ?? undefined,
+      senderE164: readNonEmptyString(message.senderE164) ?? undefined,
+      senderName: readNonEmptyString(message.senderName) ?? undefined,
+      replyToId: readNonEmptyString(message.replyToId) ?? undefined,
+      replyToBody: readNonEmptyString(message.replyToBody) ?? undefined,
+      replyToSender: readNonEmptyString(message.replyToSender) ?? undefined,
+      replyToSenderJid: readNonEmptyString(message.replyToSenderJid) ?? undefined,
+      replyToSenderE164: readNonEmptyString(message.replyToSenderE164) ?? undefined,
+      groupSubject: readNonEmptyString(message.groupSubject) ?? undefined,
       groupParticipants: Array.isArray(message.groupParticipants)
         ? message.groupParticipants.filter((entry): entry is string => typeof entry === "string")
         : undefined,
       mentionedJids: Array.isArray(message.mentionedJids)
         ? message.mentionedJids.filter((entry): entry is string => typeof entry === "string")
         : undefined,
-      mediaPath: deps.readNonEmptyString(message.mediaPath) ?? undefined,
-      mediaType: deps.readNonEmptyString(message.mediaType) ?? undefined,
-      mediaUrl: deps.readNonEmptyString(message.mediaUrl) ?? undefined,
+      mediaPath: readNonEmptyString(message.mediaPath) ?? undefined,
+      mediaType: readNonEmptyString(message.mediaType) ?? undefined,
+      mediaUrl: readNonEmptyString(message.mediaUrl) ?? undefined,
     };
   }
 
@@ -301,11 +260,11 @@ export function createWhatsAppInboundRuntime(deps: {
       return;
     }
     const now = Date.now();
-    const messageId = deps.readNonEmptyString(snapshot.id);
+    const messageId = readNonEmptyString(snapshot.id);
     const dedupeKey = messageId
       ? `${snapshot.accountId}:${snapshot.chatId}:${messageId}`
       : `${snapshot.accountId}:${snapshot.chatId}:noid:${now}:${randomUUID()}`;
-    const insertResult = deps.stmtInsertWhatsAppInboundQueue.run(
+    const insertResult = deps.db.stmtInsertWhatsAppInboundQueue.run(
       dedupeKey,
       JSON.stringify(snapshot),
       now,
@@ -344,8 +303,8 @@ export function createWhatsAppInboundRuntime(deps: {
   }> {
     const attachments: WhatsAppInboundAttachment[] = [];
     const media: WhatsAppInboundMediaSummary[] = [];
-    const mediaPath = deps.readNonEmptyString(params.message.mediaPath) ?? undefined;
-    const mediaType = deps.readNonEmptyString(params.message.mediaType)?.toLowerCase() ?? undefined;
+    const mediaPath = readNonEmptyString(params.message.mediaPath) ?? undefined;
+    const mediaType = readNonEmptyString(params.message.mediaType)?.toLowerCase() ?? undefined;
     if (!mediaPath) {
       return { attachments, media };
     }
@@ -371,8 +330,8 @@ export function createWhatsAppInboundRuntime(deps: {
     media.push(summary);
 
     const resolvedMime =
-      mediaType || deps.inferMimeTypeFromPath(mediaPath) || "application/octet-stream";
-    const proxyUrl = `${deps.muxPublicUrl}/v1/mux/files/whatsapp?path=${encodeURIComponent(mediaPath)}`;
+      mediaType || inferMimeTypeFromPath(mediaPath) || "application/octet-stream";
+    const proxyUrl = `${deps.config.muxPublicUrl}/v1/mux/files/whatsapp?path=${encodeURIComponent(mediaPath)}`;
     attachments.push({
       type: resolvedMime.split("/")[0] || "file",
       mimeType: resolvedMime,
@@ -383,18 +342,15 @@ export function createWhatsAppInboundRuntime(deps: {
   }
 
   async function forwardWhatsAppInboundMessage(message: WebInboundMessage) {
-    const chatJid =
-      deps.readNonEmptyString(message.chatId) ?? deps.readNonEmptyString(message.from);
+    const chatJid = readNonEmptyString(message.chatId) ?? readNonEmptyString(message.from);
     if (!chatJid) {
       return;
     }
-    const accountId = deps.readNonEmptyString(message.accountId) ?? deps.whatsappAccountId;
+    const accountId = readNonEmptyString(message.accountId) ?? deps.config.whatsappAccountId;
     const chatType = message.chatType === "group" ? "group" : "direct";
     const directPeerId =
       chatType === "direct"
-        ? (deps.readNonEmptyString(message.senderE164) ??
-          deps.readNonEmptyString(message.from) ??
-          undefined)
+        ? (readNonEmptyString(message.senderE164) ?? readNonEmptyString(message.from) ?? undefined)
         : undefined;
     const body = typeof message.body === "string" ? message.body : "";
     const binding = deps.resolveWhatsAppBindingForIncoming({
@@ -405,9 +361,7 @@ export function createWhatsAppInboundRuntime(deps: {
     if (botControlCommand) {
       try {
         const fromId =
-          deps.readNonEmptyString(message.senderE164) ??
-          deps.readNonEmptyString(message.from) ??
-          chatJid;
+          readNonEmptyString(message.senderE164) ?? readNonEmptyString(message.from) ?? chatJid;
         await deps.handleWhatsAppBotControlCommand({
           command: botControlCommand,
           chatJid,
@@ -573,8 +527,8 @@ export function createWhatsAppInboundRuntime(deps: {
       return;
     }
 
-    const messageId = deps.readNonEmptyString(message.id) ?? `wa:${Date.now()}:${randomUUID()}`;
-    const traceId = deps.createInboundTraceId({
+    const messageId = readNonEmptyString(message.id) ?? `wa:${Date.now()}:${randomUUID()}`;
+    const traceId = createInboundTraceId({
       channel: "whatsapp",
       tenantId: binding.tenantId,
       routeKey: binding.routeKey,
@@ -606,28 +560,28 @@ export function createWhatsAppInboundRuntime(deps: {
     }
 
     const fromId =
-      deps.readNonEmptyString(message.senderE164) ??
-      deps.readNonEmptyString(message.senderJid) ??
-      deps.readNonEmptyString(message.from) ??
+      readNonEmptyString(message.senderE164) ??
+      readNonEmptyString(message.senderJid) ??
+      readNonEmptyString(message.from) ??
       "unknown";
     deps.metrics.recordActiveUser("whatsapp", fromId);
     const timestampMs =
       typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
         ? Math.trunc(message.timestamp)
         : Date.now();
-    const existingRoute = deps.stmtSelectSessionKeyByBinding.get(
+    const existingRoute = deps.db.stmtSelectSessionKeyByBinding.get(
       binding.tenantId,
       "whatsapp",
       binding.bindingId,
     ) as { session_key?: unknown } | undefined;
     const sessionKey =
       (typeof existingRoute?.session_key === "string" && existingRoute.session_key.trim()) ||
-      deps.deriveWhatsAppSessionKey({
+      deriveWhatsAppSessionKey({
         chatJid,
         chatType,
         directPeerId,
       });
-    deps.stmtUpsertSessionRoute.run(
+    deps.db.stmtUpsertSessionRoute.run(
       binding.tenantId,
       "whatsapp",
       sessionKey,
@@ -636,10 +590,10 @@ export function createWhatsAppInboundRuntime(deps: {
       Date.now(),
     );
 
-    const payload = deps.buildWhatsAppInboundEnvelope({
+    const payload = buildWhatsAppInboundEnvelope({
       messageId,
       sessionKey,
-      openclawAccountId: deps.openclawMuxAccountId,
+      openclawAccountId: deps.config.openclawMuxAccountId,
       rawBody: body,
       fromId,
       chatJid,
@@ -694,7 +648,7 @@ export function createWhatsAppInboundRuntime(deps: {
     } catch (error) {
       deps.metrics.observeInboundForwardDuration("whatsapp", Date.now() - forwardStartedAtMs);
       deps.metrics.recordInboundEvent("whatsapp", "error");
-      throw new WhatsAppInboundDeliveryError(deps.errorString(error), {
+      throw new WhatsAppInboundDeliveryError(errorString(error), {
         retryable: true,
         targetUpdatedAtMs: target.updatedAtMs,
         cause: error,
@@ -728,15 +682,15 @@ export function createWhatsAppInboundRuntime(deps: {
 
   async function processWhatsAppInboundQueuePass(): Promise<void> {
     const now = Date.now();
-    const batchSize = Math.max(1, Math.min(100, Math.trunc(deps.whatsappQueueBatchSize)));
-    const rows = deps.stmtSelectDueWhatsAppInboundQueue.all(
+    const batchSize = Math.max(1, Math.min(100, Math.trunc(deps.config.whatsappQueueBatchSize)));
+    const rows = deps.db.stmtSelectDueWhatsAppInboundQueue.all(
       now,
       batchSize,
     ) as WhatsAppInboundQueueRow[];
     for (const row of rows) {
       const message = parseQueuedWhatsAppInboundMessage(row);
       if (!message) {
-        deps.stmtDeleteWhatsAppInboundQueueById.run(row.id);
+        deps.db.stmtDeleteWhatsAppInboundQueueById.run(row.id);
         deps.log({
           type: "whatsapp_inbound_queue_drop_invalid_payload",
           queueId: row.id,
@@ -747,7 +701,7 @@ export function createWhatsAppInboundRuntime(deps: {
 
       try {
         await forwardWhatsAppInboundMessage(message);
-        deps.stmtDeleteWhatsAppInboundQueueById.run(row.id);
+        deps.db.stmtDeleteWhatsAppInboundQueueById.run(row.id);
         deps.log({
           type: "whatsapp_inbound_ack_committed",
           queueId: row.id,
@@ -755,16 +709,16 @@ export function createWhatsAppInboundRuntime(deps: {
           messageId: message.id ?? null,
         });
       } catch (error) {
-        const failure = deps.classifyWhatsAppInboundDeliveryError(error, deps.errorString);
-        const maxAgeMs = Math.max(1_000, Math.trunc(deps.whatsappQueueMaxAgeMs));
-        const retryState = deps.resolveWhatsAppInboundQueueRetryState({
+        const failure = classifyWhatsAppInboundDeliveryError(error, errorString);
+        const maxAgeMs = Math.max(1_000, Math.trunc(deps.config.whatsappQueueMaxAgeMs));
+        const retryState = resolveWhatsAppInboundQueueRetryState({
           row,
           now,
           maxAgeMs,
           failure,
         });
         if (retryState.exhausted) {
-          deps.stmtDeleteWhatsAppInboundQueueById.run(row.id);
+          deps.db.stmtDeleteWhatsAppInboundQueueById.run(row.id);
           deps.metrics.recordInboundEvent("whatsapp", "dropped");
           deps.log({
             type: "whatsapp_inbound_bg_retry_exhausted",
@@ -783,7 +737,7 @@ export function createWhatsAppInboundRuntime(deps: {
 
         const retryDelayMs = computeWhatsAppQueueRetryDelayMs(retryState.attemptCount);
         const nextAttemptAtMs = Date.now() + retryDelayMs;
-        deps.stmtDeferWhatsAppInboundQueueById.run(
+        deps.db.stmtDeferWhatsAppInboundQueueById.run(
           nextAttemptAtMs,
           retryState.attemptCount,
           failure.errorMessage.slice(0, 2_000),
@@ -807,7 +761,7 @@ export function createWhatsAppInboundRuntime(deps: {
   }
 
   async function runWhatsAppInboundQueueLoop(shouldContinue: () => boolean): Promise<void> {
-    const pollMs = Math.max(100, Math.trunc(deps.whatsappQueuePollMs));
+    const pollMs = Math.max(100, Math.trunc(deps.config.whatsappQueuePollMs));
     while (shouldContinue()) {
       try {
         await processWhatsAppInboundQueuePass();
@@ -822,7 +776,7 @@ export function createWhatsAppInboundRuntime(deps: {
   }
 
   async function runWhatsAppInboundLoop() {
-    if (!deps.whatsappInboundEnabled) {
+    if (!deps.config.whatsappInboundEnabled) {
       return;
     }
 
@@ -848,8 +802,8 @@ export function createWhatsAppInboundRuntime(deps: {
         deps.whatsappRuntimeHealth.lastListenerStartAtMs = Date.now();
         const monitored = await monitorWebInbox({
           verbose: false,
-          accountId: deps.whatsappAccountId,
-          authDir: deps.whatsappAuthDir,
+          accountId: deps.config.whatsappAccountId,
+          authDir: deps.config.whatsappAuthDir,
           resolveAccessControl: async (params) => {
             const isSamePhone = params.from === params.selfE164;
             const isOutboundEcho = params.isFromMe && !isSamePhone;
@@ -870,7 +824,7 @@ export function createWhatsAppInboundRuntime(deps: {
         deps.whatsappRuntimeHealth.listenerActive = true;
         deps.whatsappRuntimeHealth.lastListenerError = null;
         deps.whatsappRuntimeHealth.lastListenerErrorAtMs = null;
-        setActiveWebListener(deps.whatsappAccountId, monitored);
+        setActiveWebListener(deps.config.whatsappAccountId, monitored);
         const closeReason = await monitored.onClose;
         deps.whatsappRuntimeHealth.lastListenerCloseAtMs = Date.now();
         deps.whatsappRuntimeHealth.lastListenerCloseStatus =
@@ -899,11 +853,11 @@ export function createWhatsAppInboundRuntime(deps: {
         }
       } catch (error) {
         deps.whatsappRuntimeHealth.lastListenerErrorAtMs = Date.now();
-        deps.whatsappRuntimeHealth.lastListenerError = deps.errorString(error);
+        deps.whatsappRuntimeHealth.lastListenerError = errorString(error);
         deps.whatsappRuntimeHealth.listenerActive = false;
         deps.log({
           type: "whatsapp_inbound_listener_error",
-          error: deps.errorString(error),
+          error: errorString(error),
         });
       } finally {
         if (listener) {
@@ -918,14 +872,14 @@ export function createWhatsAppInboundRuntime(deps: {
         }
         deps.setActiveWhatsAppListener(null);
         deps.whatsappRuntimeHealth.listenerActive = false;
-        setActiveWebListener(deps.whatsappAccountId, null);
+        setActiveWebListener(deps.config.whatsappAccountId, null);
       }
 
       if (!running) {
         break;
       }
       await new Promise((resolveSleep) =>
-        setTimeout(resolveSleep, Math.max(100, Math.trunc(deps.whatsappInboundRetryMs))),
+        setTimeout(resolveSleep, Math.max(100, Math.trunc(deps.config.whatsappInboundRetryMs))),
       );
     }
 

@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { StatementSync } from "node:sqlite";
+import type { MuxConfig } from "../config/env.js";
+import type { PreparedStatements } from "../db/statements.js";
 import type {
   ClaimResult,
   ClaimType,
@@ -10,6 +11,17 @@ import type {
   TenantIdentity,
 } from "../domain/types.js";
 import { readNonEmptyString } from "../domain/values.js";
+import {
+  buildDiscordRouteKey,
+  buildDiscordThreadScopedSessionKey,
+  buildTelegramRouteKey,
+  buildWhatsAppRouteKey,
+  deriveTelegramSessionKey,
+  deriveWhatsAppSessionKey,
+  parseDiscordRouteKey,
+  resolveDiscordBindingRouteKeyForClaim,
+  resolveDiscordBindingScope,
+} from "../routing/keys.js";
 
 type PairingCodeRow = {
   channel: string;
@@ -45,44 +57,35 @@ function generatePairingToken(): string {
 
 export function createPairingService(deps: {
   dbExec: (sql: string) => void;
-  pairingTokenTtlSec: number;
-  pairingTokenMaxTtlSec: number;
-  discordPendingGcEnabled: boolean;
+  config: Pick<
+    MuxConfig,
+    "pairingTokenTtlSec" | "pairingTokenMaxTtlSec" | "discordPendingGcEnabled"
+  >;
   telegramBotUsername: string | null;
-  buildTelegramRouteKey: (chatId: string, topicId?: number) => string;
-  buildDiscordRouteKey: (route: DiscordBoundRoute) => string;
-  buildDiscordThreadScopedSessionKey: (baseSessionKey: string, threadId: string) => string;
   buildThreadScopedSessionKey: (baseSessionKey: string, chatId: string, topicId: number) => string;
-  buildWhatsAppRouteKey: (chatJid: string, accountId?: string) => string;
-  deriveTelegramSessionKey: (chatId: string, topicId?: number) => string;
   deriveDiscordSessionKey: (params: { route: DiscordBoundRoute; channelId: string }) => string;
-  deriveWhatsAppSessionKey: (params: {
-    chatJid: string;
-    chatType: "direct" | "group";
-    directPeerId?: string;
-  }) => string;
-  parseDiscordRouteKey: (routeKey: string) => DiscordBoundRoute | null;
-  resolveDiscordBindingRouteKeyForClaim: (params: { incomingRoute: DiscordBoundRoute }) => string;
-  resolveDiscordBindingScope: (route: DiscordBoundRoute) => string;
   resolveLiveBindingByRouteKey: (channel: string, routeKey: string) => LiveBindingLookupRow | null;
-  stmtDeleteExpiredPairingTokens: StatementSync;
-  stmtDeactivateStaleDiscordPendingBindings: StatementSync;
-  stmtInsertPairingToken: StatementSync;
-  stmtSelectActivePairingTokenByHash: StatementSync;
-  stmtSelectPairingCodeByCode: StatementSync;
-  stmtClaimPairingCode: StatementSync;
-  stmtRevertPairingCodeClaim: StatementSync;
-  stmtInsertBinding: StatementSync;
-  stmtInsertPendingBinding: StatementSync;
-  stmtActivatePendingBinding: StatementSync;
-  stmtDeactivateLiveBinding: StatementSync;
-  stmtUpsertSessionRoute: StatementSync;
-  stmtConsumePairingToken: StatementSync;
-  stmtAttachPairingTokenBinding: StatementSync;
-  stmtListActiveBindingsByTenant: StatementSync;
-  stmtSelectActiveBindingByTenantAndRoute: StatementSync;
-  stmtUnbindActiveBinding: StatementSync;
-  stmtDeleteSessionRoutesByBinding: StatementSync;
+  db: Pick<
+    PreparedStatements,
+    | "stmtDeleteExpiredPairingTokens"
+    | "stmtDeactivateStaleDiscordPendingBindings"
+    | "stmtInsertPairingToken"
+    | "stmtSelectActivePairingTokenByHash"
+    | "stmtSelectPairingCodeByCode"
+    | "stmtClaimPairingCode"
+    | "stmtRevertPairingCodeClaim"
+    | "stmtInsertBinding"
+    | "stmtInsertPendingBinding"
+    | "stmtActivatePendingBinding"
+    | "stmtDeactivateLiveBinding"
+    | "stmtUpsertSessionRoute"
+    | "stmtConsumePairingToken"
+    | "stmtAttachPairingTokenBinding"
+    | "stmtListActiveBindingsByTenant"
+    | "stmtSelectActiveBindingByTenantAndRoute"
+    | "stmtUnbindActiveBinding"
+    | "stmtDeleteSessionRoutesByBinding"
+  >;
   isRouteBoundByAnotherTenant: (params: {
     channel: string;
     routeKey: string;
@@ -97,9 +100,9 @@ export function createPairingService(deps: {
   ) => void;
 }) {
   function purgeExpiredPairingTokens(nowMs: number) {
-    deps.stmtDeleteExpiredPairingTokens.run(nowMs);
-    if (deps.discordPendingGcEnabled) {
-      deps.stmtDeactivateStaleDiscordPendingBindings.run(nowMs, nowMs);
+    deps.db.stmtDeleteExpiredPairingTokens.run(nowMs);
+    if (deps.config.discordPendingGcEnabled) {
+      deps.db.stmtDeactivateStaleDiscordPendingBindings.run(nowMs, nowMs);
     }
   }
 
@@ -131,16 +134,16 @@ export function createPairingService(deps: {
     const nowMs = Date.now();
     purgeExpiredPairingTokens(nowMs);
     const ttlSec = normalizeTtlSec(
-      params.ttlSec ?? deps.pairingTokenTtlSec,
-      deps.pairingTokenTtlSec,
-      deps.pairingTokenMaxTtlSec,
+      params.ttlSec ?? deps.config.pairingTokenTtlSec,
+      deps.config.pairingTokenTtlSec,
+      deps.config.pairingTokenMaxTtlSec,
     );
     const token = generatePairingToken();
     const tokenHash = hashPairingToken(token);
     const expiresAtMs = nowMs + ttlSec * 1_000;
     const sessionKey = readNonEmptyString(params.sessionKey);
 
-    deps.stmtInsertPairingToken.run(tokenHash, params.tenant.id, sessionKey, nowMs, expiresAtMs);
+    deps.db.stmtInsertPairingToken.run(tokenHash, params.tenant.id, sessionKey, nowMs, expiresAtMs);
 
     const telegramDeepLink = deps.telegramBotUsername
       ? `https://t.me/${deps.telegramBotUsername}?start=${encodeURIComponent(token)}`
@@ -172,7 +175,7 @@ export function createPairingService(deps: {
     const now = Date.now();
     purgeExpiredPairingTokens(now);
     const tokenHash = hashPairingToken(token);
-    const row = deps.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+    const row = deps.db.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
       | PairingTokenRow
       | undefined;
     return row ?? null;
@@ -188,7 +191,7 @@ export function createPairingService(deps: {
       const now = Date.now();
       purgeExpiredPairingTokens(now);
       const tokenHash = hashPairingToken(params.token);
-      const row = deps.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+      const row = deps.db.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
         | PairingTokenRow
         | undefined;
       if (!row) {
@@ -196,10 +199,10 @@ export function createPairingService(deps: {
       }
 
       const tenantId = String(row.tenant_id);
-      const claimRouteKey = deps.buildTelegramRouteKey(params.chatId, params.topicId);
+      const claimRouteKey = buildTelegramRouteKey(params.chatId, params.topicId);
       // Telegram pairing is chat-scoped for both DMs and groups (including forum groups).
       // We still keep topic-specific session routes via claimRouteKey + inbound session mapping.
-      const boundRouteKey = deps.buildTelegramRouteKey(params.chatId);
+      const boundRouteKey = buildTelegramRouteKey(params.chatId);
 
       let claimType: ClaimType = "fresh";
       let previousTenantId: string | undefined;
@@ -208,8 +211,8 @@ export function createPairingService(deps: {
       if (liveBinding && liveBinding.tenant_id !== tenantId) {
         // Takeover: different tenant owns this route
         previousTenantId = liveBinding.tenant_id;
-        deps.stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
-        deps.stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
+        deps.db.stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
+        deps.db.stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
         deps.writeAuditLog(
           liveBinding.tenant_id,
           "pairing_unbound_by_route_takeover",
@@ -223,7 +226,7 @@ export function createPairingService(deps: {
         claimType = "takeover";
       }
 
-      const existing = deps.stmtSelectActiveBindingByTenantAndRoute.get(
+      const existing = deps.db.stmtSelectActiveBindingByTenantAndRoute.get(
         tenantId,
         "telegram",
         boundRouteKey,
@@ -236,12 +239,12 @@ export function createPairingService(deps: {
         const sessionKey =
           params.chatType === "direct" && params.topicId
             ? deps.buildThreadScopedSessionKey(
-                preferredSessionKey || deps.deriveTelegramSessionKey(params.chatId),
+                preferredSessionKey || deriveTelegramSessionKey(params.chatId),
                 params.chatId,
                 params.topicId,
               )
-            : (preferredSessionKey ?? deps.deriveTelegramSessionKey(params.chatId, params.topicId));
-        deps.stmtUpsertSessionRoute.run(
+            : (preferredSessionKey ?? deriveTelegramSessionKey(params.chatId, params.topicId));
+        deps.db.stmtUpsertSessionRoute.run(
           tenantId,
           "telegram",
           sessionKey,
@@ -249,11 +252,11 @@ export function createPairingService(deps: {
           JSON.stringify({ routeKey: claimRouteKey }),
           now,
         );
-        const consumeRepaired = deps.stmtConsumePairingToken.run(now, tokenHash, now);
+        const consumeRepaired = deps.db.stmtConsumePairingToken.run(now, tokenHash, now);
         if (consumeRepaired.changes === 0) {
           return null;
         }
-        deps.stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
+        deps.db.stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
         deps.writeAuditLog(
           tenantId,
           "pairing_token_claimed",
@@ -267,7 +270,7 @@ export function createPairingService(deps: {
         (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
       if (!existing?.binding_id) {
         try {
-          deps.stmtInsertBinding.run(
+          deps.db.stmtInsertBinding.run(
             bindingId,
             tenantId,
             "telegram",
@@ -288,12 +291,12 @@ export function createPairingService(deps: {
       const sessionKey =
         params.chatType === "direct" && params.topicId
           ? deps.buildThreadScopedSessionKey(
-              preferredSessionKey || deps.deriveTelegramSessionKey(params.chatId),
+              preferredSessionKey || deriveTelegramSessionKey(params.chatId),
               params.chatId,
               params.topicId,
             )
-          : (preferredSessionKey ?? deps.deriveTelegramSessionKey(params.chatId, params.topicId));
-      deps.stmtUpsertSessionRoute.run(
+          : (preferredSessionKey ?? deriveTelegramSessionKey(params.chatId, params.topicId));
+      deps.db.stmtUpsertSessionRoute.run(
         tenantId,
         "telegram",
         sessionKey,
@@ -302,11 +305,11 @@ export function createPairingService(deps: {
         now,
       );
 
-      const consumeResult = deps.stmtConsumePairingToken.run(now, tokenHash, now);
+      const consumeResult = deps.db.stmtConsumePairingToken.run(now, tokenHash, now);
       if (consumeResult.changes === 0) {
         return null;
       }
-      deps.stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
+      deps.db.stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
       deps.writeAuditLog(
         tenantId,
         "pairing_token_claimed",
@@ -338,7 +341,7 @@ export function createPairingService(deps: {
       const now = Date.now();
       purgeExpiredPairingTokens(now);
       const tokenHash = hashPairingToken(params.token);
-      const row = deps.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+      const row = deps.db.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
         | PairingTokenRow
         | undefined;
       if (!row) {
@@ -349,11 +352,11 @@ export function createPairingService(deps: {
         return null;
       }
 
-      const claimRouteKey = deps.buildDiscordRouteKey(params.route);
-      const boundRouteKey = deps.resolveDiscordBindingRouteKeyForClaim({
+      const claimRouteKey = buildDiscordRouteKey(params.route);
+      const boundRouteKey = resolveDiscordBindingRouteKeyForClaim({
         incomingRoute: params.route,
       });
-      const boundRoute = deps.parseDiscordRouteKey(boundRouteKey);
+      const boundRoute = parseDiscordRouteKey(boundRouteKey);
       if (!boundRoute) {
         return null;
       }
@@ -364,8 +367,8 @@ export function createPairingService(deps: {
       const liveBinding = deps.resolveLiveBindingByRouteKey("discord", boundRouteKey);
       if (liveBinding && liveBinding.tenant_id !== tenantId) {
         previousTenantId = liveBinding.tenant_id;
-        deps.stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
-        deps.stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
+        deps.db.stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
+        deps.db.stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
         deps.writeAuditLog(
           liveBinding.tenant_id,
           "pairing_unbound_by_route_takeover",
@@ -379,7 +382,7 @@ export function createPairingService(deps: {
         claimType = "takeover";
       }
 
-      const existing = deps.stmtSelectActiveBindingByTenantAndRoute.get(
+      const existing = deps.db.stmtSelectActiveBindingByTenantAndRoute.get(
         tenantId,
         "discord",
         boundRouteKey,
@@ -390,7 +393,7 @@ export function createPairingService(deps: {
         const preferredSessionKey = readNonEmptyString(row.session_key);
         const sessionKey =
           params.route.kind === "guild" && params.route.threadId
-            ? deps.buildDiscordThreadScopedSessionKey(
+            ? buildDiscordThreadScopedSessionKey(
                 preferredSessionKey ??
                   deps.deriveDiscordSessionKey({
                     route:
@@ -416,7 +419,7 @@ export function createPairingService(deps: {
                 route: params.route,
                 channelId: params.channelId,
               }));
-        deps.stmtUpsertSessionRoute.run(
+        deps.db.stmtUpsertSessionRoute.run(
           tenantId,
           "discord",
           sessionKey,
@@ -424,11 +427,11 @@ export function createPairingService(deps: {
           JSON.stringify({ routeKey: claimRouteKey, channelId: params.channelId }),
           now,
         );
-        const consumeRepaired = deps.stmtConsumePairingToken.run(now, tokenHash, now);
+        const consumeRepaired = deps.db.stmtConsumePairingToken.run(now, tokenHash, now);
         if (consumeRepaired.changes === 0) {
           return null;
         }
-        deps.stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
+        deps.db.stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
         deps.writeAuditLog(
           tenantId,
           "pairing_token_claimed",
@@ -442,11 +445,11 @@ export function createPairingService(deps: {
         (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
       if (!existing?.binding_id) {
         try {
-          deps.stmtInsertPendingBinding.run(
+          deps.db.stmtInsertPendingBinding.run(
             bindingId,
             tenantId,
             "discord",
-            deps.resolveDiscordBindingScope(boundRoute),
+            resolveDiscordBindingScope(boundRoute),
             boundRouteKey,
             now,
             now,
@@ -459,7 +462,7 @@ export function createPairingService(deps: {
         }
       }
 
-      const activateResult = deps.stmtActivatePendingBinding.run(now, bindingId, tenantId);
+      const activateResult = deps.db.stmtActivatePendingBinding.run(now, bindingId, tenantId);
       if (activateResult.changes === 0) {
         return null;
       }
@@ -467,7 +470,7 @@ export function createPairingService(deps: {
       const preferredSessionKey = readNonEmptyString(row.session_key);
       const sessionKey =
         params.route.kind === "guild" && params.route.threadId
-          ? deps.buildDiscordThreadScopedSessionKey(
+          ? buildDiscordThreadScopedSessionKey(
               preferredSessionKey ??
                 deps.deriveDiscordSessionKey({
                   route:
@@ -493,7 +496,7 @@ export function createPairingService(deps: {
               route: params.route,
               channelId: params.channelId,
             }));
-      deps.stmtUpsertSessionRoute.run(
+      deps.db.stmtUpsertSessionRoute.run(
         tenantId,
         "discord",
         sessionKey,
@@ -502,11 +505,11 @@ export function createPairingService(deps: {
         now,
       );
 
-      const consumeResult = deps.stmtConsumePairingToken.run(now, tokenHash, now);
+      const consumeResult = deps.db.stmtConsumePairingToken.run(now, tokenHash, now);
       if (consumeResult.changes === 0) {
         return null;
       }
-      deps.stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
+      deps.db.stmtAttachPairingTokenBinding.run(bindingId, boundRouteKey, tokenHash);
       deps.writeAuditLog(
         tenantId,
         "pairing_token_claimed",
@@ -540,7 +543,7 @@ export function createPairingService(deps: {
       const now = Date.now();
       purgeExpiredPairingTokens(now);
       const tokenHash = hashPairingToken(params.token);
-      const row = deps.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+      const row = deps.db.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
         | PairingTokenRow
         | undefined;
       if (!row) {
@@ -548,7 +551,7 @@ export function createPairingService(deps: {
       }
 
       const tenantId = String(row.tenant_id);
-      const routeKey = deps.buildWhatsAppRouteKey(params.chatJid, params.accountId);
+      const routeKey = buildWhatsAppRouteKey(params.chatJid, params.accountId);
 
       let claimType: ClaimType = "fresh";
       let previousTenantId: string | undefined;
@@ -557,8 +560,8 @@ export function createPairingService(deps: {
       if (liveBinding && liveBinding.tenant_id !== tenantId) {
         // Takeover: different tenant owns this route
         previousTenantId = liveBinding.tenant_id;
-        deps.stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
-        deps.stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
+        deps.db.stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
+        deps.db.stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
         deps.writeAuditLog(
           liveBinding.tenant_id,
           "pairing_unbound_by_route_takeover",
@@ -572,7 +575,7 @@ export function createPairingService(deps: {
         claimType = "takeover";
       }
 
-      const existing = deps.stmtSelectActiveBindingByTenantAndRoute.get(
+      const existing = deps.db.stmtSelectActiveBindingByTenantAndRoute.get(
         tenantId,
         "whatsapp",
         routeKey,
@@ -584,12 +587,12 @@ export function createPairingService(deps: {
         const preferredSessionKey = readNonEmptyString(row.session_key);
         const sessionKey =
           preferredSessionKey ||
-          deps.deriveWhatsAppSessionKey({
+          deriveWhatsAppSessionKey({
             chatJid: params.chatJid,
             chatType: params.chatType,
             directPeerId: params.directPeerId,
           });
-        deps.stmtUpsertSessionRoute.run(
+        deps.db.stmtUpsertSessionRoute.run(
           tenantId,
           "whatsapp",
           sessionKey,
@@ -601,11 +604,11 @@ export function createPairingService(deps: {
           }),
           now,
         );
-        const consumeRepaired = deps.stmtConsumePairingToken.run(now, tokenHash, now);
+        const consumeRepaired = deps.db.stmtConsumePairingToken.run(now, tokenHash, now);
         if (consumeRepaired.changes === 0) {
           return null;
         }
-        deps.stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+        deps.db.stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
         deps.writeAuditLog(
           tenantId,
           "pairing_token_claimed",
@@ -619,7 +622,7 @@ export function createPairingService(deps: {
         (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
       if (!existing?.binding_id) {
         try {
-          deps.stmtInsertBinding.run(
+          deps.db.stmtInsertBinding.run(
             bindingId,
             tenantId,
             "whatsapp",
@@ -639,12 +642,12 @@ export function createPairingService(deps: {
       const preferredSessionKey = readNonEmptyString(row.session_key);
       const sessionKey =
         preferredSessionKey ||
-        deps.deriveWhatsAppSessionKey({
+        deriveWhatsAppSessionKey({
           chatJid: params.chatJid,
           chatType: params.chatType,
           directPeerId: params.directPeerId,
         });
-      deps.stmtUpsertSessionRoute.run(
+      deps.db.stmtUpsertSessionRoute.run(
         tenantId,
         "whatsapp",
         sessionKey,
@@ -657,11 +660,11 @@ export function createPairingService(deps: {
         now,
       );
 
-      const consumeResult = deps.stmtConsumePairingToken.run(now, tokenHash, now);
+      const consumeResult = deps.db.stmtConsumePairingToken.run(now, tokenHash, now);
       if (consumeResult.changes === 0) {
         return null;
       }
-      deps.stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+      deps.db.stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
       deps.writeAuditLog(
         tenantId,
         "pairing_token_claimed",
@@ -681,7 +684,7 @@ export function createPairingService(deps: {
 
   function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?: string) {
     const now = Date.now();
-    const row = deps.stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
+    const row = deps.db.stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
     if (!row || Number(row.expires_at_ms) <= now) {
       return {
         statusCode: 404,
@@ -701,9 +704,9 @@ export function createPairingService(deps: {
       return { statusCode: 409, payload: { ok: false, error: "route already bound" } };
     }
 
-    const claimResult = deps.stmtClaimPairingCode.run(tenant.id, now, code, now);
+    const claimResult = deps.db.stmtClaimPairingCode.run(tenant.id, now, code, now);
     if (claimResult.changes === 0) {
-      const postCheck = deps.stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
+      const postCheck = deps.db.stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
       if (!postCheck || Number(postCheck.expires_at_ms) <= now) {
         return {
           statusCode: 404,
@@ -715,7 +718,7 @@ export function createPairingService(deps: {
 
     const bindingId = `bind_${randomUUID()}`;
     try {
-      deps.stmtInsertBinding.run(
+      deps.db.stmtInsertBinding.run(
         bindingId,
         tenant.id,
         String(row.channel),
@@ -726,14 +729,14 @@ export function createPairingService(deps: {
       );
     } catch (error) {
       if (deps.isSqliteUniqueConstraintError(error)) {
-        deps.stmtRevertPairingCodeClaim.run(code, tenant.id);
+        deps.db.stmtRevertPairingCodeClaim.run(code, tenant.id);
         return { statusCode: 409, payload: { ok: false, error: "route already bound" } };
       }
       throw error;
     }
     const resolvedSessionKey = readNonEmptyString(sessionKey);
     if (resolvedSessionKey) {
-      deps.stmtUpsertSessionRoute.run(
+      deps.db.stmtUpsertSessionRoute.run(
         tenant.id,
         String(row.channel),
         resolvedSessionKey,
@@ -761,7 +764,7 @@ export function createPairingService(deps: {
   }
 
   function listPairingsForTenant(tenant: TenantIdentity) {
-    const rows = deps.stmtListActiveBindingsByTenant.all(tenant.id) as ActiveBindingRow[];
+    const rows = deps.db.stmtListActiveBindingsByTenant.all(tenant.id) as ActiveBindingRow[];
     return {
       statusCode: 200,
       payload: {
@@ -777,12 +780,12 @@ export function createPairingService(deps: {
 
   function unbindPairingForTenant(tenant: TenantIdentity, bindingId: string) {
     const now = Date.now();
-    const unbindResult = deps.stmtUnbindActiveBinding.run(now, bindingId, tenant.id);
+    const unbindResult = deps.db.stmtUnbindActiveBinding.run(now, bindingId, tenant.id);
     if (unbindResult.changes === 0) {
       return { statusCode: 404, payload: { ok: false, error: "binding not found" } };
     }
 
-    deps.stmtDeleteSessionRoutesByBinding.run(bindingId, tenant.id);
+    deps.db.stmtDeleteSessionRoutesByBinding.run(bindingId, tenant.id);
     deps.writeAuditLog(tenant.id, "pairing_unbound", { bindingId }, now);
     return { statusCode: 200, payload: { ok: true } };
   }

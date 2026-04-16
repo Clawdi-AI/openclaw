@@ -1,6 +1,15 @@
-import type { StatementSync } from "node:sqlite";
 import WebSocket from "ws";
+import type { MuxConfig } from "../../config/env.js";
+import type { PreparedStatements } from "../../db/statements.js";
 import type { ClaimResult, DiscordBoundRoute, StyledNotice } from "../../domain/types.js";
+import {
+  asRecord,
+  errorString,
+  readNonEmptyString,
+  readPositiveInt,
+  readUnsignedNumericString,
+} from "../../domain/values.js";
+import { buildDiscordRouteKey, parseDiscordRouteKey } from "../../routing/keys.js";
 
 type ActiveDiscordBindingRow = {
   tenant_id: string;
@@ -36,16 +45,19 @@ type Metrics = {
 };
 
 export function createDiscordInboundRuntime(deps: {
-  discordApiBaseUrl: string;
-  discordInboundEnabled: boolean;
-  discordPollIntervalMs: number;
-  discordBootstrapLatest: boolean;
-  discordGatewayDmEnabled: boolean;
-  discordGatewayGuildEnabled: boolean;
-  discordGatewayDefaultIntents: number;
-  discordGatewayIntents: number;
-  discordGatewayReconnectInitialMs: number;
-  discordGatewayReconnectMaxMs: number;
+  config: Pick<
+    MuxConfig,
+    | "discordApiBaseUrl"
+    | "discordInboundEnabled"
+    | "discordPollIntervalMs"
+    | "discordBootstrapLatest"
+    | "discordGatewayDmEnabled"
+    | "discordGatewayGuildEnabled"
+    | "discordGatewayDefaultIntents"
+    | "discordGatewayIntents"
+    | "discordGatewayReconnectInitialMs"
+    | "discordGatewayReconnectMaxMs"
+  >;
   metrics: Metrics;
   discordRuntimeHealth: DiscordRuntimeHealth;
   discordBgRetryCount: Map<string, number>;
@@ -55,13 +67,7 @@ export function createDiscordInboundRuntime(deps: {
   getDiscordBotSelfId: () => string | null;
   setDiscordBotSelfId: (botSelfId: string | null) => void;
   requireDiscordBotToken: () => string;
-  errorString: (error: unknown) => string;
   log: (entry: Record<string, unknown>) => void;
-  parseDiscordRouteKey: (routeKey: string) => DiscordBoundRoute | null;
-  readUnsignedNumericString: (value: unknown) => string | undefined;
-  readPositiveInt: (value: unknown) => number | undefined;
-  readNonEmptyString: (value: unknown) => string | null;
-  asRecord: (value: unknown) => Record<string, unknown> | null;
   resolveDiscordInboundChannelId: (route: DiscordBoundRoute) => Promise<string | null>;
   resolveStoredDiscordOffset: (bindingId: string) => string | null;
   storeDiscordOffset: (bindingId: string, lastMessageId: string) => void;
@@ -102,14 +108,13 @@ export function createDiscordInboundRuntime(deps: {
   renderUnpairedHintNotice: (channel: "discord") => StyledNotice;
   sendDiscordPairingNotice: (params: { channelId: string; text: string }) => Promise<void>;
   renderPairingInvalidNotice: (channel: "discord") => StyledNotice;
-  stmtListActiveDiscordBindings: StatementSync;
+  db: Pick<PreparedStatements, "stmtListActiveDiscordBindings">;
   resolveDiscordIncomingRouteFromMessage: (params: {
     message: Record<string, unknown>;
     fromId: string;
     fallbackRoute?: DiscordBoundRoute;
     fallbackChannelId?: string;
   }) => Promise<{ route: DiscordBoundRoute; channelId: string } | null>;
-  buildDiscordRouteKey: (route: DiscordBoundRoute) => string;
   resolveDiscordBindingForIncoming: (route: DiscordBoundRoute) => {
     tenantId: string;
     bindingId: string;
@@ -146,7 +151,7 @@ export function createDiscordInboundRuntime(deps: {
       qs.set("after", params.afterMessageId);
     }
     const response = await fetch(
-      `${deps.discordApiBaseUrl}/channels/${params.channelId}/messages?${qs}`,
+      `${deps.config.discordApiBaseUrl}/channels/${params.channelId}/messages?${qs}`,
       {
         method: "GET",
         headers: {
@@ -221,7 +226,7 @@ export function createDiscordInboundRuntime(deps: {
   }
 
   async function forwardDiscordBindingInbound(params: ActiveDiscordBindingRow) {
-    const route = deps.parseDiscordRouteKey(params.route_key);
+    const route = parseDiscordRouteKey(params.route_key);
     if (!route) {
       return;
     }
@@ -239,10 +244,10 @@ export function createDiscordInboundRuntime(deps: {
     }
 
     const existingOffset = deps.resolveStoredDiscordOffset(params.binding_id);
-    if (!existingOffset && deps.discordBootstrapLatest) {
+    if (!existingOffset && deps.config.discordBootstrapLatest) {
       const latest = await fetchDiscordChannelMessages({ channelId, limit: 1 });
       const last = latest[0];
-      const lastMessageId = deps.readUnsignedNumericString(last?.id);
+      const lastMessageId = readUnsignedNumericString(last?.id);
       if (lastMessageId) {
         deps.storeDiscordOffset(params.binding_id, lastMessageId);
       }
@@ -262,7 +267,7 @@ export function createDiscordInboundRuntime(deps: {
     let lastAckedMessageId = existingOffset ?? null;
 
     for (const message of sorted) {
-      const messageId = deps.readUnsignedNumericString(message.id);
+      const messageId = readUnsignedNumericString(message.id);
       if (!messageId) {
         continue;
       }
@@ -271,7 +276,7 @@ export function createDiscordInboundRuntime(deps: {
         message.author && typeof message.author === "object"
           ? (message.author as Record<string, unknown>)
           : undefined;
-      const fromId = deps.readUnsignedNumericString(author?.id);
+      const fromId = readUnsignedNumericString(author?.id);
       const isBot = author?.bot === true;
       if (!fromId || isBot) {
         lastAckedMessageId = messageId;
@@ -466,15 +471,19 @@ export function createDiscordInboundRuntime(deps: {
   }
 
   async function runDiscordInboundPollPass() {
-    const bindings = deps.stmtListActiveDiscordBindings.all() as ActiveDiscordBindingRow[];
+    const bindings = deps.db.stmtListActiveDiscordBindings.all() as ActiveDiscordBindingRow[];
     for (const binding of bindings) {
-      const route = deps.parseDiscordRouteKey(binding.route_key);
-      if (deps.getDiscordGatewayReady() && deps.discordGatewayDmEnabled && route?.kind === "dm") {
+      const route = parseDiscordRouteKey(binding.route_key);
+      if (
+        deps.getDiscordGatewayReady() &&
+        deps.config.discordGatewayDmEnabled &&
+        route?.kind === "dm"
+      ) {
         continue;
       }
       if (
         deps.getDiscordGatewayReady() &&
-        deps.discordGatewayGuildEnabled &&
+        deps.config.discordGatewayGuildEnabled &&
         route?.kind === "guild"
       ) {
         continue;
@@ -497,7 +506,7 @@ export function createDiscordInboundRuntime(deps: {
   }
 
   async function runDiscordInboundLoop() {
-    if (!deps.discordInboundEnabled) {
+    if (!deps.config.discordInboundEnabled) {
       return;
     }
     deps.discordBgRetryCount.clear();
@@ -511,7 +520,7 @@ export function createDiscordInboundRuntime(deps: {
       running = false;
     });
 
-    const pollMs = Math.max(200, Math.trunc(deps.discordPollIntervalMs));
+    const pollMs = Math.max(200, Math.trunc(deps.config.discordPollIntervalMs));
     while (running) {
       try {
         await runDiscordInboundPollPass();
@@ -520,7 +529,7 @@ export function createDiscordInboundRuntime(deps: {
         deps.discordRuntimeHealth.lastPollError = null;
       } catch (error) {
         deps.discordRuntimeHealth.lastPollErrorAtMs = Date.now();
-        deps.discordRuntimeHealth.lastPollError = deps.errorString(error);
+        deps.discordRuntimeHealth.lastPollError = errorString(error);
         const err = error instanceof Error ? error : undefined;
         deps.log({
           type: "discord_inbound_poll_error",
@@ -535,9 +544,9 @@ export function createDiscordInboundRuntime(deps: {
   }
 
   async function handleDiscordGatewayMessage(message: Record<string, unknown>) {
-    const messageId = deps.readUnsignedNumericString(message.id);
-    const author = deps.asRecord(message.author);
-    const fromId = deps.readUnsignedNumericString(author?.id);
+    const messageId = readUnsignedNumericString(message.id);
+    const author = asRecord(message.author);
+    const fromId = readUnsignedNumericString(author?.id);
     const isBot = author?.bot === true;
     if (!messageId || !fromId || isBot) {
       return;
@@ -552,14 +561,14 @@ export function createDiscordInboundRuntime(deps: {
     }
     const route = incoming.route;
     const channelId = incoming.channelId;
-    if (route.kind === "dm" && !deps.discordGatewayDmEnabled) {
+    if (route.kind === "dm" && !deps.config.discordGatewayDmEnabled) {
       return;
     }
-    if (route.kind === "guild" && !deps.discordGatewayGuildEnabled) {
+    if (route.kind === "guild" && !deps.config.discordGatewayGuildEnabled) {
       return;
     }
 
-    const incomingRouteKey = deps.buildDiscordRouteKey(route);
+    const incomingRouteKey = buildDiscordRouteKey(route);
     const liveBinding = deps.resolveDiscordBindingForIncoming(route);
     const body = typeof message.content === "string" ? message.content : "";
 
@@ -728,7 +737,7 @@ export function createDiscordInboundRuntime(deps: {
         type: "discord_inbound_forward_failed",
         tenantId: liveBinding.tenantId,
         messageId,
-        error: deps.errorString(error),
+        error: errorString(error),
       });
       const tid = liveBinding.tenantId;
       const pending = deps.discordBgRetryCount.get(tid) ?? 0;
@@ -789,9 +798,9 @@ export function createDiscordInboundRuntime(deps: {
     deps.discordRuntimeHealth.gatewayLastError = null;
     deps.discordRuntimeHealth.gatewayLastErrorAtMs = null;
     const intents =
-      Number.isFinite(deps.discordGatewayIntents) && deps.discordGatewayIntents > 0
-        ? Math.trunc(deps.discordGatewayIntents)
-        : deps.discordGatewayDefaultIntents;
+      Number.isFinite(deps.config.discordGatewayIntents) && deps.config.discordGatewayIntents > 0
+        ? Math.trunc(deps.config.discordGatewayIntents)
+        : deps.config.discordGatewayDefaultIntents;
 
     await new Promise<void>((resolve) => {
       let seq: number | null = null;
@@ -847,8 +856,8 @@ export function createDiscordInboundRuntime(deps: {
         }
 
         if (op === 10) {
-          const hello = deps.asRecord(frame.d);
-          const heartbeatIntervalMs = deps.readPositiveInt(hello?.heartbeat_interval) ?? 45_000;
+          const hello = asRecord(frame.d);
+          const heartbeatIntervalMs = readPositiveInt(hello?.heartbeat_interval) ?? 45_000;
           clearHeartbeat();
           heartbeatTimer = setInterval(sendHeartbeat, heartbeatIntervalMs);
           sendHeartbeat();
@@ -885,17 +894,17 @@ export function createDiscordInboundRuntime(deps: {
 
         const eventType = typeof frame.t === "string" ? frame.t : "";
         if (eventType === "READY") {
-          const ready = deps.asRecord(frame.d);
+          const ready = asRecord(frame.d);
           deps.setDiscordGatewayReady(true);
           deps.discordRuntimeHealth.gatewayReadyAtMs = Date.now();
-          const readyUser = deps.asRecord(ready?.user);
-          const selfId = deps.readNonEmptyString(readyUser?.id);
+          const readyUser = asRecord(ready?.user);
+          const selfId = readNonEmptyString(readyUser?.id);
           if (selfId) {
             deps.setDiscordBotSelfId(selfId);
           }
           deps.log({
             type: "discord_gateway_dm_ready",
-            sessionId: deps.readNonEmptyString(ready?.session_id) ?? null,
+            sessionId: readNonEmptyString(ready?.session_id) ?? null,
             botSelfId: deps.getDiscordBotSelfId(),
           });
           return;
@@ -904,7 +913,7 @@ export function createDiscordInboundRuntime(deps: {
           return;
         }
 
-        const eventData = deps.asRecord(frame.d);
+        const eventData = asRecord(frame.d);
         if (!eventData) {
           return;
         }
@@ -919,7 +928,7 @@ export function createDiscordInboundRuntime(deps: {
 
       ws.on("error", (error) => {
         deps.discordRuntimeHealth.gatewayLastErrorAtMs = Date.now();
-        deps.discordRuntimeHealth.gatewayLastError = deps.errorString(error);
+        deps.discordRuntimeHealth.gatewayLastError = errorString(error);
         deps.log({
           type: "discord_gateway_dm_socket_error",
           error: String(error),
@@ -940,8 +949,8 @@ export function createDiscordInboundRuntime(deps: {
 
   async function runDiscordGatewayDmLoop() {
     if (
-      !deps.discordInboundEnabled ||
-      (!deps.discordGatewayDmEnabled && !deps.discordGatewayGuildEnabled)
+      !deps.config.discordInboundEnabled ||
+      (!deps.config.discordGatewayDmEnabled && !deps.config.discordGatewayGuildEnabled)
     ) {
       return;
     }
@@ -955,8 +964,14 @@ export function createDiscordInboundRuntime(deps: {
       running = false;
     });
 
-    const reconnectInitial = Math.max(100, Math.trunc(deps.discordGatewayReconnectInitialMs));
-    const reconnectMax = Math.max(reconnectInitial, Math.trunc(deps.discordGatewayReconnectMaxMs));
+    const reconnectInitial = Math.max(
+      100,
+      Math.trunc(deps.config.discordGatewayReconnectInitialMs),
+    );
+    const reconnectMax = Math.max(
+      reconnectInitial,
+      Math.trunc(deps.config.discordGatewayReconnectMaxMs),
+    );
     let reconnectMs = reconnectInitial;
 
     while (running) {
@@ -965,7 +980,7 @@ export function createDiscordInboundRuntime(deps: {
         await runDiscordGatewayDmSession();
       } catch (error) {
         deps.discordRuntimeHealth.gatewayLastErrorAtMs = Date.now();
-        deps.discordRuntimeHealth.gatewayLastError = deps.errorString(error);
+        deps.discordRuntimeHealth.gatewayLastError = errorString(error);
         deps.log({
           type: "discord_gateway_dm_loop_error",
           error: String(error),

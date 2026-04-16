@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
+import { inferMimeTypeFromPath } from "../channels/telegram/media.js";
+import type { MuxConfig } from "../config/env.js";
 import type { TenantIdentity } from "../domain/types.js";
+import { readNonEmptyString, readPositiveInt } from "../domain/values.js";
 import type { SendResult } from "../outbound/service.js";
 
 type HandledRequest = {
@@ -14,9 +17,10 @@ type TenantRequest = {
 };
 
 export function createHttpRouteHandler(deps: {
-  muxRegisterKey: string | null;
-  muxAdminToken: string | null;
-  telegramApiBaseUrl: string;
+  config: Pick<
+    MuxConfig,
+    "muxRegisterKey" | "muxAdminToken" | "telegramApiBaseUrl" | "whatsappAllowedFileDirs"
+  >;
   getTelegramBotUsername: () => string | null;
   getTelegramPollConflictHealth: () => { lastConflictAtMs: number; lastError: string } | null;
   runtimeJwtSigner: {
@@ -57,8 +61,6 @@ export function createHttpRouteHandler(deps: {
     nowMs?: number;
     tenantId?: string;
   }) => Record<string, unknown>;
-  readNonEmptyString: (value: unknown) => string | null;
-  readPositiveInt: (value: unknown) => number | undefined;
   upsertTenantInboundTargetByAdmin: (params: {
     openclawId: string;
     inboundUrl: string;
@@ -100,8 +102,6 @@ export function createHttpRouteHandler(deps: {
   }) => Promise<SendResult>;
   resolveTelegramFilePath: (fileId: string) => Promise<string | null>;
   requireTelegramBotToken: () => string;
-  whatsappAllowedFileDirs: string[];
-  inferMimeTypeFromPath: (filePath: string) => string | undefined;
 }): {
   handleRequest: (params: {
     req: IncomingMessage;
@@ -169,7 +169,7 @@ export function createHttpRouteHandler(deps: {
     }
 
     if (req.method === "POST" && pathname === "/v1/instances/register") {
-      if (!deps.muxRegisterKey) {
+      if (!deps.config.muxRegisterKey) {
         deps.sendJson(res, 404, { ok: false, error: "not found" });
         return { handled: true };
       }
@@ -190,7 +190,7 @@ export function createHttpRouteHandler(deps: {
     }
 
     if (req.method === "GET" && pathname === "/v1/admin/info") {
-      if (!deps.muxAdminToken) {
+      if (!deps.config.muxAdminToken) {
         deps.sendJson(res, 404, { ok: false, error: "not found" });
         return { handled: true };
       }
@@ -213,7 +213,7 @@ export function createHttpRouteHandler(deps: {
     }
 
     if (req.method === "GET" && pathname === "/v1/admin/whatsapp/health") {
-      if (!deps.muxAdminToken) {
+      if (!deps.config.muxAdminToken) {
         deps.sendJson(res, 404, { ok: false, error: "not found" });
         return { handled: true };
       }
@@ -228,7 +228,7 @@ export function createHttpRouteHandler(deps: {
     }
 
     if (req.method === "GET" && pathname === "/v1/admin/observability/snapshot") {
-      if (!deps.muxAdminToken) {
+      if (!deps.config.muxAdminToken) {
         deps.sendJson(res, 404, { ok: false, error: "not found" });
         return { handled: true };
       }
@@ -238,7 +238,7 @@ export function createHttpRouteHandler(deps: {
         deps.sendJson(res, 401, { ok: false, error: "unauthorized" });
         return { handled: true };
       }
-      const tenantId = deps.readNonEmptyString(requestUrl.searchParams.get("tenantId"));
+      const tenantId = readNonEmptyString(requestUrl.searchParams.get("tenantId"));
       const snapshot = deps.renderObservabilitySnapshot({
         tenantId: tenantId ?? undefined,
       });
@@ -247,7 +247,7 @@ export function createHttpRouteHandler(deps: {
     }
 
     if (req.method === "POST" && pathname === "/v1/admin/pairings/token") {
-      if (!deps.muxAdminToken) {
+      if (!deps.config.muxAdminToken) {
         deps.sendJson(res, 404, { ok: false, error: "not found" });
         return { handled: true };
       }
@@ -258,15 +258,15 @@ export function createHttpRouteHandler(deps: {
         return { handled: true };
       }
       const body = await deps.readBody<Record<string, unknown>>(req);
-      const openclawId = deps.readNonEmptyString(body.openclawId);
+      const openclawId = readNonEmptyString(body.openclawId);
       if (!openclawId) {
         deps.sendJson(res, 400, { ok: false, error: "openclawId required" });
         return { handled: true };
       }
-      const sessionKey = deps.readNonEmptyString(body.sessionKey) ?? undefined;
-      const ttlSec = deps.readPositiveInt(body.ttlSec);
-      const inboundUrl = deps.readNonEmptyString(body.inboundUrl);
-      const inboundTimeoutMs = deps.readPositiveInt(body.inboundTimeoutMs);
+      const sessionKey = readNonEmptyString(body.sessionKey) ?? undefined;
+      const ttlSec = readPositiveInt(body.ttlSec);
+      const inboundUrl = readNonEmptyString(body.inboundUrl);
+      const inboundTimeoutMs = readPositiveInt(body.inboundTimeoutMs);
       if (inboundUrl) {
         const upsert = deps.upsertTenantInboundTargetByAdmin({
           openclawId,
@@ -282,7 +282,7 @@ export function createHttpRouteHandler(deps: {
         tenant: {
           id: openclawId,
           name: openclawId,
-          authToken: deps.muxAdminToken,
+          authToken: deps.config.muxAdminToken,
           authKind: "admin",
         },
         sessionKey,
@@ -308,12 +308,12 @@ export function createHttpRouteHandler(deps: {
 
     if (req.method === "POST" && pathname === "/v1/pairings/claim") {
       const body = await deps.readBody<Record<string, unknown>>(req);
-      const code = deps.readNonEmptyString(body.code);
+      const code = readNonEmptyString(body.code);
       if (!code) {
         deps.sendJson(res, 400, { ok: false, error: "code required" });
         return { handled: true };
       }
-      const sessionKey = deps.readNonEmptyString(body.sessionKey) ?? undefined;
+      const sessionKey = readNonEmptyString(body.sessionKey) ?? undefined;
       const result = deps.claimPairingForTenant(tenant, code, sessionKey);
       deps.sendJson(res, result.statusCode, result.payload);
       return { handled: true };
@@ -321,7 +321,7 @@ export function createHttpRouteHandler(deps: {
 
     if (req.method === "POST" && pathname === "/v1/pairings/unbind") {
       const body = await deps.readBody<Record<string, unknown>>(req);
-      const bindingId = deps.readNonEmptyString(body.bindingId);
+      const bindingId = readNonEmptyString(body.bindingId);
       if (!bindingId) {
         deps.sendJson(res, 400, { ok: false, error: "bindingId required" });
         return { handled: true };
@@ -334,8 +334,8 @@ export function createHttpRouteHandler(deps: {
     if (req.method === "POST" && pathname === "/v1/mux/outbound/typing") {
       const body = await deps.readBody<Record<string, unknown>>(req);
       const channel = deps.normalizeChannel(body.channel);
-      const sessionKey = deps.readNonEmptyString(body.sessionKey);
-      const payloadOpenClawId = deps.readNonEmptyString(body.openclawId);
+      const sessionKey = readNonEmptyString(body.sessionKey);
+      const payloadOpenClawId = readNonEmptyString(body.openclawId);
       if (!channel) {
         deps.sendJson(res, 400, { ok: false, error: "channel required" });
         return { handled: true };
@@ -391,14 +391,14 @@ export function createHttpRouteHandler(deps: {
           const token = deps.requireTelegramBotToken();
           const normalizedPath = filePath.replace(/^\/+/, "");
           const upstream = await fetch(
-            `${deps.telegramApiBaseUrl}/file/bot${token}/${normalizedPath}`,
+            `${deps.config.telegramApiBaseUrl}/file/bot${token}/${normalizedPath}`,
           );
           if (!upstream.ok || !upstream.body) {
             deps.sendJson(res, 502, { ok: false, error: "upstream fetch failed" });
             return { handled: true };
           }
           const mime =
-            deps.inferMimeTypeFromPath(filePath) ||
+            inferMimeTypeFromPath(filePath) ||
             upstream.headers.get("content-type") ||
             "application/octet-stream";
           const fileName = path.basename(filePath);
@@ -433,7 +433,7 @@ export function createHttpRouteHandler(deps: {
         }
         const resolved = path.resolve(filePath);
         // Prevent path traversal: only serve files within allowed directories.
-        const withinAllowed = deps.whatsappAllowedFileDirs.some(
+        const withinAllowed = deps.config.whatsappAllowedFileDirs.some(
           (dir) => resolved === dir || resolved.startsWith(dir + path.sep),
         );
         if (!withinAllowed) {
@@ -446,7 +446,7 @@ export function createHttpRouteHandler(deps: {
             deps.sendJson(res, 404, { ok: false, error: "not a file" });
             return { handled: true };
           }
-          const mime = deps.inferMimeTypeFromPath(resolved) || "application/octet-stream";
+          const mime = inferMimeTypeFromPath(resolved) || "application/octet-stream";
           const fileName = path.basename(resolved);
           res.writeHead(200, {
             "content-type": mime,

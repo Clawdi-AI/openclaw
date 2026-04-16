@@ -1,4 +1,5 @@
 import { RequestClient } from "@buape/carbon";
+import type { MuxConfig } from "../config/env.js";
 import type {
   DiscordBoundRoute,
   OutboundResolutionMode,
@@ -7,6 +8,12 @@ import type {
   TenantIdentity,
   WhatsAppBoundRoute,
 } from "../domain/types.js";
+import {
+  asRecord,
+  readNonEmptyString,
+  readPositiveInt,
+  readUnsignedNumericString,
+} from "../domain/values.js";
 import {
   collectOutboundMediaUrls,
   readOutboundOperation,
@@ -21,12 +28,15 @@ export type SendResult = {
 };
 
 export function createOutboundService(deps: {
-  outboundResolutionMode: OutboundResolutionMode;
-  whatsappAccountId: string;
-  openclawMuxAccountId: string;
-  telegramGeneralTopicId: number;
+  config: Pick<
+    MuxConfig,
+    | "outboundResolutionMode"
+    | "whatsappAccountId"
+    | "openclawMuxAccountId"
+    | "telegramGeneralTopicId"
+    | "discordApiBaseUrl"
+  >;
   allowedTelegramMethods: ReadonlySet<string>;
-  discordApiBaseUrl: string;
   metrics: {
     recordAuthFailure: (surface: "tenant") => void;
     recordOutboundRouteResolution: (params: {
@@ -36,10 +46,6 @@ export function createOutboundService(deps: {
     }) => void;
   };
   log: (entry: Record<string, unknown>) => void;
-  asRecord: (value: unknown) => Record<string, unknown> | null;
-  readNonEmptyString: (value: unknown) => string | null;
-  readPositiveInt: (value: unknown) => number | undefined;
-  readUnsignedNumericString: (value: unknown) => string | undefined;
   normalizeChannel: (value: unknown) => string | null;
   listTelegramOutboundRouteKeys: (params: {
     requestedTo: unknown;
@@ -268,7 +274,11 @@ export function createOutboundService(deps: {
         mode: params.mode,
         routeKeys: deps.listWhatsAppOutboundRouteKeys({
           requestedTo: params.requestedTo,
-          accountIds: [params.accountId, deps.whatsappAccountId, deps.openclawMuxAccountId],
+          accountIds: [
+            params.accountId,
+            deps.config.whatsappAccountId,
+            deps.config.openclawMuxAccountId,
+          ],
         }),
       });
       if (!resolvedRoute) {
@@ -326,14 +336,14 @@ export function createOutboundService(deps: {
     });
 
     const channel = deps.normalizeChannel(payload.channel);
-    const sessionKey = deps.readNonEmptyString(payload.sessionKey);
+    const sessionKey = readNonEmptyString(payload.sessionKey);
     const operation = readOutboundOperation(payload);
     const rawOutbound = readOutboundRaw(payload);
     const { text, hasText } = readOutboundText(payload);
     const mediaUrls = collectOutboundMediaUrls(payload);
-    const requestedThreadId = deps.readPositiveInt(payload.threadId);
-    const requestedDiscordThreadId = deps.readUnsignedNumericString(payload.threadId);
-    const payloadOpenClawId = deps.readNonEmptyString(payload.openclawId);
+    const requestedThreadId = readPositiveInt(payload.threadId);
+    const requestedDiscordThreadId = readUnsignedNumericString(payload.threadId);
+    const payloadOpenClawId = readNonEmptyString(payload.openclawId);
 
     if (tenant.authKind === "runtime-jwt") {
       if (!payloadOpenClawId || payloadOpenClawId !== tenant.id) {
@@ -370,8 +380,8 @@ export function createOutboundService(deps: {
         requestedTo: payload.to,
         requestedThreadId,
         requestedDiscordThreadId: requestedDiscordThreadId ?? undefined,
-        accountId: deps.readNonEmptyString(payload.accountId) ?? undefined,
-        mode: deps.outboundResolutionMode,
+        accountId: readNonEmptyString(payload.accountId) ?? undefined,
+        mode: deps.config.outboundResolutionMode,
       });
     }
     if (!hasText && mediaUrls.length === 0 && !rawOutbound) {
@@ -382,14 +392,14 @@ export function createOutboundService(deps: {
     }
 
     if (channel === "telegram") {
-      const telegramRaw = deps.asRecord(rawOutbound?.telegram);
-      const telegramRawMethod = deps.readNonEmptyString(telegramRaw?.method);
-      const telegramRawBody = deps.asRecord(telegramRaw?.body);
+      const telegramRaw = asRecord(rawOutbound?.telegram);
+      const telegramRawMethod = readNonEmptyString(telegramRaw?.method);
+      const telegramRawBody = asRecord(telegramRaw?.body);
       const resolvedRoute = deps.resolveTelegramBoundRoute({
         tenantId: tenant.id,
         channel,
         sessionKey,
-        mode: deps.outboundResolutionMode,
+        mode: deps.config.outboundResolutionMode,
         routeKeys: deps.listTelegramOutboundRouteKeys({
           requestedTo: payload.to,
           rawBody: telegramRawBody ?? undefined,
@@ -408,10 +418,10 @@ export function createOutboundService(deps: {
       }
       deps.metrics.recordOutboundRouteResolution({
         channel: "telegram",
-        mode: deps.outboundResolutionMode,
+        mode: deps.config.outboundResolutionMode,
         via: resolvedRoute.via,
       });
-      if (resolvedRoute.via === "route" && deps.outboundResolutionMode === "session-first") {
+      if (resolvedRoute.via === "route" && deps.config.outboundResolutionMode === "session-first") {
         deps.log({
           type: "outbound_route_fallback",
           tenantId: tenant.id,
@@ -425,7 +435,7 @@ export function createOutboundService(deps: {
       const to = boundRoute.chatId;
       const messageThreadId = boundRoute.topicId ?? requestedThreadId;
       const isGeneralForumTopic =
-        boundRoute.topicId === deps.telegramGeneralTopicId && to.startsWith("-");
+        boundRoute.topicId === deps.config.telegramGeneralTopicId && to.startsWith("-");
       if (telegramRawMethod && telegramRawBody) {
         const telegramMethod = deps.allowedTelegramMethods.has(telegramRawMethod)
           ? telegramRawMethod
@@ -469,7 +479,7 @@ export function createOutboundService(deps: {
               } else {
                 finalBody.message_thread_id = boundRoute.topicId;
               }
-            } else if (messageThreadId && !deps.readPositiveInt(finalBody.message_thread_id)) {
+            } else if (messageThreadId && !readPositiveInt(finalBody.message_thread_id)) {
               finalBody.message_thread_id = messageThreadId;
             }
           }
@@ -530,14 +540,14 @@ export function createOutboundService(deps: {
     }
 
     if (channel === "discord") {
-      const discordRaw = deps.asRecord(rawOutbound?.discord);
-      const discordRawBody = deps.asRecord(discordRaw?.body);
-      const discordRawSend = deps.asRecord(discordRaw?.send);
+      const discordRaw = asRecord(rawOutbound?.discord);
+      const discordRawBody = asRecord(discordRaw?.body);
+      const discordRawSend = asRecord(discordRaw?.send);
       const resolvedRoute = await deps.resolveDiscordBoundRoute({
         tenantId: tenant.id,
         channel,
         sessionKey,
-        mode: deps.outboundResolutionMode,
+        mode: deps.config.outboundResolutionMode,
         routeKeys: await deps.listDiscordOutboundRouteKeys({
           requestedTo: payload.to,
           requestedThreadId: requestedDiscordThreadId ?? undefined,
@@ -555,10 +565,10 @@ export function createOutboundService(deps: {
       }
       deps.metrics.recordOutboundRouteResolution({
         channel: "discord",
-        mode: deps.outboundResolutionMode,
+        mode: deps.config.outboundResolutionMode,
         via: resolvedRoute.via,
       });
-      if (resolvedRoute.via === "route" && deps.outboundResolutionMode === "session-first") {
+      if (resolvedRoute.via === "route" && deps.config.outboundResolutionMode === "session-first") {
         deps.log({
           type: "outbound_route_fallback",
           tenantId: tenant.id,
@@ -605,9 +615,8 @@ export function createOutboundService(deps: {
             }),
           };
         }
-        const messageId = deps.readUnsignedNumericString(result.id) ?? "unknown";
-        const channelId =
-          deps.readUnsignedNumericString(result.channel_id) ?? resolvedTarget.channelId;
+        const messageId = readUnsignedNumericString(result.id) ?? "unknown";
+        const channelId = readUnsignedNumericString(result.channel_id) ?? resolvedTarget.channelId;
         return {
           statusCode: 200,
           bodyText: JSON.stringify({
@@ -629,12 +638,12 @@ export function createOutboundService(deps: {
             ? text
             : "";
       const sendMediaUrl =
-        deps.readNonEmptyString(discordRawSend?.mediaUrl) ??
+        readNonEmptyString(discordRawSend?.mediaUrl) ??
         (mediaUrls.length > 0 ? mediaUrls[0] : undefined);
-      const sendReplyTo = deps.readUnsignedNumericString(discordRawSend?.replyTo);
+      const sendReplyTo = readUnsignedNumericString(discordRawSend?.replyTo);
       const discordToken = deps.requireDiscordBotToken();
       const discordRest = new RequestClient(discordToken, {
-        baseUrl: deps.discordApiBaseUrl,
+        baseUrl: deps.config.discordApiBaseUrl,
         apiVersion: 10,
       });
       try {
@@ -670,19 +679,19 @@ export function createOutboundService(deps: {
     }
 
     if (channel === "whatsapp") {
-      const whatsappRaw = deps.asRecord(rawOutbound?.whatsapp);
-      const whatsappRawSend = deps.asRecord(whatsappRaw?.send);
+      const whatsappRaw = asRecord(rawOutbound?.whatsapp);
+      const whatsappRawSend = asRecord(whatsappRaw?.send);
       const resolvedRoute = deps.resolveWhatsAppBoundRoute({
         tenantId: tenant.id,
         channel,
         sessionKey,
-        mode: deps.outboundResolutionMode,
+        mode: deps.config.outboundResolutionMode,
         routeKeys: deps.listWhatsAppOutboundRouteKeys({
           requestedTo: payload.to,
           accountIds: [
-            deps.readNonEmptyString(payload.accountId),
-            deps.whatsappAccountId,
-            deps.openclawMuxAccountId,
+            readNonEmptyString(payload.accountId),
+            deps.config.whatsappAccountId,
+            deps.config.openclawMuxAccountId,
           ],
           rawSend: whatsappRawSend ?? undefined,
         }),
@@ -699,10 +708,10 @@ export function createOutboundService(deps: {
       }
       deps.metrics.recordOutboundRouteResolution({
         channel: "whatsapp",
-        mode: deps.outboundResolutionMode,
+        mode: deps.config.outboundResolutionMode,
         via: resolvedRoute.via,
       });
-      if (resolvedRoute.via === "route" && deps.outboundResolutionMode === "session-first") {
+      if (resolvedRoute.via === "route" && deps.config.outboundResolutionMode === "session-first") {
         deps.log({
           type: "outbound_route_fallback",
           tenantId: tenant.id,
@@ -718,7 +727,7 @@ export function createOutboundService(deps: {
           : typeof text === "string"
             ? text
             : "";
-      const whatsappRawSingleMedia = deps.readNonEmptyString(whatsappRawSend?.mediaUrl);
+      const whatsappRawSingleMedia = readNonEmptyString(whatsappRawSend?.mediaUrl);
       const whatsappRawMediaList =
         Array.isArray(whatsappRawSend?.mediaUrls) && whatsappRawSend
           ? (whatsappRawSend.mediaUrls as unknown[])

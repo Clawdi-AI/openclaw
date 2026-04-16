@@ -1,56 +1,62 @@
 import type http from "node:http";
+import type { MuxConfig } from "../config/env.js";
+import { readNonEmptyString } from "../domain/values.js";
 
 export function createRuntimeLauncher(deps: {
+  config: Pick<
+    MuxConfig,
+    | "host"
+    | "port"
+    | "dbPath"
+    | "openclawMuxAccountId"
+    | "tenantSeedCount"
+    | "pairingCodeSeedCount"
+    | "whatsappInboundEnabled"
+    | "whatsappAccountId"
+    | "whatsappAuthDir"
+    | "whatsappInboundRetryMs"
+    | "telegramInboundEnabled"
+    | "telegramPollTimeoutSec"
+    | "telegramPollRetryMs"
+    | "telegramBootstrapLatest"
+    | "discordInboundEnabled"
+    | "discordPollIntervalMs"
+    | "discordBootstrapLatest"
+    | "discordGatewayDmEnabled"
+    | "discordGatewayGuildEnabled"
+    | "discordGatewayIntents"
+    | "discordGatewayDefaultIntents"
+  > & { telegramBotToken?: string };
   server: http.Server;
-  host: string;
-  port: number;
-  dbPath: string;
-  openclawMuxAccountId: string;
-  tenantSeedCount: number;
-  pairingCodeSeedCount: number;
   countActiveTenantInboundTargets: () => number;
   log: (entry: Record<string, unknown>) => void;
-  whatsappInboundEnabled: boolean;
-  whatsappAccountId: string;
-  whatsappAuthDir: string;
-  whatsappInboundRetryMs: number;
   runWhatsAppInboundLoop: () => Promise<void>;
-  telegramInboundEnabled: boolean;
-  telegramBotToken?: string;
   getTelegramBotUsername: () => string | null;
   setTelegramBotUsername: (username: string) => void;
-  telegramPollTimeoutSec: number;
-  telegramPollRetryMs: number;
-  telegramBootstrapLatest: boolean;
   runTelegramInboundLoop: () => Promise<void>;
-  discordInboundEnabled: boolean;
   getDiscordBotSelfId: () => string | null;
   setDiscordBotSelfId: (botSelfId: string) => void;
-  discordPollIntervalMs: number;
-  discordBootstrapLatest: boolean;
-  discordGatewayDmEnabled: boolean;
-  discordGatewayGuildEnabled: boolean;
-  discordGatewayIntents: number;
-  discordGatewayDefaultIntents: number;
   discordRequest: (params: {
     method: "GET" | "POST";
     path: string;
     body?: Record<string, unknown>;
   }) => Promise<{ response: Response; result: Record<string, unknown> }>;
-  readNonEmptyString: (value: unknown) => string | null;
   runDiscordInboundLoop: () => Promise<void>;
   runDiscordGatewayDmLoop: () => Promise<void>;
 }): {
   startMuxServerRuntime: () => Promise<void>;
 } {
   async function ensureTelegramBotUsername(): Promise<void> {
-    if (deps.getTelegramBotUsername() || !deps.telegramBotToken) {
+    if (deps.getTelegramBotUsername() || !deps.config.telegramBotToken) {
       return;
     }
     try {
-      const getMeRes = await fetch(`https://api.telegram.org/bot${deps.telegramBotToken}/getMe`, {
-        signal: AbortSignal.timeout(10_000),
-      });
+      const getMeRes = await fetch(
+        `https://api.telegram.org/bot${deps.config.telegramBotToken}/getMe`,
+        {
+          signal: AbortSignal.timeout(10_000),
+        },
+      );
       if (!getMeRes.ok) {
         return;
       }
@@ -78,7 +84,7 @@ export function createRuntimeLauncher(deps: {
       if (!response.ok) {
         return;
       }
-      const selfId = deps.readNonEmptyString(result.id);
+      const selfId = readNonEmptyString(result.id);
       if (selfId) {
         deps.setDiscordBotSelfId(selfId);
       }
@@ -88,66 +94,67 @@ export function createRuntimeLauncher(deps: {
   }
 
   async function startMuxServerRuntime(): Promise<void> {
-    deps.server.listen(deps.port, deps.host, async () => {
+    deps.server.listen(deps.config.port, deps.config.host, async () => {
       const tenantTargetCount = deps.countActiveTenantInboundTargets();
       deps.log({
         type: "relay_started",
-        host: deps.host,
-        port: deps.port,
-        dbPath: deps.dbPath,
-        openclawMuxAccountId: deps.openclawMuxAccountId,
-        tenantCount: deps.tenantSeedCount,
-        pairingCodeSeedCount: deps.pairingCodeSeedCount,
+        host: deps.config.host,
+        port: deps.config.port,
+        dbPath: deps.config.dbPath,
+        openclawMuxAccountId: deps.config.openclawMuxAccountId,
+        tenantCount: deps.config.tenantSeedCount,
+        pairingCodeSeedCount: deps.config.pairingCodeSeedCount,
       });
-      console.log(`mux server listening on http://${deps.host}:${deps.port}`);
-      if (deps.whatsappInboundEnabled) {
+      console.log(`mux server listening on http://${deps.config.host}:${deps.config.port}`);
+      if (deps.config.whatsappInboundEnabled) {
         deps.log({
           type: "whatsapp_inbound_started",
           tenantTargetCount,
-          openclawAccountId: deps.openclawMuxAccountId,
-          accountId: deps.whatsappAccountId,
-          authDir: deps.whatsappAuthDir,
-          retryMs: Math.max(100, Math.trunc(deps.whatsappInboundRetryMs)),
+          openclawAccountId: deps.config.openclawMuxAccountId,
+          accountId: deps.config.whatsappAccountId,
+          authDir: deps.config.whatsappAuthDir,
+          retryMs: Math.max(100, Math.trunc(deps.config.whatsappInboundRetryMs)),
         });
         void deps.runWhatsAppInboundLoop().catch((error) => {
           deps.log({ type: "whatsapp_inbound_loop_fatal", error: String(error) });
         });
       }
-      if (deps.telegramInboundEnabled) {
+      if (deps.config.telegramInboundEnabled) {
         await ensureTelegramBotUsername();
         deps.log({
           type: "telegram_inbound_started",
           tenantTargetCount,
-          openclawAccountId: deps.openclawMuxAccountId,
-          pollTimeoutSec: Math.max(1, Math.trunc(deps.telegramPollTimeoutSec)),
-          pollRetryMs: Math.max(100, Math.trunc(deps.telegramPollRetryMs)),
-          bootstrapLatest: deps.telegramBootstrapLatest,
+          openclawAccountId: deps.config.openclawMuxAccountId,
+          pollTimeoutSec: Math.max(1, Math.trunc(deps.config.telegramPollTimeoutSec)),
+          pollRetryMs: Math.max(100, Math.trunc(deps.config.telegramPollRetryMs)),
+          bootstrapLatest: deps.config.telegramBootstrapLatest,
           botUsername: deps.getTelegramBotUsername() ?? null,
         });
         void deps.runTelegramInboundLoop().catch((error) => {
           deps.log({ type: "telegram_inbound_loop_fatal", error: String(error) });
         });
       }
-      if (deps.discordInboundEnabled) {
+      if (deps.config.discordInboundEnabled) {
         await ensureDiscordBotSelfId();
         deps.log({
           type: "discord_inbound_started",
           tenantTargetCount,
-          openclawAccountId: deps.openclawMuxAccountId,
-          pollIntervalMs: Math.max(200, Math.trunc(deps.discordPollIntervalMs)),
-          bootstrapLatest: deps.discordBootstrapLatest,
-          gatewayDmEnabled: deps.discordGatewayDmEnabled,
-          gatewayGuildEnabled: deps.discordGatewayGuildEnabled,
+          openclawAccountId: deps.config.openclawMuxAccountId,
+          pollIntervalMs: Math.max(200, Math.trunc(deps.config.discordPollIntervalMs)),
+          bootstrapLatest: deps.config.discordBootstrapLatest,
+          gatewayDmEnabled: deps.config.discordGatewayDmEnabled,
+          gatewayGuildEnabled: deps.config.discordGatewayGuildEnabled,
           botSelfId: deps.getDiscordBotSelfId(),
           gatewayIntents:
-            Number.isFinite(deps.discordGatewayIntents) && deps.discordGatewayIntents > 0
-              ? Math.trunc(deps.discordGatewayIntents)
-              : deps.discordGatewayDefaultIntents,
+            Number.isFinite(deps.config.discordGatewayIntents) &&
+            deps.config.discordGatewayIntents > 0
+              ? Math.trunc(deps.config.discordGatewayIntents)
+              : deps.config.discordGatewayDefaultIntents,
         });
         void deps.runDiscordInboundLoop().catch((error) => {
           deps.log({ type: "discord_inbound_loop_fatal", error: String(error) });
         });
-        if (deps.discordGatewayDmEnabled || deps.discordGatewayGuildEnabled) {
+        if (deps.config.discordGatewayDmEnabled || deps.config.discordGatewayGuildEnabled) {
           void deps.runDiscordGatewayDmLoop().catch((error) => {
             deps.log({ type: "discord_gateway_dm_loop_fatal", error: String(error) });
           });

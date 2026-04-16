@@ -1,4 +1,6 @@
 import type { ClaimResult, DiscordBoundRoute, StyledNotice } from "../domain/types.js";
+import { normalizeControlText } from "../domain/values.js";
+import { parseDiscordRouteKey } from "../routing/keys.js";
 import type { BotControlCommand } from "./notices.js";
 
 type TelegramPairingMessage = {
@@ -12,7 +14,6 @@ type WhatsAppPairingMessage = {
 
 export function createBotControlService(deps: {
   extractTokenFromStartCommand: (input: string) => string | null;
-  normalizeControlText: (input: string | null) => string | null;
   extractPairingTokenFromText: (input: string | null) => string | null;
   renderPairingInvalidNotice: (channel: "telegram" | "discord" | "whatsapp") => StyledNotice;
   renderBotHelpNotice: (channel: "telegram" | "discord" | "whatsapp") => StyledNotice;
@@ -49,7 +50,6 @@ export function createBotControlService(deps: {
     chatType: "direct" | "group";
     directPeerId?: string;
   }) => ClaimResult | null;
-  parseDiscordRouteKey: (routeKey: string) => DiscordBoundRoute | null;
   deactivateLiveBinding: (params: {
     tenantId: string;
     bindingId: string;
@@ -84,7 +84,7 @@ export function createBotControlService(deps: {
   function extractPairingTokenFromTelegramMessage(message: TelegramPairingMessage): string | null {
     const rawText = typeof message.text === "string" ? message.text : undefined;
     const rawCaption = typeof message.caption === "string" ? message.caption : undefined;
-    const text = deps.normalizeControlText(rawText ?? rawCaption ?? null);
+    const text = normalizeControlText(rawText ?? rawCaption ?? null);
     if (text === null) {
       return null;
     }
@@ -253,7 +253,7 @@ export function createBotControlService(deps: {
       return { routeReset: false };
     }
     const tokenRow = deps.peekActivePairingToken(params.command.token);
-    const route = deps.parseDiscordRouteKey(params.routeKey);
+    const route = parseDiscordRouteKey(params.routeKey);
     if (!route || !tokenRow) {
       await send(deps.renderPairingInvalidNotice("discord"));
       return { routeReset: false };
@@ -320,7 +320,7 @@ export function createBotControlService(deps: {
       return;
     }
     const tokenRow = deps.peekActivePairingToken(params.command.token);
-    const route = deps.parseDiscordRouteKey(params.routeKey);
+    const route = parseDiscordRouteKey(params.routeKey);
     if (!route || !tokenRow) {
       await send(deps.renderPairingInvalidNotice("discord"));
       return;

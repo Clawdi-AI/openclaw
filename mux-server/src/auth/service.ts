@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { StatementSync } from "node:sqlite";
+import type { MuxConfig } from "../config/env.js";
 import type { TenantIdentity, TenantInboundTarget } from "../domain/types.js";
 import { readNonEmptyString, readPositiveInt } from "../domain/values.js";
 import { hasScope, type RuntimeJwtSigner } from "../runtime-jwt.js";
@@ -25,17 +26,15 @@ export function resolveOpenClawIdHeader(req: IncomingMessage): string | null {
 
 export function createAuthService(deps: {
   runtimeJwtSigner: RuntimeJwtSigner;
-  runtimeJwtAudienceMux: string;
+  config: Pick<MuxConfig, "runtimeJwtAudienceMux" | "muxAdminToken" | "muxRegisterKey">;
   stmtSelectTenantById: StatementSync;
   stmtSelectTenantByHash: StatementSync;
   stmtSelectTenantInboundTargetById: StatementSync;
-  muxAdminToken: string | null;
-  muxRegisterKey: string | null;
 }) {
   async function verifyRuntimeJwtForMuxApi(token: string): Promise<TenantIdentity | null> {
     const verified = await deps.runtimeJwtSigner.verify({
       token,
-      audience: deps.runtimeJwtAudienceMux,
+      audience: deps.config.runtimeJwtAudienceMux,
     });
     if (!verified.ok) {
       return null;
@@ -98,19 +97,19 @@ export function createAuthService(deps: {
   }
 
   function isAdminAuthorized(req: IncomingMessage): boolean {
-    if (!deps.muxAdminToken) {
+    if (!deps.config.muxAdminToken) {
       return false;
     }
     const token = resolveBearerToken(req.headers.authorization);
-    return Boolean(token && token === deps.muxAdminToken);
+    return Boolean(token && token === deps.config.muxAdminToken);
   }
 
   function isRegisterAuthorized(req: IncomingMessage): boolean {
-    if (!deps.muxRegisterKey) {
+    if (!deps.config.muxRegisterKey) {
       return false;
     }
     const token = resolveBearerToken(req.headers.authorization);
-    return Boolean(token && token === deps.muxRegisterKey);
+    return Boolean(token && token === deps.config.muxRegisterKey);
   }
 
   function resolveTenantInboundTarget(tenantId: string): TenantInboundTarget | null {

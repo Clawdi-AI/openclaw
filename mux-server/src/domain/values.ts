@@ -46,3 +46,26 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
 export function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
+
+/** Serialize an unknown error to a readable string (handles plain objects that stringify to [object Object]). */
+export function errorString(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  if (typeof err === "string") {
+    return err;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+export function normalizeControlText(input: string | null): string | null {
+  if (typeof input !== "string") {
+    return null;
+  }
+  const trimmed = input.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}

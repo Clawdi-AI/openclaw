@@ -1,5 +1,5 @@
 import type { NoticeChannel, StyledNotice } from "../domain/types.js";
-import { readNonEmptyString } from "../domain/values.js";
+import { normalizeControlText, readNonEmptyString } from "../domain/values.js";
 
 export type BotControlCommand =
   | {
@@ -34,14 +34,6 @@ export function createPairingNotices(deps: {
       return null;
     }
     return readNonEmptyString(match[1]);
-  }
-
-  function normalizeControlText(input: string | null): string | null {
-    if (typeof input !== "string") {
-      return null;
-    }
-    const trimmed = input.trim();
-    return trimmed.length > 0 ? trimmed : null;
   }
 
   function extractPairingTokenFromText(input: string | null): string | null {
