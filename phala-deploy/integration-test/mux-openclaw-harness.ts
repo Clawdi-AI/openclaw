@@ -21,7 +21,7 @@ import { FakeTelegramApi } from "./fake-telegram.js";
 import { FakeWhatsAppApi } from "./fake-whatsapp.js";
 import {
   AsyncCleanupStack,
-  getFreePort,
+  reservePort,
   startNodeTsxProcess,
   stopChildProcess,
   waitForCondition,
@@ -77,8 +77,6 @@ type StartHarnessParams = {
   discordGatewayGuildEnabled?: boolean;
   openAiResponder?: (request: FakeOpenAiRequest) => FakeOpenAiResponsePlan;
   workspaceFiles?: Record<string, string | Uint8Array>;
-  gatewayRuntime?: "current" | "legacy";
-  legacyRepoPath?: string;
   configTransform?: (cfg: OpenClawConfig) => OpenClawConfig;
 };
 
@@ -215,7 +213,6 @@ async function startMuxServer(params: {
   gatewayPort: number;
   openclawId: string;
   pairingRouteKey: string;
-  openclawAccountId?: string;
   telegramBaseUrl?: string;
   discordBaseUrl?: string;
   discordGatewayDmEnabled?: boolean;
@@ -235,7 +232,6 @@ async function startMuxServer(params: {
       MUX_LOG_PATH: path.join(params.tempDir, "mux-server.log"),
       MUX_DB_PATH: path.join(params.tempDir, "mux-server.sqlite"),
       MUX_OUTBOUND_RESOLUTION_MODE: params.resolutionMode,
-      ...(params.openclawAccountId ? { MUX_OPENCLAW_ACCOUNT_ID: params.openclawAccountId } : {}),
       ...(params.telegramBaseUrl
         ? {
             TELEGRAM_BOT_TOKEN,
@@ -306,25 +302,15 @@ async function startMuxServer(params: {
 async function startGatewayProcess(params: {
   port: number;
   env: Record<string, string>;
-  runtime?: "current" | "legacy";
-  legacyRepoPath?: string;
   skipHealthzCheck?: boolean;
 }): Promise<StartedNodeProcess> {
   const integrationRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-  const started =
-    params.runtime === "legacy"
-      ? startNodeTsxProcess({
-          cwd: integrationRoot,
-          entrypoint: "phala-deploy/integration-test/legacy-gateway-process.ts",
-          args: [params.legacyRepoPath ?? "", String(params.port)],
-          env: params.env,
-        })
-      : startNodeTsxProcess({
-          cwd: integrationRoot,
-          entrypoint: "phala-deploy/integration-test/gateway-process.ts",
-          args: [String(params.port)],
-          env: params.env,
-        });
+  const started = startNodeTsxProcess({
+    cwd: integrationRoot,
+    entrypoint: "phala-deploy/integration-test/gateway-process.ts",
+    args: [String(params.port)],
+    env: params.env,
+  });
 
   const ensureProcessAlive = () => {
     if (started.process.exitCode !== null) {
@@ -425,7 +411,6 @@ export async function startMuxOpenClawHarness(
 
   try {
     const channel = params.channel ?? "telegram";
-    const runtime = params.gatewayRuntime ?? "current";
     const harnessEnv = buildHarnessEnv(paths, {
       channel,
       minimalGateway: params.minimalGateway,
@@ -454,10 +439,6 @@ export async function startMuxOpenClawHarness(
       );
     }
 
-    const gatewayPort = await getFreePort();
-    const muxPort = await getFreePort();
-    const openclawId = loadOrCreateDeviceIdentity().deviceId;
-
     const telegram =
       channel === "telegram"
         ? cleanup.use(await FakeTelegramApi.start({ token: TELEGRAM_BOT_TOKEN }))
@@ -470,6 +451,17 @@ export async function startMuxOpenClawHarness(
         responder: params.openAiResponder ?? (() => params.llmReplyText),
       }),
     );
+    const gatewayPortReservation = await reservePort();
+    const muxPortReservation = await reservePort();
+    cleanup.defer(async () => {
+      await muxPortReservation.release();
+    });
+    cleanup.defer(async () => {
+      await gatewayPortReservation.release();
+    });
+    const gatewayPort = gatewayPortReservation.port;
+    const muxPort = muxPortReservation.port;
+    const openclawId = loadOrCreateDeviceIdentity().deviceId;
     const baseConfig = buildHarnessConfig({
       channel,
       workspaceDir: paths.workspaceDir,
@@ -481,17 +473,7 @@ export async function startMuxOpenClawHarness(
     const cfg = params.configTransform ? params.configTransform(baseConfig) : baseConfig;
     await writeFile(paths.configPath, `${JSON.stringify(cfg, null, 2)}\n`);
 
-    let gateway = await startGatewayProcess({
-      port: gatewayPort,
-      env: harnessEnv,
-      runtime,
-      legacyRepoPath: params.legacyRepoPath,
-      skipHealthzCheck: runtime === "legacy",
-    });
-    cleanup.defer(async () => {
-      await stopChildProcess(gateway.process);
-    });
-
+    await muxPortReservation.release();
     const muxServer = await startMuxServer({
       channel,
       port: muxPort,
@@ -514,7 +496,6 @@ export async function startMuxOpenClawHarness(
           }
         : {}),
       ...(whatsapp ? { whatsappControlUrl: whatsapp.url } : {}),
-      openclawAccountId: runtime === "legacy" ? "mux" : undefined,
       resolutionMode: params.resolutionMode,
     });
     cleanup.defer(async () => {
@@ -524,6 +505,16 @@ export async function startMuxOpenClawHarness(
     await claimMuxPairing({
       muxPort,
       claimedSessionKey: params.claimedSessionKey,
+    });
+
+    await gatewayPortReservation.release();
+    let gateway = await startGatewayProcess({
+      port: gatewayPort,
+      env: harnessEnv,
+      skipHealthzCheck: false,
+    });
+    cleanup.defer(async () => {
+      await stopChildProcess(gateway.process);
     });
 
     const readSessionStore = (agentId = "main") => {
@@ -571,9 +562,7 @@ export async function startMuxOpenClawHarness(
         gateway = await startGatewayProcess({
           port: gatewayPort,
           env: harnessEnv,
-          runtime,
-          legacyRepoPath: params.legacyRepoPath,
-          skipHealthzCheck: runtime === "legacy",
+          skipHealthzCheck: false,
         });
       },
       close: async () => {
