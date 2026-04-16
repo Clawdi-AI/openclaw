@@ -2,9 +2,15 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
 
-export async function getFreePort(): Promise<number> {
+export type ReservedPort = {
+  port: number;
+  release: () => Promise<void>;
+};
+
+export async function reservePort(): Promise<ReservedPort> {
   return await new Promise((resolvePort, reject) => {
     const server = net.createServer();
+    let released = false;
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
@@ -13,16 +19,36 @@ export async function getFreePort(): Promise<number> {
         reject(new Error("failed to reserve test port"));
         return;
       }
-      const port = address.port;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolvePort(port);
+      server.off("error", reject);
+      resolvePort({
+        port: address.port,
+        release: async () => {
+          if (released) {
+            return;
+          }
+          released = true;
+          await new Promise<void>((resolveClose, rejectClose) => {
+            server.close((error) => {
+              if (error) {
+                rejectClose(error);
+                return;
+              }
+              resolveClose();
+            });
+          });
+        },
       });
     });
   });
+}
+
+export async function getFreePort(): Promise<number> {
+  const reserved = await reservePort();
+  try {
+    return reserved.port;
+  } finally {
+    await reserved.release();
+  }
 }
 
 export async function sleep(ms: number): Promise<void> {
