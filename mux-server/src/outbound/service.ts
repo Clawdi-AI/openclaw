@@ -987,7 +987,7 @@ export function createOutboundService(deps: {
           bodyText: JSON.stringify({
             ok: false,
             error: "imessage send failed",
-            details: errorerrorString(sendError),
+            details: errorString(sendError),
             ...(failedStage ? { failedStage } : {}),
           }),
         };
