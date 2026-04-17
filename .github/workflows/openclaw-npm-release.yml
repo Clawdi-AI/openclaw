@@ -4,9 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to publish tarball under (e.g. test-imessage-abc1234). Creates a pre-release."
+        required: true
+        type: string
 
 concurrency:
-  group: openclaw-release-${{ github.ref }}
+  group: openclaw-release-${{ github.ref }}-${{ inputs.release_tag || '' }}
   cancel-in-progress: false
 
 env:
@@ -48,7 +54,18 @@ jobs:
           TGZ_PATH="/tmp/$(printf '%s\n' "$PACK_OUT" | tail -n 1 | tr -d '[:space:]')"
           mv -f "$TGZ_PATH" /tmp/openclaw.tgz
 
-          TAG="${GITHUB_REF_NAME}"
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          gh release create "$TAG" --title "openclaw $PACKAGE_VERSION" --notes "" 2>/dev/null || true
+          if [[ -n "${{ inputs.release_tag }}" ]]; then
+            # Manual dispatch: create a pre-release with the provided tag
+            TAG="${{ inputs.release_tag }}"
+            gh release create "$TAG" \
+              --title "openclaw $PACKAGE_VERSION ($TAG)" \
+              --notes "Pre-release build from branch $GITHUB_REF_NAME (commit $GITHUB_SHA)" \
+              --prerelease \
+              --target "$GITHUB_SHA" 2>/dev/null || true
+          else
+            # Tag push: use the git tag name
+            TAG="${GITHUB_REF_NAME}"
+            gh release create "$TAG" --title "openclaw $PACKAGE_VERSION" --notes "" 2>/dev/null || true
+          fi
           gh release upload "$TAG" /tmp/openclaw.tgz --clobber
