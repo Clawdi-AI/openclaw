@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { MuxConfig } from "../config/env.js";
 import {
   buildDiscordInboundEnvelope,
+  buildIMessageInboundEnvelope,
   buildTelegramInboundEnvelope,
   buildWhatsAppInboundEnvelope,
 } from "../mux-envelope.js";
-import { parseDiscordRouteKey } from "../routing/keys.js";
+import { parseDiscordRouteKey, parseIMessageRouteKey } from "../routing/keys.js";
 import type {
   ClaimResult,
   ClaimType,
@@ -87,6 +88,19 @@ export function createPostPairingDeliveryService(deps: {
         rawMessage: {},
         media: null,
         attachments: [],
+      });
+    } else if (params.channel === "imessage") {
+      const imessageRoute = parseIMessageRouteKey(params.routeKey);
+      payload = buildIMessageInboundEnvelope({
+        messageId: syntheticId,
+        sessionKey: params.sessionKey,
+        accountId: deps.config.openclawMuxAccountId,
+        body: prompt,
+        from: params.fromId,
+        chatGuid: imessageRoute?.chatGuid ?? params.chatId,
+        chatType: params.chatType,
+        routeKey: params.routeKey,
+        timestampMs: now,
       });
     } else {
       payload = buildWhatsAppInboundEnvelope({

@@ -7,7 +7,7 @@ import { resolveRequiredHomeDir } from "../infra/home-dir.js";
 import { writeJsonFileAtomically, readJsonFileWithFallback } from "../plugin-sdk/json-store.js";
 import { normalizeAccountId } from "../routing/session-key.js";
 
-type MuxPairingChannel = "telegram" | "discord" | "whatsapp";
+type MuxPairingChannel = "telegram" | "discord" | "whatsapp" | "imessage";
 
 type MuxPairedSendersStore = {
   version: 1;

@@ -10,7 +10,7 @@ import {
 } from "../../../utils/mux-account.js";
 import { isWhatsAppGroupJid, normalizeWhatsAppTarget } from "../../../whatsapp/normalize.js";
 
-type SupportedMuxChannel = "whatsapp" | "telegram" | "discord";
+type SupportedMuxChannel = "whatsapp" | "telegram" | "discord" | "imessage";
 
 type ResolvedChannelMuxConfig = {
   enabled: boolean;
@@ -168,7 +168,9 @@ function resolveChannelMuxConfig(params: {
       ? cfg.channels?.telegram
       : channel === "discord"
         ? cfg.channels?.discord
-        : cfg.channels?.whatsapp;
+        : channel === "imessage"
+          ? cfg.channels?.imessage
+          : cfg.channels?.whatsapp;
   const resolvedAccountId = resolveMuxBusinessAccountId({ cfg, channel, accountId });
   const accountCfg = channelCfg?.accounts?.[resolvedAccountId];
   const legacyMuxCfg = channelCfg?.accounts?.[LEGACY_MUX_ACCOUNT_ID]?.mux;

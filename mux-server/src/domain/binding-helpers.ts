@@ -6,6 +6,7 @@ import {
   buildWhatsAppRouteKey,
   parseDiscordOutboundTarget,
   parseDiscordRouteKey,
+  parseIMessageRouteKey,
   parseTelegramRouteKey,
   parseWhatsAppRouteKey,
 } from "../routing/keys.js";
@@ -14,6 +15,7 @@ import { createPostPairingDeliveryService } from "./post-pairing-delivery.js";
 import type {
   ActiveBindingLookupRow,
   DiscordBoundRoute,
+  IMessageBoundRoute,
   NoticeChannel,
   OutboundResolutionMode,
   ResolvedBoundRoute,
@@ -127,7 +129,7 @@ export function createBindingHelpers(deps: {
   }) => string;
   resolveSessionRouteBinding: (params: {
     tenantId: string;
-    channel: "telegram" | "discord" | "whatsapp";
+    channel: "telegram" | "discord" | "whatsapp" | "imessage";
     sessionKey: string;
     routeKeys?: string[];
     mode?: OutboundResolutionMode;
@@ -299,6 +301,37 @@ export function createBindingHelpers(deps: {
     }
     const route = parseWhatsAppRouteKey(resolved.routeKey);
     return route ? { route, routeKey: resolved.routeKey, via: resolved.via } : null;
+  }
+
+  function resolveIMessageBoundRoute(params: {
+    tenantId: string;
+    channel: "imessage";
+    sessionKey: string;
+    routeKeys?: string[];
+    mode?: OutboundResolutionMode;
+  }): ResolvedBoundRoute<IMessageBoundRoute> | null {
+    const resolved = deps.resolveSessionRouteBinding(params);
+    if (!resolved) {
+      return null;
+    }
+    const route = parseIMessageRouteKey(resolved.routeKey);
+    return route ? { route, routeKey: resolved.routeKey, via: resolved.via } : null;
+  }
+
+  function resolveIMessageBindingForIncoming(
+    routeKey: string,
+  ): { tenantId: string; bindingId: string; routeKey: string } | null {
+    const row = deps.db.stmtSelectActiveBindingByRouteKey.get("imessage", routeKey) as
+      | ActiveBindingLookupRow
+      | undefined;
+    if (!row?.tenant_id || !row?.binding_id) {
+      return null;
+    }
+    return {
+      tenantId: String(row.tenant_id),
+      bindingId: String(row.binding_id),
+      routeKey,
+    };
   }
 
   async function resolveDiscordOutboundChannelId(params: {
@@ -636,10 +669,12 @@ export function createBindingHelpers(deps: {
     resolveTelegramBoundRoute,
     resolveDiscordBoundRoute,
     resolveWhatsAppBoundRoute,
+    resolveIMessageBoundRoute,
     resolveDiscordOutboundChannelId,
     resolveTelegramIncomingTopicId,
     resolveTelegramBindingForIncoming,
     resolveWhatsAppBindingForIncoming,
+    resolveIMessageBindingForIncoming,
     deactivateLiveBinding,
     setBindingPending,
     resolveBindingSessionKey,

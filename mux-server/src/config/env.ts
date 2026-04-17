@@ -80,6 +80,10 @@ export function resolveChannelEnv(deps: {
   const pairingTokenMaxTtlSec = Number(process.env.MUX_PAIRING_TOKEN_MAX_TTL_SEC || 60 * 60);
   const initialTelegramBotUsername = deps.readNonEmptyString(process.env.MUX_TELEGRAM_BOT_USERNAME);
 
+  const imessageServerUrl = deps.readNonEmptyString(process.env.MUX_IMESSAGE_SERVER_URL);
+  const imessageApiKey = deps.readNonEmptyString(process.env.MUX_IMESSAGE_API_KEY);
+  const imessageInboundEnabled = Boolean(imessageServerUrl);
+
   return {
     muxAdminToken,
     muxRegisterKey,
@@ -114,6 +118,9 @@ export function resolveChannelEnv(deps: {
     pairingTokenTtlSec,
     pairingTokenMaxTtlSec,
     initialTelegramBotUsername,
+    imessageServerUrl,
+    imessageApiKey,
+    imessageInboundEnabled,
   };
 }
 

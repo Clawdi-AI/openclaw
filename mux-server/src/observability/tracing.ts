@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export function createInboundTraceId(params: {
-  channel: "telegram" | "discord" | "whatsapp";
+  channel: "telegram" | "discord" | "whatsapp" | "imessage";
   tenantId?: string;
   routeKey?: string;
   updateId?: number;

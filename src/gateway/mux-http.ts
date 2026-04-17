@@ -323,7 +323,7 @@ function resolveDiscordInboundPeer(params: {
 }
 
 function resolveMuxInboundOriginatingTo(params: {
-  channel: "telegram" | "discord" | "whatsapp";
+  channel: "telegram" | "discord" | "whatsapp" | "imessage";
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
 }): string | null {
@@ -530,7 +530,7 @@ function resolveWhatsAppInboundBusinessSessionKey(params: {
 
 function resolveMuxInboundBusinessSessionKey(params: {
   cfg: OpenClawConfig;
-  channel: "telegram" | "discord" | "whatsapp";
+  channel: "telegram" | "discord" | "whatsapp" | "imessage";
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
   accountId: string;
@@ -554,6 +554,12 @@ function resolveMuxInboundBusinessSessionKey(params: {
       accountId: params.accountId,
       fallbackSessionKey: params.fallbackSessionKey,
     });
+  }
+
+  if (params.channel === "imessage") {
+    // iMessage carries its own chat-scoped session key via the mux envelope; we
+    // reuse whatever the mux-server delivered.
+    return params.fallbackSessionKey;
   }
 
   return resolveWhatsAppInboundBusinessSessionKey({
@@ -622,7 +628,7 @@ function resolveTelegramMuxGroupConfig(params: {
 }
 
 async function bootstrapMuxPairedSender(params: {
-  channel: "telegram" | "discord" | "whatsapp";
+  channel: "telegram" | "discord" | "whatsapp" | "imessage";
   accountId: string;
   payload: MuxInboundPayload;
   channelData: Record<string, unknown> | undefined;
@@ -647,7 +653,7 @@ async function bootstrapMuxPairedSender(params: {
           channelData: params.channelData,
         }).senderId
       : readMuxNonEmptyString(params.payload.from)?.replace(
-          /^(discord:(user|dm):|discord:|whatsapp:)/i,
+          /^(discord:(user|dm):|discord:|whatsapp:|imessage:)/i,
           "",
         );
   if (!senderId) {

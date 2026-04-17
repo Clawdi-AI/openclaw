@@ -2,6 +2,7 @@ import { RequestClient } from "@buape/carbon";
 import type { MuxConfig } from "../config/env.js";
 import type {
   DiscordBoundRoute,
+  IMessageBoundRoute,
   OutboundResolutionMode,
   ResolvedBoundRoute,
   TelegramBoundRoute,
@@ -40,7 +41,7 @@ export function createOutboundService(deps: {
   metrics: {
     recordAuthFailure: (surface: "tenant") => void;
     recordOutboundRouteResolution: (params: {
-      channel: "telegram" | "discord" | "whatsapp";
+      channel: "telegram" | "discord" | "whatsapp" | "imessage";
       mode: OutboundResolutionMode;
       via: "session" | "route";
     }) => void;
@@ -59,6 +60,10 @@ export function createOutboundService(deps: {
   listWhatsAppOutboundRouteKeys: (params: {
     requestedTo: unknown;
     accountIds: Array<string | null | undefined>;
+    rawSend?: Record<string, unknown>;
+  }) => string[];
+  listIMessageOutboundRouteKeys: (params: {
+    requestedTo: unknown;
     rawSend?: Record<string, unknown>;
   }) => string[];
   resolveTelegramBoundRoute: (params: {
@@ -82,6 +87,13 @@ export function createOutboundService(deps: {
     routeKeys?: string[];
     mode?: OutboundResolutionMode;
   }) => ResolvedBoundRoute<WhatsAppBoundRoute> | null;
+  resolveIMessageBoundRoute: (params: {
+    tenantId: string;
+    channel: "imessage";
+    sessionKey: string;
+    routeKeys?: string[];
+    mode?: OutboundResolutionMode;
+  }) => ResolvedBoundRoute<IMessageBoundRoute> | null;
   resolveDiscordOutboundChannelId: (params: {
     boundRoute: DiscordBoundRoute;
     requestedTo: unknown;
@@ -131,6 +143,17 @@ export function createOutboundService(deps: {
     ) => Promise<{ messageId: string; toJid: string }>;
     sendTypingWhatsApp: (to: string, options: { accountId?: string }) => Promise<void>;
   }>;
+  imessageApiService: {
+    getSdk: () => unknown;
+    sendMessage: (params: {
+      chatGuid: string;
+      message: string;
+    }) => Promise<{ guid: string | null }>;
+    sendAttachment: (params: {
+      chatGuid: string;
+      filePath: string;
+    }) => Promise<{ guid: string | null }>;
+  };
 }): {
   runOutboundAction: (params: {
     tenant: TenantIdentity;
@@ -814,6 +837,143 @@ export function createOutboundService(deps: {
           toJid: firstToJid,
           providerMessageIds,
           rawPassthrough: Boolean(whatsappRawSend),
+        }),
+      };
+    }
+
+    if (channel === "imessage") {
+      if (!deps.imessageApiService.getSdk()) {
+        return {
+          statusCode: 503,
+          bodyText: JSON.stringify({ ok: false, error: "iMessage transport not connected" }),
+        };
+      }
+
+      const imessageRaw = asRecord(rawOutbound?.imessage);
+      const imessageRawSend = asRecord(imessageRaw?.send);
+      const resolvedRoute = deps.resolveIMessageBoundRoute({
+        tenantId: tenant.id,
+        channel,
+        sessionKey,
+        mode: deps.config.outboundResolutionMode,
+        routeKeys: deps.listIMessageOutboundRouteKeys({
+          requestedTo: payload.to,
+          rawSend: imessageRawSend ?? undefined,
+        }),
+      });
+      if (!resolvedRoute) {
+        return {
+          statusCode: 403,
+          bodyText: JSON.stringify({
+            ok: false,
+            error: "route not bound",
+            code: "ROUTE_NOT_BOUND",
+          }),
+        };
+      }
+      deps.metrics.recordOutboundRouteResolution({
+        channel: "imessage",
+        mode: deps.config.outboundResolutionMode,
+        via: resolvedRoute.via,
+      });
+      if (resolvedRoute.via === "route" && deps.config.outboundResolutionMode === "session-first") {
+        deps.log({
+          type: "outbound_route_fallback",
+          tenantId: tenant.id,
+          channel,
+          sessionKey,
+          routeKey: resolvedRoute.routeKey,
+        });
+      }
+
+      const { chatGuid } = resolvedRoute.route;
+      const imessageText =
+        typeof imessageRawSend?.text === "string"
+          ? imessageRawSend.text
+          : typeof text === "string"
+            ? text
+            : "";
+      const imessageRawSingleMedia = readNonEmptyString(imessageRawSend?.mediaUrl);
+      const imessageRawMediaList =
+        Array.isArray(imessageRawSend?.mediaUrls) && imessageRawSend
+          ? (imessageRawSend.mediaUrls as unknown[])
+              .filter((item): item is string => typeof item === "string")
+              .map((item) => item.trim())
+              .filter((item) => item.length > 0)
+          : mediaUrls;
+      const imessageMediaUrls = (() => {
+        const ordered = [
+          ...(imessageRawSingleMedia ? [imessageRawSingleMedia] : []),
+          ...imessageRawMediaList,
+        ];
+        const seen = new Set<string>();
+        const deduped: string[] = [];
+        for (const media of ordered) {
+          if (seen.has(media)) {
+            continue;
+          }
+          seen.add(media);
+          deduped.push(media);
+        }
+        return deduped;
+      })();
+
+      if (!imessageText.trim() && imessageMediaUrls.length === 0) {
+        return {
+          statusCode: 400,
+          bodyText: JSON.stringify({
+            ok: false,
+            error: "imessage outbound requires text/media or raw.imessage.send",
+          }),
+        };
+      }
+
+      const providerMessageIds: string[] = [];
+      try {
+        for (const url of imessageMediaUrls) {
+          const sent = await deps.imessageApiService.sendAttachment({ chatGuid, filePath: url });
+          if (sent.guid) {
+            providerMessageIds.push(sent.guid);
+          }
+        }
+        if (imessageText.trim()) {
+          const sent = await deps.imessageApiService.sendMessage({
+            chatGuid,
+            message: imessageText,
+          });
+          if (sent.guid) {
+            providerMessageIds.push(sent.guid);
+          } else {
+            providerMessageIds.push("unknown");
+          }
+        }
+      } catch (error) {
+        return {
+          statusCode: 502,
+          bodyText: JSON.stringify({
+            ok: false,
+            error: "imessage send failed",
+            details: String(error),
+          }),
+        };
+      }
+
+      if (providerMessageIds.length === 0) {
+        return {
+          statusCode: 502,
+          bodyText: JSON.stringify({ ok: false, error: "imessage send returned no messageId" }),
+        };
+      }
+
+      const messageId = providerMessageIds[0] ?? "unknown";
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          ok: true,
+          messageId,
+          chatId: chatGuid,
+          providerMessageIds,
+          rawPassthrough: Boolean(imessageRawSend),
         }),
       };
     }
