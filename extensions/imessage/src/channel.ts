@@ -4,7 +4,6 @@ import {
 } from "openclaw/plugin-sdk/compat";
 import {
   applyAccountNameToChannelSection,
-  buildIMessageRawSend,
   buildChannelConfigSchema,
   collectStatusIssuesFromLastError,
   DEFAULT_ACCOUNT_ID,
@@ -34,6 +33,16 @@ import {
 } from "openclaw/plugin-sdk/imessage";
 import { buildPassiveProbedChannelStatusSummary } from "../../shared/channel-status-summary.js";
 import { getIMessageRuntime } from "./runtime.js";
+
+function buildIMessageRawSend(params: { text: string; mediaUrl?: string; mediaUrls?: string[] }) {
+  return {
+    send: {
+      text: params.text,
+      ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
+      ...(params.mediaUrls?.length ? { mediaUrls: params.mediaUrls } : {}),
+    },
+  };
+}
 
 const meta = getChatChannelMeta("imessage");
 
