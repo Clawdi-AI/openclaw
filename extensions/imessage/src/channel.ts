@@ -4,6 +4,7 @@ import {
 } from "openclaw/plugin-sdk/compat";
 import {
   applyAccountNameToChannelSection,
+  buildIMessageRawSend,
   buildChannelConfigSchema,
   collectStatusIssuesFromLastError,
   DEFAULT_ACCOUNT_ID,
@@ -25,6 +26,8 @@ import {
   resolveIMessageConfigDefaultTo,
   resolveIMessageGroupRequireMention,
   resolveIMessageGroupToolPolicy,
+  isMuxEnabled,
+  sendViaMux,
   setAccountEnabledInConfigSection,
   type ChannelPlugin,
   type ResolvedIMessageAccount,
@@ -78,6 +81,15 @@ async function sendIMessageOutbound(params: {
     maxBytes,
     accountId: params.accountId ?? undefined,
     replyToId: params.replyToId ?? undefined,
+  });
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
   });
 }
 
@@ -229,7 +241,22 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
     chunker: (text, limit) => getIMessageRuntime().channel.text.chunkText(text, limit),
     chunkerMode: "text",
     textChunkLimit: 4000,
-    sendText: async ({ cfg, to, text, accountId, deps, replyToId }) => {
+    sendText: async ({ cfg, to, text, accountId, deps, replyToId, sessionKey }) => {
+      if (isMuxEnabled({ cfg, channel: "imessage", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
+          cfg,
+          channel: "imessage",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text,
+          replyToId,
+          raw: {
+            imessage: buildIMessageRawSend({ text }),
+          },
+        });
+        return { channel: "imessage", ...result };
+      }
       const result = await sendIMessageOutbound({
         cfg,
         to,
@@ -240,7 +267,33 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
       });
       return { channel: "imessage", ...result };
     },
-    sendMedia: async ({ cfg, to, text, mediaUrl, mediaLocalRoots, accountId, deps, replyToId }) => {
+    sendMedia: async ({
+      cfg,
+      to,
+      text,
+      mediaUrl,
+      mediaLocalRoots,
+      accountId,
+      deps,
+      replyToId,
+      sessionKey,
+    }) => {
+      if (isMuxEnabled({ cfg, channel: "imessage", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
+          cfg,
+          channel: "imessage",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text,
+          mediaUrl,
+          replyToId,
+          raw: {
+            imessage: buildIMessageRawSend({ text, mediaUrl }),
+          },
+        });
+        return { channel: "imessage", ...result };
+      }
       const result = await sendIMessageOutbound({
         cfg,
         to,
@@ -292,6 +345,10 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
   gateway: {
     startAccount: async (ctx) => {
       const account = ctx.account;
+      if (isMuxEnabled({ cfg: ctx.cfg, channel: "imessage", accountId: account.accountId })) {
+        ctx.log?.info(`[${account.accountId}] mux enabled; skipping native provider startup`);
+        return await waitForAbort(ctx.abortSignal);
+      }
       const cliPath = account.config.cliPath?.trim() || "imsg";
       const dbPath = account.config.dbPath?.trim();
       ctx.setStatus({
