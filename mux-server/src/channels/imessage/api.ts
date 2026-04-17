@@ -93,7 +93,53 @@ export function isIMessageSdkInstance(value: unknown): value is IMessageSdkInsta
 }
 
 // Override for tests: inject a pre-built buffer instead of hitting the network.
-type AttachmentDownloader = (url: string) => Promise<{ body: Buffer; fileName?: string }>;
+type AttachmentDownloader = (
+  url: string,
+) => Promise<{ body: Buffer; fileName?: string; contentType?: string }>;
+
+// Minimal MIME → extension table for the attachments iOS actually renders inline.
+// iMessage silently falls back to a generic file bubble (no preview, no inline
+// playback) when the upload extension is unknown — so URLs like
+// https://picsum.photos/1024 (no extension, served as image/jpeg) need the
+// extension derived from Content-Type or the recipient gets a `.bin` file.
+const MIME_EXTENSION_MAP: Readonly<Record<string, string>> = {
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/pjpeg": ".jpg",
+  "image/png": ".png",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
+  "image/svg+xml": ".svg",
+  "image/bmp": ".bmp",
+  "image/tiff": ".tiff",
+  "video/mp4": ".mp4",
+  "video/quicktime": ".mov",
+  "video/webm": ".webm",
+  "video/3gpp": ".3gp",
+  "audio/mp4": ".m4a",
+  "audio/mpeg": ".mp3",
+  "audio/ogg": ".ogg",
+  "audio/wav": ".wav",
+  "audio/webm": ".webm",
+  "application/pdf": ".pdf",
+  "application/zip": ".zip",
+  "application/json": ".json",
+  "text/plain": ".txt",
+  "text/html": ".html",
+};
+
+function extensionForContentType(contentType: string | null | undefined): string | null {
+  if (!contentType) {
+    return null;
+  }
+  const base = contentType.split(";")[0]?.trim().toLowerCase();
+  if (!base) {
+    return null;
+  }
+  return MIME_EXTENSION_MAP[base] ?? null;
+}
 
 export function createIMessageApiService(deps: {
   serverUrl: string;
@@ -237,9 +283,18 @@ export function createIMessageApiService(deps: {
     }
 
     const urlBaseName = safeBaseNameFromUrl(params.attachmentUrl);
-    const fileName = download.fileName ?? urlBaseName ?? "attachment.bin";
-    const extension = path.extname(fileName) || "";
-    const tempPath = path.join(tmpdir(), `imessage-${randomUUID()}${extension}`);
+    const rawName = download.fileName ?? urlBaseName ?? "attachment";
+    const rawExt = path.extname(rawName);
+    // If the URL / content-disposition already gave an extension, keep it.
+    // Otherwise infer from Content-Type. iMessage can't render attachments
+    // with an unknown MIME — iOS silently drops them into a generic file
+    // bubble, no preview, no inline playback — so we fall back to ".bin"
+    // only as a last resort (matches the rest of the codebase's convention
+    // of treating extensionless blobs as octet-stream).
+    const resolvedExt = rawExt || extensionForContentType(download.contentType) || ".bin";
+    const baseWithoutExt = rawExt ? rawName.slice(0, -rawExt.length) : rawName;
+    const fileName = `${baseWithoutExt}${resolvedExt}`;
+    const tempPath = path.join(tmpdir(), `imessage-${randomUUID()}${resolvedExt}`);
 
     try {
       await writeFile(tempPath, download.body);
@@ -337,7 +392,7 @@ export function createIMessageApiService(deps: {
 
 async function defaultDownloadAttachment(
   url: string,
-): Promise<{ body: Buffer; fileName?: string }> {
+): Promise<{ body: Buffer; fileName?: string; contentType?: string }> {
   const response = await fetch(url, {
     signal: AbortSignal.timeout(IMESSAGE_ATTACHMENT_DOWNLOAD_TIMEOUT_MS),
   });
@@ -361,7 +416,8 @@ async function defaultDownloadAttachment(
   }
   const disposition = response.headers.get("content-disposition");
   const fileName = parseContentDispositionFileName(disposition) ?? undefined;
-  return { body: Buffer.from(arrayBuffer), fileName };
+  const contentType = response.headers.get("content-type") ?? undefined;
+  return { body: Buffer.from(arrayBuffer), fileName, contentType };
 }
 
 function parseContentDispositionFileName(header: string | null | undefined): string | null {
