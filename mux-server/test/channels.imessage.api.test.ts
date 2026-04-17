@@ -246,4 +246,89 @@ describe("iMessage api sendAttachment", () => {
 
     expect(calls.sendAttachment[0].fileName).toBe("attachment.bin");
   });
+
+  // Regression: https://picsum.photos/1024 returns JPEG bytes with
+  // Content-Type: image/jpeg but the URL path has no extension. Before the
+  // Content-Type fallback this shipped to Photon as an extensionless upload,
+  // form-data inferred application/octet-stream, and iOS rendered a generic
+  // .bin file bubble instead of the inline image preview.
+  it("infers .jpg from Content-Type when the URL has no extension", async () => {
+    const { sdk, calls } = buildFakeSdk();
+    const download = vi.fn(async () => ({
+      body: Buffer.from("jpeg-bytes"),
+      contentType: "image/jpeg",
+    }));
+    const service = createIMessageApiService({
+      serverUrl: "https://photon.local",
+      apiKey: "k",
+      log,
+      loadSdkFactory: async () => () => sdk,
+      downloadAttachmentFromUrl: download,
+    });
+    service.setSdk(sdk);
+
+    await service.sendAttachment({
+      chatGuid: "iMessage;-;+14155551234",
+      attachmentUrl: "https://picsum.photos/1024",
+    });
+
+    const call = calls.sendAttachment[0];
+    expect(call.fileName).toBe("1024.jpg");
+    expect(call.filePath?.endsWith(".jpg")).toBe(true);
+  });
+
+  it("prefers URL extension over Content-Type when both present", async () => {
+    const { sdk, calls } = buildFakeSdk();
+    const download = vi.fn(async () => ({
+      body: Buffer.from("x"),
+      contentType: "application/octet-stream",
+    }));
+    const service = createIMessageApiService({
+      serverUrl: "https://photon.local",
+      apiKey: "k",
+      log,
+      loadSdkFactory: async () => () => sdk,
+      downloadAttachmentFromUrl: download,
+    });
+    service.setSdk(sdk);
+
+    await service.sendAttachment({
+      chatGuid: "iMessage;-;+14155551234",
+      attachmentUrl: "https://cdn.example.com/path/video.mov",
+    });
+
+    const call = calls.sendAttachment[0];
+    expect(call.fileName).toBe("video.mov");
+    expect(call.filePath?.endsWith(".mov")).toBe(true);
+  });
+
+  it.each([
+    ["image/png", ".png"],
+    ["image/webp", ".webp"],
+    ["image/gif", ".gif"],
+    ["image/heic", ".heic"],
+    ["video/mp4", ".mp4"],
+    ["video/quicktime", ".mov"],
+    ["audio/mp4", ".m4a"],
+    ["audio/mpeg", ".mp3"],
+    ["application/pdf", ".pdf"],
+  ])("maps %s → %s when URL has no extension", async (contentType, expectedExt) => {
+    const { sdk, calls } = buildFakeSdk();
+    const download = vi.fn(async () => ({ body: Buffer.from("x"), contentType }));
+    const service = createIMessageApiService({
+      serverUrl: "https://photon.local",
+      apiKey: "k",
+      log,
+      loadSdkFactory: async () => () => sdk,
+      downloadAttachmentFromUrl: download,
+    });
+    service.setSdk(sdk);
+
+    await service.sendAttachment({
+      chatGuid: "iMessage;-;+14155551234",
+      attachmentUrl: "https://cdn.example.com/asset",
+    });
+
+    expect(calls.sendAttachment[0].filePath?.endsWith(expectedExt)).toBe(true);
+  });
 });
