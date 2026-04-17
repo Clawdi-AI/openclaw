@@ -58,6 +58,8 @@ import {
   type DiscordGuildEntryResolved,
 } from "../discord/monitor/allow-list.js";
 import { logVerbose, warn } from "../globals.js";
+import { resolveIMessageAccount } from "../imessage/accounts.js";
+import { isAllowedIMessageSender, normalizeIMessageHandle } from "../imessage/targets.js";
 import { saveMediaBuffer } from "../media/store.js";
 import {
   addChannelAllowFromStoreEntry,
@@ -1188,6 +1190,131 @@ async function resolveWhatsAppMuxAccess(params: {
   };
 }
 
+function stripIMessagePrefix(value: string | undefined): string {
+  if (!value) {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered.startsWith("imessage:")) {
+    return trimmed.slice("imessage:".length).trim();
+  }
+  return trimmed;
+}
+
+async function resolveIMessageMuxAccess(params: {
+  cfg: OpenClawConfig;
+  accountId: string;
+  payload: MuxInboundPayload;
+  channelData: Record<string, unknown> | undefined;
+  chatType: string;
+}): Promise<MuxAccessResult> {
+  const account = resolveIMessageAccount({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  const imessageCfg = account.config;
+  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
+  const isGroup = !isDirectChat(params.chatType);
+
+  const rawSender = stripIMessagePrefix(readMuxNonEmptyString(params.payload.from));
+  const normalizedSender = normalizeIMessageHandle(rawSender);
+  const chatGuid =
+    readMuxNonEmptyString(asMuxRecord(params.channelData?.imessage)?.chatGuid) ??
+    readMuxNonEmptyString(params.channelData?.chatGuid) ??
+    stripIMessagePrefix(readMuxNonEmptyString(params.payload.to));
+
+  if (!isGroup) {
+    const dmPolicy = imessageCfg.dmPolicy ?? "pairing";
+    if (dmPolicy === "disabled") {
+      return { allowed: false };
+    }
+    if (dmPolicy === "open") {
+      return { allowed: true, commandAuthorized: true };
+    }
+
+    const storeAllowFrom = await readChannelAllowFromStore(
+      "imessage",
+      process.env,
+      params.accountId,
+    ).catch(() => []);
+    const configuredAllowFrom = imessageCfg.allowFrom ?? [];
+    const effectiveAllowFrom: Array<string | number> = [...configuredAllowFrom, ...storeAllowFrom];
+
+    if (effectiveAllowFrom.length === 0) {
+      // Pairing/allowlist policy with no entries: block inbound until paired
+      // (bootstrapMuxPairedSender populates the store on the first paired message).
+      return { allowed: false };
+    }
+
+    if (!normalizedSender && !chatGuid) {
+      return { allowed: false };
+    }
+
+    const senderAllowed = isAllowedIMessageSender({
+      allowFrom: effectiveAllowFrom,
+      sender: normalizedSender,
+      chatGuid: chatGuid ?? null,
+    });
+    if (!senderAllowed) {
+      return { allowed: false };
+    }
+    return { allowed: true, commandAuthorized: true };
+  }
+
+  const groupPolicy =
+    imessageCfg.groupPolicy ?? params.cfg.channels?.defaults?.groupPolicy ?? "open";
+  if (groupPolicy === "disabled") {
+    return { allowed: false };
+  }
+
+  const configuredGroupAllowFrom: Array<string | number> =
+    imessageCfg.groupAllowFrom ??
+    (imessageCfg.allowFrom && imessageCfg.allowFrom.length > 0 ? imessageCfg.allowFrom : []);
+  const routeKey =
+    readMuxNonEmptyString(params.channelData?.routeKey) ??
+    (chatGuid ? `imessage:${params.accountId}:chat:${chatGuid}` : undefined);
+  const pairedSenders =
+    routeKey == null
+      ? []
+      : await readMuxPairedSenders({
+          channel: "imessage",
+          accountId: params.accountId,
+          routeKey,
+        }).catch(() => []);
+  const runtimePairedSenders = configuredGroupAllowFrom.length > 0 ? [] : pairedSenders;
+  const effectiveGroupAllow: Array<string | number> = [
+    ...configuredGroupAllowFrom,
+    ...runtimePairedSenders,
+  ];
+
+  const senderAllowed =
+    (normalizedSender || chatGuid) && effectiveGroupAllow.length > 0
+      ? isAllowedIMessageSender({
+          allowFrom: effectiveGroupAllow,
+          sender: normalizedSender,
+          chatGuid: chatGuid ?? null,
+        })
+      : false;
+
+  if (groupPolicy === "allowlist") {
+    if (effectiveGroupAllow.length === 0 || !senderAllowed) {
+      return { allowed: false };
+    }
+  }
+
+  if (!useAccessGroups) {
+    return { allowed: true, commandAuthorized: true };
+  }
+  return {
+    allowed: true,
+    commandAuthorized: senderAllowed,
+  };
+}
+
 function applyMuxAccessToContext(ctx: MsgContext, access: MuxAccessResult): boolean {
   if (!access.allowed) {
     return false;
@@ -1515,6 +1642,17 @@ export async function handleMuxInboundHttpRequest(
           chatType: String(ctx.ChatType ?? "direct"),
         });
         if (!applyMuxAccessToContext(ctx, discordAccess)) {
+          return;
+        }
+      } else if (channel === "imessage") {
+        const imessageAccess = await resolveIMessageMuxAccess({
+          cfg,
+          accountId,
+          payload,
+          channelData,
+          chatType: String(ctx.ChatType ?? "direct"),
+        });
+        if (!applyMuxAccessToContext(ctx, imessageAccess)) {
           return;
         }
       } else {
