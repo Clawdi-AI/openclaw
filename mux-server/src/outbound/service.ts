@@ -954,9 +954,10 @@ export function createOutboundService(deps: {
       try {
         for (const url of imessageMediaUrls) {
           const sent = await deps.imessageApiService.sendAttachment({ chatGuid, filePath: url });
-          if (sent.guid) {
-            providerMessageIds.push(sent.guid);
-          }
+          // The SDK may return guid=null even on success; record as "unknown" so
+          // the successful send still counts toward providerMessageIds (prevents
+          // caller retry duplication) — matches the text-send path below.
+          providerMessageIds.push(sent.guid ?? "unknown");
         }
       } catch (error) {
         sendError = error;
