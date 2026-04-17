@@ -5,7 +5,7 @@ import { asRecord, errorString, readNonEmptyString } from "../../domain/values.j
 import { buildIMessageInboundEnvelope, type MuxInboundAttachment } from "../../mux-envelope.js";
 import { createInboundTraceId } from "../../observability/tracing.js";
 import { buildIMessageRouteKey, deriveIMessageSessionKey } from "../../routing/keys.js";
-import type { createIMessageApiService } from "./api.js";
+import type { IMessageSdkInstance, createIMessageApiService } from "./api.js";
 
 type IMessageApiService = ReturnType<typeof createIMessageApiService>;
 
@@ -20,7 +20,23 @@ type Metrics = {
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB
 
-// Module-level shutdown flag + signal handlers — registered ONCE, not per run() call.
+// Bounded in-memory retry buffer — best-effort recovery for transient forward
+// failures. When the remote tenant target is briefly unavailable (5xx, network
+// blip) we requeue the envelope with exponential backoff instead of dropping
+// silently. The queue is bounded to cap memory under sustained outages.
+const MAX_INBOUND_RETRY_ATTEMPTS = 3;
+const INBOUND_RETRY_QUEUE_CAP = 256;
+const INBOUND_RETRY_BASE_DELAY_MS = 2_000;
+
+// Module-level shutdown flag + signal handlers.
+//
+// Why module-level (different from telegram/discord/whatsapp loops):
+//   The SDK is driven by an EventEmitter, so `start()` never loops per tick —
+//   it awaits a session-end promise per connection. Re-registering handlers
+//   inside start() would leak a SIGINT listener every reconnect. Telegram's
+//   loop exits its while-loop on shutdown and gets re-entered only on process
+//   restart, so per-call registration is safe there. iMessage start() is
+//   idempotent per process, so a single module-level registration is correct.
 let running = true;
 process.on("SIGINT", () => {
   running = false;
@@ -69,6 +85,7 @@ export function createIMessageInboundRuntime(deps: {
 
   async function extractInboundAttachments(
     message: Record<string, unknown>,
+    activeSdk: IMessageSdkInstance,
   ): Promise<MuxInboundAttachment[]> {
     const media: MuxInboundAttachment[] = [];
     if (!Array.isArray(message.attachments)) {
@@ -84,7 +101,9 @@ export function createIMessageInboundRuntime(deps: {
       const guid = readNonEmptyString(attachment.guid);
       let content: string | undefined;
       if (guid) {
-        const buffer = await deps.apiService.downloadAttachment(guid);
+        // Use the caller-captured SDK reference so a concurrent reconnect
+        // (which nulls the service-level sdk) does not silently return null.
+        const buffer = await deps.apiService.downloadAttachmentWith(activeSdk, guid);
         if (buffer) {
           if (buffer.length > MAX_ATTACHMENT_BYTES) {
             deps.log({ type: "imessage_attachment_too_large", guid, bytes: buffer.length });
@@ -104,7 +123,7 @@ export function createIMessageInboundRuntime(deps: {
     return media;
   }
 
-  async function forwardToTenant(params: {
+  type ForwardParams = {
     tenantId: string;
     bindingId: string;
     routeKey: string;
@@ -115,7 +134,112 @@ export function createIMessageInboundRuntime(deps: {
     chatType: "direct" | "group";
     timestampMs: number;
     media: MuxInboundAttachment[];
-  }): Promise<"forwarded" | "deferred" | "error"> {
+  };
+
+  type RetryEntry = {
+    params: ForwardParams;
+    attempt: number;
+    nextAttemptAtMs: number;
+  };
+
+  // Bounded FIFO of in-flight retries keyed by messageId to avoid unbounded
+  // memory growth during sustained outages. When full, the oldest entry is
+  // evicted and counted as a drop — we surface this explicitly rather than
+  // silently swallow.
+  const retryQueue = new Map<string, RetryEntry>();
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleRetryPump(): void {
+    if (retryTimer || retryQueue.size === 0) {
+      return;
+    }
+    let nextAt = Number.POSITIVE_INFINITY;
+    for (const entry of retryQueue.values()) {
+      if (entry.nextAttemptAtMs < nextAt) {
+        nextAt = entry.nextAttemptAtMs;
+      }
+    }
+    const delay = Math.max(0, nextAt - Date.now());
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void pumpRetryQueue();
+    }, delay);
+    // Do not keep the process alive solely for retries.
+    if (typeof retryTimer === "object" && retryTimer && "unref" in retryTimer) {
+      (retryTimer as { unref: () => void }).unref();
+    }
+  }
+
+  async function pumpRetryQueue(): Promise<void> {
+    if (!running) {
+      return;
+    }
+    const now = Date.now();
+    const due: RetryEntry[] = [];
+    for (const [key, entry] of retryQueue) {
+      if (entry.nextAttemptAtMs <= now) {
+        retryQueue.delete(key);
+        due.push(entry);
+      }
+    }
+    for (const entry of due) {
+      const status = await forwardToTenant(entry.params);
+      if (status === "forwarded") {
+        continue;
+      }
+      if (entry.attempt >= MAX_INBOUND_RETRY_ATTEMPTS) {
+        deps.metrics.recordInboundEvent("imessage", "dropped");
+        deps.log({
+          type: "imessage_inbound_retry_exhausted",
+          tenantId: entry.params.tenantId,
+          bindingId: entry.params.bindingId,
+          messageId: entry.params.messageId,
+          attempts: entry.attempt,
+          finalStatus: status,
+        });
+        continue;
+      }
+      enqueueRetry(entry.params, entry.attempt + 1);
+    }
+    scheduleRetryPump();
+  }
+
+  function enqueueRetry(params: ForwardParams, attempt: number): void {
+    if (retryQueue.size >= INBOUND_RETRY_QUEUE_CAP) {
+      // Evict oldest (insertion-ordered Map) to make room.
+      const oldestKey = retryQueue.keys().next().value;
+      if (oldestKey !== undefined) {
+        const evicted = retryQueue.get(oldestKey);
+        retryQueue.delete(oldestKey);
+        if (evicted) {
+          deps.metrics.recordInboundEvent("imessage", "dropped");
+          deps.log({
+            type: "imessage_inbound_retry_evicted_overflow",
+            tenantId: evicted.params.tenantId,
+            bindingId: evicted.params.bindingId,
+            messageId: evicted.params.messageId,
+            queueCap: INBOUND_RETRY_QUEUE_CAP,
+          });
+        }
+      }
+    }
+    const delayMs = Math.min(30_000, INBOUND_RETRY_BASE_DELAY_MS * 2 ** Math.min(attempt - 1, 4));
+    const nextAttemptAtMs = Date.now() + delayMs;
+    retryQueue.set(params.messageId, { params, attempt, nextAttemptAtMs });
+    deps.log({
+      type: "imessage_inbound_retry_scheduled",
+      tenantId: params.tenantId,
+      bindingId: params.bindingId,
+      messageId: params.messageId,
+      attempt,
+      delayMs,
+    });
+    scheduleRetryPump();
+  }
+
+  async function forwardToTenant(
+    params: ForwardParams,
+  ): Promise<"forwarded" | "deferred" | "error"> {
     const target = deps.resolveTenantInboundTarget(params.tenantId);
     if (!target) {
       deps.log({
@@ -225,9 +349,13 @@ export function createIMessageInboundRuntime(deps: {
     return "forwarded";
   }
 
+  // TODO(imessage-bot-control): iMessage does not yet support slash-style
+  // bot-control commands (/bot_status, /bot_unpair, /bot_switch) that
+  // Telegram/Discord expose. Users interact via plain text. This is a feature
+  // gap, not a regression — tracked separately from mux transport plumbing.
   async function handleInboundMessage(
     message: Record<string, unknown>,
-    currentSdkAvailable: boolean,
+    activeSdk: IMessageSdkInstance | null,
   ): Promise<void> {
     if (message.isFromMe) {
       return;
@@ -257,7 +385,7 @@ export function createIMessageInboundRuntime(deps: {
         : Date.now();
 
     deps.apiService.markInboundSeen();
-    const media = currentSdkAvailable ? await extractInboundAttachments(message) : [];
+    const media = activeSdk ? await extractInboundAttachments(message, activeSdk) : [];
 
     deps.log({
       type: "imessage_inbound_received",
@@ -293,7 +421,9 @@ export function createIMessageInboundRuntime(deps: {
             type: "imessage_pairing_notice_error",
             tenantId: claimed.tenantId,
             chatGuid,
-            error: String(error),
+            messageId,
+            phase: "post_claim",
+            error: errorString(error),
           });
         }
         deps.log({
@@ -323,7 +453,9 @@ export function createIMessageInboundRuntime(deps: {
           deps.log({
             type: "imessage_unpaired_notice_error",
             chatGuid,
-            error: String(error),
+            messageId,
+            phase: "unpaired_hint",
+            error: errorString(error),
           });
         }
       }
@@ -333,7 +465,7 @@ export function createIMessageInboundRuntime(deps: {
 
     deps.metrics.recordActiveUser("imessage", from || chatGuid);
     const fromId = from || chatGuid;
-    await forwardToTenant({
+    const forwardParams: ForwardParams = {
       tenantId: binding.tenantId,
       bindingId: binding.bindingId,
       routeKey: binding.routeKey,
@@ -344,7 +476,23 @@ export function createIMessageInboundRuntime(deps: {
       chatType,
       timestampMs,
       media,
+    };
+    const status = await forwardToTenant(forwardParams);
+    if (status === "forwarded") {
+      return;
+    }
+    // Explicit non-silent handling of transient failures. The new-message event
+    // is consumed only once by the SDK, so without this buffer a target that is
+    // temporarily unavailable would cause permanent message loss.
+    deps.log({
+      type: "imessage_inbound_deferred_no_retry",
+      tenantId: binding.tenantId,
+      bindingId: binding.bindingId,
+      routeKey: binding.routeKey,
+      messageId,
+      status,
     });
+    enqueueRetry(forwardParams, 1);
   }
 
   async function start(): Promise<void> {
@@ -411,13 +559,19 @@ export function createIMessageInboundRuntime(deps: {
       });
 
       currentSdk.on("new-message", (message: unknown) => {
+        // Capture the SDK reference synchronously, BEFORE any await, so that a
+        // concurrent reconnect (which calls setSdk(null)) cannot invalidate
+        // downstream attachment downloads mid-flight. `currentSdk` is the
+        // per-session constant from the enclosing scope — attachment downloads
+        // are routed through this reference, not the mutable service-level sdk.
+        const capturedSdk = currentSdk;
         void (async () => {
           try {
             const record = asRecord(message);
             if (!record) {
               return;
             }
-            await handleInboundMessage(record, true);
+            await handleInboundMessage(record, capturedSdk);
           } catch (error) {
             deps.log({ type: "imessage_inbound_processing_error", error: String(error) });
           }
