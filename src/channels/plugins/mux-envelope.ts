@@ -466,6 +466,20 @@ export function buildWhatsAppRawSend(params: {
   };
 }
 
+export function buildIMessageRawSend(params: {
+  text: string;
+  mediaUrl?: string;
+  mediaUrls?: string[];
+}) {
+  return {
+    send: {
+      text: params.text,
+      ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
+      ...(params.mediaUrls?.length ? { mediaUrls: params.mediaUrls } : {}),
+    },
+  };
+}
+
 export function buildTelegramInboundEnvelope(params: {
   updateId: number;
   sessionKey: string;
