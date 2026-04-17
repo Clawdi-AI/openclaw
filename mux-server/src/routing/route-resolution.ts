@@ -56,28 +56,28 @@ export function createRouteResolutionHelpers(deps: {
   stmtListSessionRoutesByBinding: {
     all: (
       tenantId: string,
-      channel: "telegram" | "discord" | "whatsapp",
+      channel: "telegram" | "discord" | "whatsapp" | "imessage",
       bindingId: string,
     ) => SessionRouteByBindingRow[];
   };
   stmtSelectSessionKeyByBinding: {
     get: (
       tenantId: string,
-      channel: "telegram" | "discord" | "whatsapp",
+      channel: "telegram" | "discord" | "whatsapp" | "imessage",
       bindingId: string,
     ) => { session_key?: unknown } | undefined;
   };
   stmtResolveSessionRouteBinding: {
     get: (
       tenantId: string,
-      channel: "telegram" | "discord" | "whatsapp",
+      channel: "telegram" | "discord" | "whatsapp" | "imessage",
       sessionKey: string,
     ) => Record<string, unknown> | undefined;
   };
   stmtSelectActiveBindingByTenantAndRoute: {
     get: (
       tenantId: string,
-      channel: "telegram" | "discord" | "whatsapp",
+      channel: "telegram" | "discord" | "whatsapp" | "imessage",
       routeKey: string,
     ) => Record<string, unknown> | undefined;
   };
@@ -93,7 +93,7 @@ export function createRouteResolutionHelpers(deps: {
 }) {
   function resolveSessionKeyForBindingRoute(params: {
     tenantId: string;
-    channel: "telegram" | "discord" | "whatsapp";
+    channel: "telegram" | "discord" | "whatsapp" | "imessage";
     bindingId: string;
     routeKey: string;
   }): string | null {
@@ -117,7 +117,7 @@ export function createRouteResolutionHelpers(deps: {
 
   function resolveLatestSessionKeyForBinding(params: {
     tenantId: string;
-    channel: "telegram" | "discord" | "whatsapp";
+    channel: "telegram" | "discord" | "whatsapp" | "imessage";
     bindingId: string;
   }): string | null {
     const row = deps.stmtSelectSessionKeyByBinding.get(
@@ -237,7 +237,7 @@ export function createRouteResolutionHelpers(deps: {
 
   function resolveRouteKeyBySession(params: {
     tenantId: string;
-    channel: "telegram" | "discord" | "whatsapp";
+    channel: "telegram" | "discord" | "whatsapp" | "imessage";
     sessionKey: string;
   }): string | null {
     const exactRow = deps.stmtResolveSessionRouteBinding.get(
@@ -250,7 +250,7 @@ export function createRouteResolutionHelpers(deps: {
 
   function resolveRouteKeyByTarget(params: {
     tenantId: string;
-    channel: "telegram" | "discord" | "whatsapp";
+    channel: "telegram" | "discord" | "whatsapp" | "imessage";
     routeKeys?: string[];
   }): string | null {
     for (const routeKey of uniqueRouteKeys(params.routeKeys ?? [])) {
@@ -269,7 +269,7 @@ export function createRouteResolutionHelpers(deps: {
 
   function resolveSessionRouteBinding(params: {
     tenantId: string;
-    channel: "telegram" | "discord" | "whatsapp";
+    channel: "telegram" | "discord" | "whatsapp" | "imessage";
     sessionKey: string;
     routeKeys?: string[];
     mode?: OutboundResolutionMode;

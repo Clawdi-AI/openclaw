@@ -52,7 +52,7 @@ export type MuxInboundPayload = {
 
 export type MuxInboundEnvelope = {
   eventId: string;
-  channel: "telegram" | "discord" | "whatsapp";
+  channel: "telegram" | "discord" | "whatsapp" | "imessage";
   event: {
     kind: "message" | "callback" | "command" | "action";
     raw: unknown;
@@ -641,6 +641,51 @@ export function buildDiscordInboundEnvelope(params: {
   }
   if (params.wasMentioned != null) {
     payload.wasMentioned = params.wasMentioned;
+  }
+  return payload;
+}
+
+export function buildIMessageInboundEnvelope(params: {
+  messageId: string;
+  sessionKey: string;
+  accountId: string;
+  body: string;
+  from: string;
+  chatGuid: string;
+  chatType: "direct" | "group";
+  routeKey: string;
+  timestampMs: number;
+  media?: MuxInboundAttachment[];
+}): MuxInboundEnvelope {
+  const raw = { message: null };
+  const payload: MuxInboundEnvelope = {
+    eventId: `imessage-${params.messageId}`,
+    channel: "imessage",
+    event: {
+      kind: "message",
+      raw,
+    },
+    raw,
+    sessionKey: params.sessionKey,
+    body: params.body,
+    from: `imessage:${params.from}`,
+    to: `imessage:${params.chatGuid}`,
+    accountId: params.accountId,
+    chatType: params.chatType,
+    messageId: params.messageId,
+    timestampMs: params.timestampMs,
+    channelData: {
+      accountId: params.accountId,
+      messageId: params.messageId,
+      chatGuid: params.chatGuid,
+      routeKey: params.routeKey,
+      imessage: {
+        chatGuid: params.chatGuid,
+      },
+    },
+  };
+  if (params.media && params.media.length > 0) {
+    payload.attachments = params.media;
   }
   return payload;
 }

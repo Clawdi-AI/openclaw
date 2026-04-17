@@ -1,6 +1,7 @@
 import type {
   DiscordBoundRoute,
   DiscordOutboundTarget,
+  IMessageBoundRoute,
   OutboundResolutionMode,
   WhatsAppBoundRoute,
   TelegramBoundRoute,
@@ -334,4 +335,58 @@ export function listWhatsAppOutboundRouteKeys(params: {
   return uniqueRouteKeys(params.accountIds).map((accountId) =>
     buildWhatsAppRouteKey(chatJid, accountId),
   );
+}
+
+export function buildIMessageRouteKey(params: {
+  chatGuid: string;
+  chatType: "direct" | "group";
+}): string {
+  return `imessage:${params.chatType}:${params.chatGuid}`;
+}
+
+export function parseIMessageRouteKey(routeKey: string): IMessageBoundRoute | null {
+  const match = routeKey.match(/^imessage:(direct|group):(.+)$/);
+  if (!match?.[1] || !match?.[2]) {
+    return null;
+  }
+  const chatType = match[1] === "group" ? "group" : "direct";
+  const chatGuid = match[2].trim();
+  return chatGuid ? { chatGuid, chatType } : null;
+}
+
+export function deriveIMessageSessionKey(params: {
+  chatGuid: string;
+  chatType: "direct" | "group";
+}): string {
+  return params.chatType === "group"
+    ? `agent:main:imessage:group:${params.chatGuid}`
+    : `agent:main:imessage:direct:${params.chatGuid}`;
+}
+
+export function parseIMessageOutboundChatGuid(value: unknown): string | null {
+  const raw = readNonEmptyString(value);
+  if (!raw) {
+    return null;
+  }
+  return raw.replace(/^imessage:/i, "").trim() || null;
+}
+
+export function listIMessageOutboundRouteKeys(params: {
+  requestedTo?: unknown;
+  rawSend?: Record<string, unknown> | null;
+}): string[] {
+  const outerGuid = parseIMessageOutboundChatGuid(params.requestedTo);
+  const innerGuid =
+    parseIMessageOutboundChatGuid(params.rawSend?.to) ??
+    parseIMessageOutboundChatGuid(params.rawSend?.chatGuid);
+  if (outerGuid && innerGuid && outerGuid !== innerGuid) {
+    return [];
+  }
+  const chatGuid = outerGuid ?? innerGuid;
+  if (!chatGuid) {
+    return [];
+  }
+  // A chatGuid containing ";+;" is a group chat in iMessage.
+  const chatType: "direct" | "group" = chatGuid.includes(";+;") ? "group" : "direct";
+  return uniqueRouteKeys([buildIMessageRouteKey({ chatGuid, chatType })]);
 }
