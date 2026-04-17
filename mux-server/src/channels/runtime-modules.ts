@@ -95,8 +95,19 @@ export type DiscordRuntimeModules = {
   ) => Promise<{ messageId: string; channelId: string }>;
 };
 
+export type IMessageSdkFactory = (opts: {
+  serverUrl: string;
+  apiKey?: string;
+  logLevel?: string;
+}) => unknown;
+
+export type IMessageRuntimeModules = {
+  createSdk: IMessageSdkFactory;
+};
+
 let webRuntimeModulesPromise: Promise<WebRuntimeModules> | null = null;
 let discordRuntimeModulesPromise: Promise<DiscordRuntimeModules> | null = null;
+let imessageRuntimeModulesPromise: Promise<IMessageRuntimeModules> | null = null;
 
 export async function loadWebRuntimeModules(
   readNonEmptyString: (value: unknown) => string | null,
@@ -175,4 +186,23 @@ export async function loadDiscordRuntimeModules(): Promise<DiscordRuntimeModules
     })();
   }
   return await discordRuntimeModulesPromise;
+}
+
+export async function loadIMessageRuntimeModules(): Promise<IMessageRuntimeModules> {
+  if (!imessageRuntimeModulesPromise) {
+    imessageRuntimeModulesPromise = (async () => {
+      // Dynamic import — the SDK is an optional peer dependency loaded only when
+      // MUX_IMESSAGE_SERVER_URL is set. It has no shipped typings, so we validate the
+      // factory shape at runtime.
+      const sdkModule = (await import("@photon-ai/advanced-imessage-kit")) as {
+        SDK?: unknown;
+      };
+      if (typeof sdkModule.SDK !== "function") {
+        throw new Error("failed to load Photon iMessage SDK runtime module");
+      }
+      const factory = sdkModule.SDK as IMessageSdkFactory;
+      return { createSdk: factory };
+    })();
+  }
+  return await imessageRuntimeModulesPromise;
 }

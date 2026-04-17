@@ -1,6 +1,6 @@
 import { Counter, Gauge, Histogram, Registry } from "prom-client";
 
-const CHANNELS = ["telegram", "discord", "whatsapp"] as const;
+const CHANNELS = ["telegram", "discord", "whatsapp", "imessage"] as const;
 const ACTIVE_WINDOWS = [
   ["5m", 5 * 60_000],
   ["1h", 60 * 60_000],
@@ -34,7 +34,9 @@ function normalizeMethod(value: unknown): "send" | "typing" | "action" {
 }
 
 function normalizeChannel(value: unknown): MetricsChannel | "unknown" {
-  return value === "telegram" || value === "discord" || value === "whatsapp" ? value : "unknown";
+  return value === "telegram" || value === "discord" || value === "whatsapp" || value === "imessage"
+    ? value
+    : "unknown";
 }
 
 function normalizePairingClaimType(value: unknown): PairingClaimType {
@@ -50,6 +52,9 @@ function channelFromEventType(type: string): MetricsChannel | null {
   }
   if (type.startsWith("whatsapp_")) {
     return "whatsapp";
+  }
+  if (type.startsWith("imessage_")) {
+    return "imessage";
   }
   return null;
 }
@@ -130,6 +135,7 @@ export function createMuxMetrics() {
     telegram: new Map(),
     discord: new Map(),
     whatsapp: new Map(),
+    imessage: new Map(),
   };
 
   const recordPairingClaim = (params: {

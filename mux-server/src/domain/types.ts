@@ -77,6 +77,11 @@ export type WhatsAppBoundRoute = {
   chatJid: string;
 };
 
+export type IMessageBoundRoute = {
+  chatGuid: string;
+  chatType: "direct" | "group";
+};
+
 export type ResolvedBoundRoute<T> = {
   route: T;
   routeKey: string;
@@ -92,7 +97,7 @@ export type TenantInboundTarget = {
   updatedAtMs: number | null;
 };
 
-export type NoticeChannel = "telegram" | "discord" | "whatsapp";
+export type NoticeChannel = "telegram" | "discord" | "whatsapp" | "imessage";
 
 export type StyledNotice = {
   text: string;

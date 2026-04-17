@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildTelegramCallbackInboundEnvelope,
   buildDiscordInboundEnvelope,
+  buildIMessageInboundEnvelope,
   buildTelegramInboundEnvelope,
   buildWhatsAppInboundEnvelope,
   collectOutboundMediaUrls,
@@ -216,5 +217,66 @@ describe("mux envelope helpers", () => {
     expect(result).toHaveLength(1);
     expect(result[0].content).toBe("aWdub3Jl");
     expect(result[0].url).toBe("https://example.com/img.jpg");
+  });
+
+  test("builds imessage inbound envelope with stable eventId and route metadata", () => {
+    const envelope = buildIMessageInboundEnvelope({
+      messageId: "msg-abc",
+      sessionKey: "agent:main:imessage:direct:CHAT-GUID",
+      accountId: "default",
+      body: "hello",
+      from: "+14155550123",
+      chatGuid: "iMessage;-;+14155550123",
+      chatType: "direct",
+      routeKey: "imessage:direct:iMessage;-;+14155550123",
+      timestampMs: 1700000000000,
+    });
+
+    expect(envelope.eventId).toBe("imessage-msg-abc");
+    expect(envelope.channel).toBe("imessage");
+    expect(envelope.from).toBe("imessage:+14155550123");
+    expect(envelope.to).toBe("imessage:iMessage;-;+14155550123");
+    expect(envelope.sessionKey).toBe("agent:main:imessage:direct:CHAT-GUID");
+    expect(envelope.chatType).toBe("direct");
+    expect(envelope.attachments).toBeUndefined();
+    const channelData = envelope.channelData as {
+      chatGuid?: string;
+      routeKey?: string;
+      imessage?: { chatGuid?: string };
+    };
+    expect(channelData.chatGuid).toBe("iMessage;-;+14155550123");
+    expect(channelData.routeKey).toBe("imessage:direct:iMessage;-;+14155550123");
+    expect(channelData.imessage?.chatGuid).toBe("iMessage;-;+14155550123");
+  });
+
+  test("imessage inbound envelope preserves attachments when provided", () => {
+    const envelope = buildIMessageInboundEnvelope({
+      messageId: "msg-1",
+      sessionKey: "agent:main:imessage:group:chat123",
+      accountId: "default",
+      body: "",
+      from: "+1555",
+      chatGuid: "chat123;+;+1234",
+      chatType: "group",
+      routeKey: "imessage:group:chat123;+;+1234",
+      timestampMs: 42,
+      media: [
+        {
+          type: "image",
+          mimeType: "image/png",
+          fileName: "photo.png",
+          content: "aGVsbG8=",
+        },
+      ],
+    });
+    expect(envelope.attachments).toEqual([
+      {
+        type: "image",
+        mimeType: "image/png",
+        fileName: "photo.png",
+        content: "aGVsbG8=",
+      },
+    ]);
+    expect(envelope.chatType).toBe("group");
   });
 });
