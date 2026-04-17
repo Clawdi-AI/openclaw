@@ -70,6 +70,7 @@ export function createObservabilityRuntime(deps: {
     connected: boolean;
     loopStartedAtMs: number | null;
     lastSdkConnectedAtMs: number | null;
+    lastSdkClosedAtMs: number | null;
     lastSdkErrorAtMs: number | null;
     lastSdkError: string | null;
     lastInboundSeenAtMs: number | null;

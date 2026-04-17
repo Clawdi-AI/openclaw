@@ -168,8 +168,18 @@ export function createIMessageApiService(deps: {
     if (!current) {
       return null;
     }
+    return downloadAttachmentWith(current, guid);
+  }
+
+  // Download attachment using a caller-provided SDK reference. Prefer this in
+  // inbound handlers that captured the SDK BEFORE any await so that a concurrent
+  // reconnect (setSdk(null)) does not silently drop attachment content mid-flight.
+  async function downloadAttachmentWith(
+    activeSdk: IMessageSdkInstance,
+    guid: string,
+  ): Promise<Buffer | null> {
     try {
-      const buffer = await current.attachments.downloadAttachment(guid);
+      const buffer = await activeSdk.attachments.downloadAttachment(guid);
       return Buffer.isBuffer(buffer) ? buffer : null;
     } catch (error) {
       deps.log({ type: "imessage_attachment_download_error", guid, error: String(error) });
@@ -177,6 +187,9 @@ export function createIMessageApiService(deps: {
     }
   }
 
+  // Send the pairing notice through the current SDK. Throws on failure so the
+  // caller can log full context (tenantId, chatGuid, phase). Mirrors
+  // sendWhatsAppPairingNotice / discord notice semantics.
   async function sendPairingNotice(params: { chatGuid: string; text: string }): Promise<void> {
     try {
       await sendMessage({ chatGuid: params.chatGuid, message: params.text });
@@ -186,6 +199,9 @@ export function createIMessageApiService(deps: {
         chatGuid: params.chatGuid,
         error: String(error),
       });
+      throw error instanceof Error
+        ? error
+        : new Error("iMessage pairing notice failed", { cause: error });
     }
   }
 
@@ -201,6 +217,7 @@ export function createIMessageApiService(deps: {
     sendMessage,
     sendAttachment,
     downloadAttachment,
+    downloadAttachmentWith,
     sendPairingNotice,
   };
 }

@@ -11,6 +11,7 @@ import type {
 } from "../domain/types.js";
 import {
   asRecord,
+  errorString,
   readNonEmptyString,
   readPositiveInt,
   readUnsignedNumericString,
@@ -928,7 +929,28 @@ export function createOutboundService(deps: {
         };
       }
 
+      // iMessage outbound is NOT a single atomic transaction: attachments and
+      // text are separate SDK calls. If any earlier call succeeds and a later
+      // one fails, a naive 502 would cause the caller to retry the entire
+      // request — duplicating the media that already went through.
+      //
+      // Retry semantics:
+      //   - If nothing succeeded -> return 502 (safe to retry).
+      //   - If ANY send succeeded -> return 200 with partial=true. The
+      //     providerMessageIds array surfaces exactly which sends landed so
+      //     the caller can dedupe or skip the already-delivered parts on a
+      //     follow-up request.
+      //   - The caller is expected to treat partial=true responses as a
+      //     terminal delivery for the listed providerMessageIds and decide at
+      //     the application layer whether to resend the missing text.
+      //
+      // This matches the pragmatic choice other channels make when a single
+      // logical send spans multiple provider RPCs (WhatsApp multi-media, etc.)
+      // and the protocol doesn't offer batch atomicity.
       const providerMessageIds: string[] = [];
+      let sendError: unknown = null;
+      let failedStage: "media" | "text" | null = null;
+
       try {
         for (const url of imessageMediaUrls) {
           const sent = await deps.imessageApiService.sendAttachment({ chatGuid, filePath: url });
@@ -936,7 +958,13 @@ export function createOutboundService(deps: {
             providerMessageIds.push(sent.guid);
           }
         }
-        if (imessageText.trim()) {
+      } catch (error) {
+        sendError = error;
+        failedStage = "media";
+      }
+
+      if (!sendError && imessageText.trim()) {
+        try {
           const sent = await deps.imessageApiService.sendMessage({
             chatGuid,
             message: imessageText,
@@ -946,14 +974,21 @@ export function createOutboundService(deps: {
           } else {
             providerMessageIds.push("unknown");
           }
+        } catch (error) {
+          sendError = error;
+          failedStage = "text";
         }
-      } catch (error) {
+      }
+
+      if (sendError && providerMessageIds.length === 0) {
+        // Nothing landed — safe to fail; caller retry will not duplicate.
         return {
           statusCode: 502,
           bodyText: JSON.stringify({
             ok: false,
             error: "imessage send failed",
-            details: String(error),
+            details: errorerrorString(sendError),
+            ...(failedStage ? { failedStage } : {}),
           }),
         };
       }
@@ -965,6 +1000,17 @@ export function createOutboundService(deps: {
         };
       }
 
+      const partial = Boolean(sendError);
+      if (partial) {
+        deps.log({
+          type: "imessage_outbound_partial_success",
+          chatGuid,
+          providerMessageIds,
+          failedStage,
+          error: errorString(sendError),
+        });
+      }
+
       const messageId = providerMessageIds[0] ?? "unknown";
       return {
         statusCode: 200,
@@ -974,6 +1020,13 @@ export function createOutboundService(deps: {
           chatId: chatGuid,
           providerMessageIds,
           rawPassthrough: Boolean(imessageRawSend),
+          ...(partial
+            ? {
+                partial: true,
+                failedStage,
+                partialError: errorString(sendError),
+              }
+            : {}),
         }),
       };
     }
