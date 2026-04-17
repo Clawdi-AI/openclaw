@@ -29,6 +29,20 @@ export type SendResult = {
   bodyText: string;
 };
 
+// Extracts the upstream Photon HTTP status from an IMessagePhotonError without
+// importing the class (avoids a circular type dep through api.ts). A duck-type
+// check is sufficient because this module is the only consumer.
+function readIMessagePhotonStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  const httpStatus = (error as { httpStatus?: unknown }).httpStatus;
+  if (typeof httpStatus === "number" && Number.isFinite(httpStatus)) {
+    return httpStatus;
+  }
+  return null;
+}
+
 export function createOutboundService(deps: {
   config: Pick<
     MuxConfig,
@@ -149,10 +163,12 @@ export function createOutboundService(deps: {
     sendMessage: (params: {
       chatGuid: string;
       message: string;
+      selectedMessageGuid?: string;
     }) => Promise<{ guid: string | null }>;
     sendAttachment: (params: {
       chatGuid: string;
-      filePath: string;
+      attachmentUrl: string;
+      selectedMessageGuid?: string;
     }) => Promise<{ guid: string | null }>;
   };
 }): {
@@ -888,6 +904,7 @@ export function createOutboundService(deps: {
       }
 
       const { chatGuid } = resolvedRoute.route;
+      const replyToId = readNonEmptyString(payload.replyToId);
       const imessageText =
         typeof imessageRawSend?.text === "string"
           ? imessageRawSend.text
@@ -952,8 +969,17 @@ export function createOutboundService(deps: {
       let failedStage: "media" | "text" | null = null;
 
       try {
-        for (const url of imessageMediaUrls) {
-          const sent = await deps.imessageApiService.sendAttachment({ chatGuid, filePath: url });
+        for (const [index, url] of imessageMediaUrls.entries()) {
+          // Photon supports reply threading via selectedMessageGuid, which we
+          // only apply to the FIRST send in a batch. A reply with multiple
+          // attachments should thread the first send; subsequent sends are
+          // continuation of the same reply and must not re-thread, or iOS
+          // renders a separate quoted reply for each attachment.
+          const sent = await deps.imessageApiService.sendAttachment({
+            chatGuid,
+            attachmentUrl: url,
+            ...(replyToId && index === 0 ? { selectedMessageGuid: replyToId } : {}),
+          });
           // The SDK may return guid=null even on success; record as "unknown" so
           // the successful send still counts toward providerMessageIds (prevents
           // caller retry duplication) — matches the text-send path below.
@@ -969,6 +995,12 @@ export function createOutboundService(deps: {
           const sent = await deps.imessageApiService.sendMessage({
             chatGuid,
             message: imessageText,
+            // Only thread the text send if no media preceded it — otherwise
+            // the first attachment already carried the reply context and we
+            // do not want a second quoted-reply bubble on iOS.
+            ...(replyToId && imessageMediaUrls.length === 0
+              ? { selectedMessageGuid: replyToId }
+              : {}),
           });
           if (sent.guid) {
             providerMessageIds.push(sent.guid);
@@ -983,13 +1015,21 @@ export function createOutboundService(deps: {
 
       if (sendError && providerMessageIds.length === 0) {
         // Nothing landed — safe to fail; caller retry will not duplicate.
+        // Pass through Photon's HTTP status when available: permanent 4xx
+        // client errors (invalid chat, unauthorized, attachment too large)
+        // must not be misreported as retryable 502s or the caller will
+        // duplicate the failed send on its retry timer.
+        const photonStatus = readIMessagePhotonStatus(sendError);
+        const isClientError = photonStatus !== null && photonStatus >= 400 && photonStatus < 500;
         return {
-          statusCode: 502,
+          statusCode: isClientError ? photonStatus : 502,
           bodyText: JSON.stringify({
             ok: false,
             error: "imessage send failed",
             details: errorString(sendError),
             ...(failedStage ? { failedStage } : {}),
+            ...(photonStatus !== null ? { photonStatus } : {}),
+            ...(isClientError ? { retryable: false } : {}),
           }),
         };
       }

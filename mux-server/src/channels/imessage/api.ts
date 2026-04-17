@@ -1,12 +1,26 @@
 // iMessage API service wrapping the Photon Advanced iMessage Kit SDK.
 // SDK types are declared manually because the package does not ship typings.
 
+import { randomUUID } from "node:crypto";
+import { unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 export type IMessageSdkInstance = {
   messages: {
-    sendMessage: (opts: { chatGuid: string; message: string }) => Promise<{ guid?: string }>;
+    sendMessage: (opts: {
+      chatGuid: string;
+      message: string;
+      selectedMessageGuid?: string;
+    }) => Promise<{ guid?: string }>;
   };
   attachments: {
-    sendAttachment: (opts: { chatGuid: string; filePath: string }) => Promise<{ guid?: string }>;
+    sendAttachment: (opts: {
+      chatGuid: string;
+      filePath: string;
+      fileName?: string;
+      selectedMessageGuid?: string;
+    }) => Promise<{ guid?: string }>;
     downloadAttachment: (guid: string) => Promise<Buffer>;
   };
   connect: () => Promise<void>;
@@ -25,6 +39,46 @@ export type IMessageHealth = {
   lastInboundSeenAtMs: number | null;
 };
 
+// Photon REST caps single attachments at ~100 MB. Keep a hard ceiling so a
+// malicious openclaw cannot drain mux-server disk / memory on a poisoned URL.
+const IMESSAGE_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024;
+const IMESSAGE_ATTACHMENT_DOWNLOAD_TIMEOUT_MS = 30_000;
+
+// Thrown when the underlying Photon SDK call returned an HTTP error. We
+// preserve the status so the outbound service can differentiate permanent
+// client errors (4xx — do NOT retry) from transient server errors (5xx — safe
+// to retry). Otherwise every Photon rejection looks like a retryable 502 to
+// openclaw, which leads to duplicated sends on permanent 4xx cases.
+export class IMessagePhotonError extends Error {
+  readonly httpStatus: number | null;
+  readonly stage: "send" | "attachment";
+  constructor(
+    message: string,
+    opts: { httpStatus: number | null; stage: "send" | "attachment"; cause?: unknown },
+  ) {
+    super(message, opts.cause ? { cause: opts.cause } : undefined);
+    this.name = "IMessagePhotonError";
+    this.httpStatus = opts.httpStatus;
+    this.stage = opts.stage;
+  }
+}
+
+function extractHttpStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  // Axios error shape (the Photon SDK uses axios internally).
+  const response = (error as { response?: { status?: unknown } }).response;
+  if (response && typeof response.status === "number" && Number.isFinite(response.status)) {
+    return response.status;
+  }
+  const status = (error as { status?: unknown }).status;
+  if (typeof status === "number" && Number.isFinite(status)) {
+    return status;
+  }
+  return null;
+}
+
 export function isIMessageSdkInstance(value: unknown): value is IMessageSdkInstance {
   return (
     typeof value === "object" &&
@@ -38,6 +92,9 @@ export function isIMessageSdkInstance(value: unknown): value is IMessageSdkInsta
   );
 }
 
+// Override for tests: inject a pre-built buffer instead of hitting the network.
+type AttachmentDownloader = (url: string) => Promise<{ body: Buffer; fileName?: string }>;
+
 export function createIMessageApiService(deps: {
   serverUrl: string;
   apiKey: string | null;
@@ -45,6 +102,8 @@ export function createIMessageApiService(deps: {
   loadSdkFactory: () => Promise<
     (opts: { serverUrl: string; apiKey?: string; logLevel?: string }) => unknown
   >;
+  // Tests override this; production falls back to global fetch.
+  downloadAttachmentFromUrl?: AttachmentDownloader;
 }) {
   const health: IMessageHealth = {
     connected: false,
@@ -108,6 +167,7 @@ export function createIMessageApiService(deps: {
   async function sendMessage(params: {
     chatGuid: string;
     message: string;
+    selectedMessageGuid?: string;
   }): Promise<{ guid: string | null }> {
     const current = sdk;
     if (!current) {
@@ -117,49 +177,102 @@ export function createIMessageApiService(deps: {
       const result = await current.messages.sendMessage({
         chatGuid: params.chatGuid,
         message: params.message,
+        ...(params.selectedMessageGuid ? { selectedMessageGuid: params.selectedMessageGuid } : {}),
       });
       return { guid: typeof result?.guid === "string" ? result.guid : null };
     } catch (error) {
+      const httpStatus = extractHttpStatus(error);
       deps.log({
         type: "imessage_send_message_error",
         chatGuid: params.chatGuid,
         error: String(error),
+        ...(httpStatus !== null ? { httpStatus } : {}),
       });
-      throw new Error("iMessage send failed", { cause: error });
+      throw new IMessagePhotonError("iMessage send failed", {
+        httpStatus,
+        stage: "send",
+        cause: error,
+      });
     }
   }
 
+  // Photon SDK's sendAttachment internally does `fs/promises.readFile(filePath)`
+  // (see @photon-ai/advanced-imessage-kit@1.14.3 dist/index.js:213). Passing an
+  // https:// URL therefore crashes with ENOENT. We download the URL to a temp
+  // file, hand that path to the SDK, and unlink on the way out.
   async function sendAttachment(params: {
     chatGuid: string;
-    filePath: string;
+    attachmentUrl: string;
+    selectedMessageGuid?: string;
   }): Promise<{ guid: string | null }> {
     const current = sdk;
     if (!current) {
       throw new Error("iMessage SDK not connected");
     }
-    // HTTPS-only validation — prevents path traversal, SSRF, and local file injection.
-    if (!params.filePath.toLowerCase().startsWith("https://")) {
+    if (!params.attachmentUrl.toLowerCase().startsWith("https://")) {
       deps.log({
         type: "imessage_outbound_media_rejected",
         chatGuid: params.chatGuid,
-        url: params.filePath,
+        url: params.attachmentUrl,
         reason: "not https",
       });
       throw new Error("iMessage attachment URL must be https://");
     }
+
+    let download: { body: Buffer; fileName?: string };
     try {
-      const result = await current.attachments.sendAttachment({
-        chatGuid: params.chatGuid,
-        filePath: params.filePath,
-      });
-      return { guid: typeof result?.guid === "string" ? result.guid : null };
+      download = await (deps.downloadAttachmentFromUrl ?? defaultDownloadAttachment)(
+        params.attachmentUrl,
+      );
     } catch (error) {
       deps.log({
-        type: "imessage_send_attachment_error",
+        type: "imessage_outbound_media_download_failed",
         chatGuid: params.chatGuid,
+        url: params.attachmentUrl,
         error: String(error),
       });
-      throw new Error("iMessage attachment send failed", { cause: error });
+      throw error instanceof Error
+        ? error
+        : new Error("iMessage attachment download failed", { cause: error });
+    }
+
+    const urlBaseName = safeBaseNameFromUrl(params.attachmentUrl);
+    const fileName = download.fileName ?? urlBaseName ?? "attachment.bin";
+    const extension = path.extname(fileName) || "";
+    const tempPath = path.join(tmpdir(), `imessage-${randomUUID()}${extension}`);
+
+    try {
+      await writeFile(tempPath, download.body);
+      try {
+        const result = await current.attachments.sendAttachment({
+          chatGuid: params.chatGuid,
+          filePath: tempPath,
+          fileName,
+          ...(params.selectedMessageGuid
+            ? { selectedMessageGuid: params.selectedMessageGuid }
+            : {}),
+        });
+        return { guid: typeof result?.guid === "string" ? result.guid : null };
+      } catch (error) {
+        const httpStatus = extractHttpStatus(error);
+        deps.log({
+          type: "imessage_send_attachment_error",
+          chatGuid: params.chatGuid,
+          error: String(error),
+          ...(httpStatus !== null ? { httpStatus } : {}),
+        });
+        throw new IMessagePhotonError("iMessage attachment send failed", {
+          httpStatus,
+          stage: "attachment",
+          cause: error,
+        });
+      }
+    } finally {
+      try {
+        await unlink(tempPath);
+      } catch {
+        // Best-effort cleanup; missing file is fine (write never landed).
+      }
     }
   }
 
@@ -220,4 +333,62 @@ export function createIMessageApiService(deps: {
     downloadAttachmentWith,
     sendPairingNotice,
   };
+}
+
+async function defaultDownloadAttachment(
+  url: string,
+): Promise<{ body: Buffer; fileName?: string }> {
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(IMESSAGE_ATTACHMENT_DOWNLOAD_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`iMessage attachment fetch failed: ${response.status} ${response.statusText}`);
+  }
+  const contentLengthHeader = response.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = Number.parseInt(contentLengthHeader, 10);
+    if (Number.isFinite(contentLength) && contentLength > IMESSAGE_ATTACHMENT_MAX_BYTES) {
+      throw new Error(
+        `iMessage attachment exceeds ${IMESSAGE_ATTACHMENT_MAX_BYTES} bytes (content-length=${contentLength})`,
+      );
+    }
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  if (arrayBuffer.byteLength > IMESSAGE_ATTACHMENT_MAX_BYTES) {
+    throw new Error(
+      `iMessage attachment exceeds ${IMESSAGE_ATTACHMENT_MAX_BYTES} bytes (downloaded=${arrayBuffer.byteLength})`,
+    );
+  }
+  const disposition = response.headers.get("content-disposition");
+  const fileName = parseContentDispositionFileName(disposition) ?? undefined;
+  return { body: Buffer.from(arrayBuffer), fileName };
+}
+
+function parseContentDispositionFileName(header: string | null | undefined): string | null {
+  if (!header) {
+    return null;
+  }
+  const filenameStar = /filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i.exec(header);
+  if (filenameStar) {
+    try {
+      return decodeURIComponent(filenameStar[1].trim().replace(/^"|"$/g, ""));
+    } catch {
+      // fall through
+    }
+  }
+  const filename = /filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/i.exec(header);
+  if (filename) {
+    return (filename[1] ?? filename[2] ?? "").trim();
+  }
+  return null;
+}
+
+function safeBaseNameFromUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const base = path.basename(parsed.pathname);
+    return base && base !== "/" ? base : null;
+  } catch {
+    return null;
+  }
 }
