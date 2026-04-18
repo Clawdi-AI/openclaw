@@ -1,7 +1,8 @@
 import { resolveFetch } from "../infra/fetch.js";
 import { resolveRetryConfig, retryAsync, type RetryConfig } from "../infra/retry.js";
+import { resolveDiscordApiBaseUrl } from "./api-base-url.js";
 
-const DISCORD_API_BASE = "https://discord.com/api/v10";
+const discordApiBase = () => `${resolveDiscordApiBaseUrl()}/api/v10`;
 const DISCORD_API_RETRY_DEFAULTS = {
   attempts: 3,
   minDelayMs: 500,
@@ -107,7 +108,7 @@ export async function fetchDiscord<T>(
   const retryConfig = resolveRetryConfig(DISCORD_API_RETRY_DEFAULTS, options?.retry);
   return retryAsync(
     async () => {
-      const res = await fetchImpl(`${DISCORD_API_BASE}${path}`, {
+      const res = await fetchImpl(`${discordApiBase()}${path}`, {
         headers: { Authorization: `Bot ${token}` },
       });
       if (!res.ok) {

@@ -1,9 +1,12 @@
 import type { BaseProbeResult } from "../channels/plugins/types.js";
 import { resolveFetch } from "../infra/fetch.js";
 import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+import { resolveDiscordApiBaseUrl } from "./api-base-url.js";
 import { normalizeDiscordToken } from "./token.js";
 
-const DISCORD_API_BASE = "https://discord.com/api/v10";
+/** Lazy accessor so DISCORD_BOT_API_BASE_URL is read at call time rather
+ *  than at module load — matches src/telegram/probe.ts's resolution. */
+const discordApiBase = () => `${resolveDiscordApiBaseUrl()}/api/v10`;
 
 export type DiscordProbe = BaseProbeResult & {
   status?: number | null;
@@ -59,7 +62,7 @@ async function fetchDiscordApplicationMeResponse(
     return undefined;
   }
   return await fetchWithTimeout(
-    `${DISCORD_API_BASE}/oauth2/applications/@me`,
+    `${discordApiBase()}/oauth2/applications/@me`,
     { headers: { Authorization: `Bot ${normalized}` } },
     timeoutMs,
     getResolvedFetch(fetcher),
@@ -142,7 +145,7 @@ export async function probeDiscord(
   }
   try {
     const res = await fetchWithTimeout(
-      `${DISCORD_API_BASE}/users/@me`,
+      `${discordApiBase()}/users/@me`,
       { headers: { Authorization: `Bot ${normalized}` } },
       timeoutMs,
       getResolvedFetch(fetcher),
