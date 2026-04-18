@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   buildAccountScopedDmSecurityPolicy,
   collectAllowlistProviderRestrictSendersWarnings,
@@ -11,9 +12,11 @@ import {
   deleteAccountFromConfigSection,
   formatTrimmedAllowFromEntries,
   getChatChannelMeta,
+  type IMessageInlineAttachment,
   imessageOnboardingAdapter,
   IMessageConfigSchema,
   listIMessageAccountIds,
+  loadWebMediaRaw,
   looksLikeIMessageTargetId,
   migrateBaseNameToDefaultAccount,
   normalizeAccountId,
@@ -82,6 +85,48 @@ async function sendIMessageOutbound(params: {
     accountId: params.accountId ?? undefined,
     replyToId: params.replyToId ?? undefined,
   });
+}
+
+function isHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+// Convert a non-http media reference (local filesystem path, file:// URL,
+// data: URL) into an inline base64 attachment the mux-server can post
+// straight to Photon's multipart endpoint. Photon rejects bare URLs unless
+// they are reachable over public HTTPS; rather than forcing every call site
+// to stage media on a CDN, we let openclaw load bytes from its own sandbox
+// and ship them through the raw.imessage.send.attachments envelope.
+async function loadInlineAttachment(params: {
+  mediaUrl: string;
+  maxBytes?: number;
+  mediaLocalRoots?: readonly string[];
+}): Promise<IMessageInlineAttachment> {
+  const media = await loadWebMediaRaw(params.mediaUrl, {
+    maxBytes: params.maxBytes,
+    optimizeImages: false,
+    localRoots: params.mediaLocalRoots?.length ? params.mediaLocalRoots : undefined,
+  });
+  const derivedBase = (() => {
+    try {
+      const parsed = new URL(params.mediaUrl);
+      const base = path.basename(parsed.pathname);
+      if (base && base !== "/") {
+        return base;
+      }
+    } catch {
+      // Treat as a filesystem path; path.basename handles it directly.
+    }
+    const base = path.basename(params.mediaUrl);
+    return base && base !== "/" ? base : null;
+  })();
+  const filename = media.fileName ?? derivedBase ?? "attachment";
+  const contentType = media.contentType ?? "application/octet-stream";
+  return {
+    filename,
+    contentType,
+    dataBase64: media.buffer.toString("base64"),
+  };
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
@@ -279,6 +324,29 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
       sessionKey,
     }) => {
       if (isMuxEnabled({ cfg, channel: "imessage", accountId: accountId ?? undefined })) {
+        // Photon's attachment endpoint expects either a reachable https URL
+        // (mux fetches then re-posts) or raw multipart bytes. Local paths
+        // and file:/data:/blob: URLs are unreachable from mux-server's
+        // network namespace; inline them as base64 so Photon still gets
+        // raw bytes, gated by the channel's configured media size limit.
+        let rawMediaUrl: string | undefined = mediaUrl;
+        let inlineAttachments: IMessageInlineAttachment[] | undefined;
+        if (mediaUrl && !isHttpUrl(mediaUrl)) {
+          const maxBytes = resolveChannelMediaMaxBytes({
+            cfg,
+            resolveChannelLimitMb: ({ cfg: inner, accountId: innerAccount }) =>
+              inner.channels?.imessage?.accounts?.[innerAccount]?.mediaMaxMb ??
+              inner.channels?.imessage?.mediaMaxMb,
+            accountId: accountId ?? undefined,
+          });
+          const attachment = await loadInlineAttachment({
+            mediaUrl,
+            maxBytes,
+            mediaLocalRoots,
+          });
+          inlineAttachments = [attachment];
+          rawMediaUrl = undefined;
+        }
         const result = await sendViaMux({
           cfg,
           channel: "imessage",
@@ -286,10 +354,14 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
           sessionKey,
           to,
           text,
-          mediaUrl,
+          ...(rawMediaUrl ? { mediaUrl: rawMediaUrl } : {}),
           replyToId,
           raw: {
-            imessage: buildIMessageRawSend({ text, mediaUrl }),
+            imessage: buildIMessageRawSend({
+              text,
+              ...(rawMediaUrl ? { mediaUrl: rawMediaUrl } : {}),
+              ...(inlineAttachments ? { attachments: inlineAttachments } : {}),
+            }),
           },
         });
         return { channel: "imessage", ...result };

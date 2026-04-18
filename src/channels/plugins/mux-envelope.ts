@@ -466,16 +466,24 @@ export function buildWhatsAppRawSend(params: {
   };
 }
 
+export type IMessageInlineAttachment = {
+  filename: string;
+  contentType: string;
+  dataBase64: string;
+};
+
 export function buildIMessageRawSend(params: {
   text: string;
   mediaUrl?: string;
   mediaUrls?: string[];
+  attachments?: IMessageInlineAttachment[];
 }) {
   return {
     send: {
       text: params.text,
       ...(params.mediaUrl ? { mediaUrl: params.mediaUrl } : {}),
       ...(params.mediaUrls?.length ? { mediaUrls: params.mediaUrls } : {}),
+      ...(params.attachments?.length ? { attachments: params.attachments } : {}),
     },
   };
 }
