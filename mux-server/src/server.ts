@@ -421,6 +421,7 @@ const {
 const imessageApiService = createIMessageApiService({
   serverUrl: config.imessageServerUrl ?? "",
   apiKey: config.imessageApiKey ?? null,
+  pairingContactVcardUrl: config.imessagePairingContactVcardUrl ?? undefined,
   log,
   loadSdkFactory: async () => {
     const runtime = await loadIMessageRuntimeModules();

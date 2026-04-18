@@ -83,6 +83,13 @@ export function resolveChannelEnv(deps: {
   const imessageServerUrl = deps.readNonEmptyString(process.env.MUX_IMESSAGE_SERVER_URL);
   const imessageApiKey = deps.readNonEmptyString(process.env.MUX_IMESSAGE_API_KEY);
   const imessageInboundEnabled = Boolean(imessageServerUrl);
+  // CDN URL of the Clawdi vCard that gets attached to the post-pairing
+  // notice in iMessage. Generated via scripts/generate-clawdi-vcard.py and
+  // served from assets.clawdi.ai. Optional — unset disables the Add-Contact
+  // attachment (pairing text notice still lands).
+  const imessagePairingContactVcardUrl =
+    deps.readNonEmptyString(process.env.MUX_IMESSAGE_VCARD_URL) ??
+    "https://assets.clawdi.ai/clawdi.vcf";
 
   return {
     muxAdminToken,
@@ -121,6 +128,7 @@ export function resolveChannelEnv(deps: {
     imessageServerUrl,
     imessageApiKey,
     imessageInboundEnabled,
+    imessagePairingContactVcardUrl,
   };
 }
 
