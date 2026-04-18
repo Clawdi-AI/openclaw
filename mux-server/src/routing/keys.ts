@@ -397,11 +397,17 @@ export function listIMessageOutboundRouteKeys(params: {
   // Agents normalize their outbound target to the bare handle
   // ("imessage:+15551234567" → "+15551234567"), so target-first lookup
   // would miss the binding without a fallback synthesis. Generate all
-  // three service-prefix variants for 1:1 targets; tenant scoping in the
-  // downstream resolveIMessageBoundRoute prevents cross-tenant collision
-  // (lookup filters by tenantId + exact route_key). Only direct targets
+  // three service-prefix variants for 1:1 targets; only direct targets
   // get the fallback — groups are always delivered via the full ";+;"
   // chat_guid the creator supplied.
+  //
+  // Multi-tenant safety: `resolveRouteKeyByTarget` in
+  // `routing/route-resolution.ts` calls
+  // `stmtSelectActiveBindingByTenantAndRoute.get(tenantId, channel, routeKey)`,
+  // so the synthesized fallback keys only match a binding for the
+  // *same* tenant that issued the outbound request. Tenant A sending to
+  // a number paired by tenant B cannot collide — the exact-match query
+  // returns 0 rows.
   const isAlreadyChatGuid = chatGuid.includes(";-;") || isGroupChatGuid;
   const candidates: string[] = [buildIMessageRouteKey({ chatGuid, chatType })];
   if (!isAlreadyChatGuid && chatType === "direct") {
