@@ -91,6 +91,20 @@ function isHttpUrl(url: string): boolean {
   return /^https?:\/\//i.test(url);
 }
 
+function deriveAttachmentFilename(mediaUrl: string): string {
+  // `new URL()` throws on plain filesystem paths; fall through to a
+  // direct path.basename in that case.
+  const source = (() => {
+    try {
+      return new URL(mediaUrl).pathname;
+    } catch {
+      return mediaUrl;
+    }
+  })();
+  const base = path.basename(source);
+  return base && base !== "/" ? base : "attachment";
+}
+
 // Convert a non-http media reference (local filesystem path, file:// URL,
 // data: URL) into an inline base64 attachment the mux-server can post
 // straight to Photon's multipart endpoint. Photon rejects bare URLs unless
@@ -107,24 +121,9 @@ async function loadInlineAttachment(params: {
     optimizeImages: false,
     localRoots: params.mediaLocalRoots?.length ? params.mediaLocalRoots : undefined,
   });
-  const derivedBase = (() => {
-    try {
-      const parsed = new URL(params.mediaUrl);
-      const base = path.basename(parsed.pathname);
-      if (base && base !== "/") {
-        return base;
-      }
-    } catch {
-      // Treat as a filesystem path; path.basename handles it directly.
-    }
-    const base = path.basename(params.mediaUrl);
-    return base && base !== "/" ? base : null;
-  })();
-  const filename = media.fileName ?? derivedBase ?? "attachment";
-  const contentType = media.contentType ?? "application/octet-stream";
   return {
-    filename,
-    contentType,
+    filename: media.fileName ?? deriveAttachmentFilename(params.mediaUrl),
+    contentType: media.contentType ?? "application/octet-stream",
     dataBase64: media.buffer.toString("base64"),
   };
 }
