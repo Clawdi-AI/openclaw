@@ -179,8 +179,16 @@ describe("iMessage api sendAttachment", () => {
   });
 
   it("unlinks temp file even when the SDK throws", async () => {
-    const { sdk, calls, observed } = buildFakeSdk();
-    sdk.attachments.sendAttachment = vi.fn(async () => {
+    const { sdk } = buildFakeSdk();
+    // Capture the real filePath the wrapper passed in, then throw so we
+    // can verify the file still existed at the moment of the throw and
+    // was unlinked afterward.
+    let capturedPath: string | null = null;
+    sdk.attachments.sendAttachment = vi.fn(async (opts) => {
+      capturedPath = opts.filePath;
+      // File must exist at SDK call time (wrapper wrote it before us).
+      const bytes = await readFile(opts.filePath);
+      expect(bytes.equals(Buffer.from("x"))).toBe(true);
       throw new Error("photon down");
     });
     const download = vi.fn(async () => ({ body: Buffer.from("x"), fileName: "x.png" }));
@@ -200,10 +208,10 @@ describe("iMessage api sendAttachment", () => {
       }),
     ).rejects.toThrow(/attachment send failed/);
 
-    // Temp file should have been created (we see the path via observed) and cleaned up.
-    const tmpPaths = Object.keys(observed);
-    expect(tmpPaths).toHaveLength(0); // sdk override doesn't read; observed stays empty
-    expect(calls.sendAttachment).toHaveLength(0); // sdk override bypassed wrapper logging path
+    // SDK was actually called (wrapper wrote the file before invoking).
+    expect(capturedPath).toBeTruthy();
+    // And the temp file was unlinked by the finally block.
+    await expect(stat(capturedPath!)).rejects.toThrow();
   });
 
   it("derives a safe fileName from the URL when the download does not supply one", async () => {
@@ -302,15 +310,21 @@ describe("iMessage api sendAttachment", () => {
     expect(call.filePath?.endsWith(".mov")).toBe(true);
   });
 
+  // image/pjpeg, video/quicktime, audio/mpeg land in MIME_EXTENSION_OVERRIDE
+  // because mime-db would otherwise hand us .jfif / .qt / .mpga — all
+  // technically correct but not what iOS or users expect for pictures, movies,
+  // and MP3s. The rest flow through mime-types directly.
   it.each([
     ["image/png", ".png"],
     ["image/webp", ".webp"],
     ["image/gif", ".gif"],
     ["image/heic", ".heic"],
+    ["image/jpeg", ".jpg"],
+    ["image/pjpeg", ".jpg"], // override: mime-db → .jfif
     ["video/mp4", ".mp4"],
-    ["video/quicktime", ".mov"],
+    ["video/quicktime", ".mov"], // override: mime-db → .qt
     ["audio/mp4", ".m4a"],
-    ["audio/mpeg", ".mp3"],
+    ["audio/mpeg", ".mp3"], // override: mime-db → .mpga
     ["application/pdf", ".pdf"],
   ])("maps %s → %s when URL has no extension", async (contentType, expectedExt) => {
     const { sdk, calls } = buildFakeSdk();
@@ -330,5 +344,60 @@ describe("iMessage api sendAttachment", () => {
     });
 
     expect(calls.sendAttachment[0].filePath?.endsWith(expectedExt)).toBe(true);
+  });
+
+  // Content-Type: image/jpeg; charset=utf-8 — some misconfigured servers
+  // include charset on binary types. The lookup must strip the params.
+  it("ignores Content-Type parameters like ;charset=...", async () => {
+    const { sdk, calls } = buildFakeSdk();
+    const download = vi.fn(async () => ({
+      body: Buffer.from("x"),
+      contentType: "image/jpeg; charset=utf-8",
+    }));
+    const service = createIMessageApiService({
+      serverUrl: "https://photon.local",
+      apiKey: "k",
+      log,
+      loadSdkFactory: async () => () => sdk,
+      downloadAttachmentFromUrl: download,
+    });
+    service.setSdk(sdk);
+
+    await service.sendAttachment({
+      chatGuid: "iMessage;-;+14155551234",
+      attachmentUrl: "https://cdn.example.com/asset",
+    });
+
+    expect(calls.sendAttachment[0].filePath?.endsWith(".jpg")).toBe(true);
+  });
+
+  // picsum.photos/1024 issues a 302 to fastly.picsum.photos/<id>/1024/1024.jpg.
+  // The redirect target carries the real extension, and the original URL has
+  // none — so `finalUrl` must take priority over the requested URL when we
+  // derive the basename.
+  it("prefers final URL basename over original URL after a redirect", async () => {
+    const { sdk, calls } = buildFakeSdk();
+    const download = vi.fn(async () => ({
+      body: Buffer.from("x"),
+      contentType: "image/jpeg",
+      finalUrl: "https://fastly.picsum.photos/id/986/1024/1024.jpg?hmac=abc",
+    }));
+    const service = createIMessageApiService({
+      serverUrl: "https://photon.local",
+      apiKey: "k",
+      log,
+      loadSdkFactory: async () => () => sdk,
+      downloadAttachmentFromUrl: download,
+    });
+    service.setSdk(sdk);
+
+    await service.sendAttachment({
+      chatGuid: "iMessage;-;+14155551234",
+      attachmentUrl: "https://picsum.photos/1024",
+    });
+
+    const call = calls.sendAttachment[0];
+    expect(call.fileName).toBe("1024.jpg");
+    expect(call.filePath?.endsWith(".jpg")).toBe(true);
   });
 });
