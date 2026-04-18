@@ -6,9 +6,17 @@ import WebSocket from "ws";
 import type { DiscordAccountConfig } from "../../config/types.js";
 import { danger } from "../../globals.js";
 import type { RuntimeEnv } from "../../runtime.js";
+import { resolveDiscordApiBaseUrl } from "../api-base-url.js";
 
-const DISCORD_GATEWAY_BOT_URL = "https://discord.com/api/v10/gateway/bot";
 const DEFAULT_DISCORD_GATEWAY_URL = "wss://gateway.discord.gg/";
+
+/** Build the `/api/v10/gateway/bot` URL against the configured REST host.
+ *  An integration harness that answers this endpoint with a substitute
+ *  `url` field (the msg-router egress gateway, for instance) thereby
+ *  redirects the WebSocket connection too. */
+function discordGatewayBotUrl(): string {
+  return `${resolveDiscordApiBaseUrl()}/api/v10/gateway/bot`;
+}
 
 type DiscordGatewayMetadataResponse = Pick<Response, "ok" | "status" | "text">;
 type DiscordGatewayFetchInit = Record<string, unknown> & {
@@ -81,7 +89,7 @@ async function fetchDiscordGatewayInfo(params: {
 }): Promise<APIGatewayBotInfo> {
   let response: DiscordGatewayMetadataResponse;
   try {
-    response = await params.fetchImpl(DISCORD_GATEWAY_BOT_URL, {
+    response = await params.fetchImpl(discordGatewayBotUrl(), {
       ...params.fetchInit,
       headers: {
         ...params.fetchInit?.headers,

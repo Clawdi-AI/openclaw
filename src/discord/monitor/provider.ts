@@ -45,6 +45,7 @@ import { getPluginCommandSpecs } from "../../plugins/commands.js";
 import { createNonExitingRuntime, type RuntimeEnv } from "../../runtime.js";
 import { summarizeStringEntries } from "../../shared/string-sample.js";
 import { resolveDiscordAccount } from "../accounts.js";
+import { resolveDiscordApiBaseUrl } from "../api-base-url.js";
 import { getDiscordGatewayEmitter } from "../monitor.gateway.js";
 import { fetchDiscordApplicationId } from "../probe.js";
 import { normalizeDiscordToken } from "../token.js";
@@ -747,7 +748,11 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     };
     const client = new Client(
       {
-        baseUrl: "http://localhost",
+        // Carbon uses `baseUrl` as the prefix for every REST URL it builds.
+        // Default to real Discord; respect DISCORD_BOT_API_BASE_URL so an
+        // integration harness (e.g. msg-router's egress) can redirect the
+        // entire REST surface without patching Carbon.
+        baseUrl: resolveDiscordApiBaseUrl(),
         deploySecret: "a",
         clientId: applicationId,
         publicKey: "a",

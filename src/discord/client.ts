@@ -8,6 +8,7 @@ import {
   resolveDiscordAccount,
   type ResolvedDiscordAccount,
 } from "./accounts.js";
+import { resolveDiscordApiBaseUrl } from "./api-base-url.js";
 import { normalizeDiscordToken } from "./token.js";
 
 export type DiscordClientOpts = {
@@ -30,7 +31,16 @@ function resolveToken(params: { accountId: string; fallbackToken?: string }) {
 }
 
 function resolveRest(token: string, rest?: RequestClient) {
-  return rest ?? new RequestClient(token);
+  if (rest) {
+    return rest;
+  }
+  // Carbon's RequestClient accepts a `baseUrl` option that rewrites every
+  // outbound REST URL. We default to real Discord and let
+  // `DISCORD_BOT_API_BASE_URL` redirect to a local proxy (e.g. msg-router)
+  // for integration testing — the same pattern `TELEGRAM_BOT_API_BASE_URL`
+  // uses for grammY.
+  const baseUrl = resolveDiscordApiBaseUrl();
+  return new RequestClient(token, { baseUrl });
 }
 
 function resolveAccountWithoutToken(params: {
