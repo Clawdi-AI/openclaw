@@ -386,39 +386,31 @@ export function listIMessageOutboundRouteKeys(params: {
   if (!chatGuid) {
     return [];
   }
-  // A chatGuid containing ";+;" is a group chat in iMessage.
-  const isGroupChatGuid = chatGuid.includes(";+;");
-  const chatType: "direct" | "group" = isGroupChatGuid ? "group" : "direct";
   // Bindings created via pairing store the full BlueBubbles chat_guid. The
-  // service-prefix BlueBubbles emits depends on how the message arrived:
+  // service prefix BlueBubbles emits depends on how the message arrived:
   //   - "any;-;+...": service-agnostic DM (most common in the Photon setup)
   //   - "iMessage;-;+...": explicit iMessage delivery
-  //   - "SMS;-;+..." : fallback SMS delivery (green bubble)
-  // Agents normalize their outbound target to the bare handle
+  //   - "SMS;-;+...": fallback SMS delivery (green bubble)
+  // Agents normalize outbound targets to the bare handle
   // ("imessage:+15551234567" → "+15551234567"), so target-first lookup
-  // would miss the binding without a fallback synthesis. Generate all
-  // three service-prefix variants for 1:1 targets; only direct targets
-  // get the fallback — groups are always delivered via the full ";+;"
-  // chat_guid the creator supplied.
+  // would miss the binding without a fallback synthesis. Groups stay on
+  // their full ";+;" chat_guid (creator-supplied and canonical).
   //
-  // Multi-tenant safety: `resolveRouteKeyByTarget` in
-  // `routing/route-resolution.ts` calls
-  // `stmtSelectActiveBindingByTenantAndRoute.get(tenantId, channel, routeKey)`,
-  // so the synthesized fallback keys only match a binding for the
-  // *same* tenant that issued the outbound request. Tenant A sending to
-  // a number paired by tenant B cannot collide — the exact-match query
-  // returns 0 rows.
-  const isAlreadyChatGuid = chatGuid.includes(";-;") || isGroupChatGuid;
-  const candidates: string[] = [buildIMessageRouteKey({ chatGuid, chatType })];
-  if (!isAlreadyChatGuid && chatType === "direct") {
-    for (const servicePrefix of ["any", "iMessage", "SMS"] as const) {
-      candidates.push(
-        buildIMessageRouteKey({
-          chatGuid: `${servicePrefix};-;${chatGuid}`,
-          chatType: "direct",
-        }),
-      );
-    }
-  }
-  return uniqueRouteKeys(candidates);
+  // Multi-tenant safety: `resolveRouteKeyByTarget` filters by tenantId +
+  // exact route_key, so the synthesized fallback keys can only match a
+  // binding owned by the same tenant issuing the outbound — no cross-tenant
+  // collision risk even when the same phone number is paired in two tenants.
+  const isGroupChatGuid = chatGuid.includes(";+;");
+  const isAlreadyChatGuid = isGroupChatGuid || chatGuid.includes(";-;");
+  const chatType: "direct" | "group" = isGroupChatGuid ? "group" : "direct";
+  const fallbackPrefixes =
+    !isAlreadyChatGuid && chatType === "direct"
+      ? (["any", "iMessage", "SMS"] as const)
+      : ([] as const);
+  return uniqueRouteKeys([
+    buildIMessageRouteKey({ chatGuid, chatType }),
+    ...fallbackPrefixes.map((prefix) =>
+      buildIMessageRouteKey({ chatGuid: `${prefix};-;${chatGuid}`, chatType: "direct" }),
+    ),
+  ]);
 }

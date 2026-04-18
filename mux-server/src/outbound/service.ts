@@ -1,4 +1,5 @@
 import { RequestClient } from "@buape/carbon";
+import { parseInlineAttachments } from "../channels/imessage/attachments.js";
 import type { MuxConfig } from "../config/env.js";
 import type {
   DiscordBoundRoute,
@@ -946,98 +947,19 @@ export function createOutboundService(deps: {
       // Inline-bytes attachments: agent-side Photon-incompatible sources
       // (local filesystem paths, in-memory buffers) are base64-encoded by
       // openclaw and posted straight through mux to Photon's multipart
-      // endpoint. Lets us deliver iMessage media without forcing openclaw
-      // to publish everything to a public CDN first.
-      type InlineAttachment = {
-        filename: string;
-        contentType: string;
-        body: Buffer;
-      };
-
-      // Base64 charset: standard alphabet + 0-2 trailing '=' padding. Node's
-      // Buffer.from(..., "base64") silently drops invalid characters and
-      // returns partial bytes rather than throwing — so a pre-decode regex
-      // plus a length%4 check is the actual guard against malformed input.
-      // URL-safe base64 (`-_` instead of `+/`) is INTENTIONALLY rejected
-      // here: Buffer.from would silently accept it and decode to the same
-      // bytes, but forcing callers to send standard base64 keeps the
-      // charset contract explicit and avoids any downstream tool that
-      // hashes the raw string getting confused by encoding drift.
-      // Regex is linear-time on input length (no nested quantifiers, no
-      // backreferences) so there is no ReDoS risk from attacker-controlled
-      // payload size.
-      const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
-      const imessageInlineAttachments: InlineAttachment[] = [];
-      let inlineAttachmentDecodeError: string | null = null;
-      const rawAttachments = imessageRawSend?.attachments;
-      if (Array.isArray(rawAttachments)) {
-        const maxBytes = deps.imessageAttachmentMaxBytes;
-        let cumulativeBytes = 0;
-        for (const item of rawAttachments) {
-          if (!item || typeof item !== "object") {
-            inlineAttachmentDecodeError = "raw.imessage.send.attachments entries must be objects";
-            break;
-          }
-          const entry = asRecord(item) ?? {};
-          const filename = readNonEmptyString(entry.filename);
-          const contentType = readNonEmptyString(entry.contentType);
-          const dataBase64 = readNonEmptyString(entry.dataBase64);
-          if (!filename || !contentType || !dataBase64) {
-            inlineAttachmentDecodeError =
-              "raw.imessage.send.attachments entry missing filename/contentType/dataBase64";
-            break;
-          }
-          if (dataBase64.length % 4 !== 0 || !BASE64_PATTERN.test(dataBase64)) {
-            inlineAttachmentDecodeError = `attachment ${filename} is not valid base64`;
-            break;
-          }
-          // Enforce caps BEFORE Buffer.from allocates memory. Base64 decodes
-          // to ~3/4 of its source length (minus '=' padding), so this is a
-          // tight upper bound — never under-counts, never allocates past the
-          // limit. Protects against a runtime-token holder shipping a single
-          // oversized payload, and against many smaller payloads that would
-          // add up to the cap only after all buffers are already allocated.
-          const paddingMatch = dataBase64.match(/=+$/);
-          const paddingChars = paddingMatch ? paddingMatch[0].length : 0;
-          const estimatedDecodedBytes = Math.floor((dataBase64.length * 3) / 4) - paddingChars;
-          if (estimatedDecodedBytes <= 0) {
-            inlineAttachmentDecodeError = `attachment ${filename} decoded to zero bytes`;
-            break;
-          }
-          if (estimatedDecodedBytes > maxBytes) {
-            inlineAttachmentDecodeError = `attachment ${filename} exceeds ${maxBytes} bytes (estimated ${estimatedDecodedBytes})`;
-            break;
-          }
-          if (cumulativeBytes + estimatedDecodedBytes > maxBytes) {
-            inlineAttachmentDecodeError = `cumulative attachment size exceeds ${maxBytes} bytes`;
-            break;
-          }
-          const decoded = Buffer.from(dataBase64, "base64");
-          // Post-decode length MUST match estimate now that the charset is
-          // validated. Defensive guard in case Node changes behavior.
-          if (decoded.length === 0) {
-            inlineAttachmentDecodeError = `attachment ${filename} decoded to zero bytes`;
-            break;
-          }
-          // Accumulate using the pre-decode estimate so the cumulative cap
-          // accounting stays in a single unit with the per-attachment check
-          // above. For valid standard base64 `decoded.length` equals the
-          // estimate; mixing the two would drift if a future change
-          // relaxed the charset guard.
-          cumulativeBytes += estimatedDecodedBytes;
-          imessageInlineAttachments.push({ filename, contentType, body: decoded });
-        }
-      }
-
-      if (inlineAttachmentDecodeError) {
+      // endpoint. Decoding + size validation lives in parseInlineAttachments
+      // so caps are enforced before Buffer.from allocates anything.
+      const inlineParsed = parseInlineAttachments(
+        imessageRawSend?.attachments,
+        deps.imessageAttachmentMaxBytes,
+      );
+      if (!inlineParsed.ok) {
         return {
           statusCode: 400,
-          bodyText: JSON.stringify({
-            ok: false,
-            error: inlineAttachmentDecodeError,
-          }),
+          bodyText: JSON.stringify({ ok: false, error: inlineParsed.error }),
         };
       }
+      const imessageInlineAttachments = inlineParsed.attachments;
 
       // If a caller ships the same logical attachment under both `mediaUrl`
       // and `attachments[]`, we'd deliver it twice. Reject the ambiguous
