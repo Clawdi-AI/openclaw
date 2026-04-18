@@ -387,6 +387,19 @@ export function listIMessageOutboundRouteKeys(params: {
     return [];
   }
   // A chatGuid containing ";+;" is a group chat in iMessage.
-  const chatType: "direct" | "group" = chatGuid.includes(";+;") ? "group" : "direct";
-  return uniqueRouteKeys([buildIMessageRouteKey({ chatGuid, chatType })]);
+  const isGroupChatGuid = chatGuid.includes(";+;");
+  const chatType: "direct" | "group" = isGroupChatGuid ? "group" : "direct";
+  // Bindings created via pairing store the full BlueBubbles chat_guid
+  // (e.g., "any;-;+15551234567"), but agents routinely send bare handles
+  // as `to` ("imessage:+15551234567" → "+15551234567"). Target-first
+  // lookup would then miss the binding. Probe the bare handle first for
+  // backwards compat, then fall back to the canonical `any;-;${handle}`
+  // DM chat_guid. Only synthesize the fallback for 1:1 targets — groups
+  // are always delivered via the full chat_guid.
+  const isAlreadyChatGuid = chatGuid.includes(";-;") || isGroupChatGuid;
+  const candidates: string[] = [buildIMessageRouteKey({ chatGuid, chatType })];
+  if (!isAlreadyChatGuid && chatType === "direct") {
+    candidates.push(buildIMessageRouteKey({ chatGuid: `any;-;${chatGuid}`, chatType: "direct" }));
+  }
+  return uniqueRouteKeys(candidates);
 }
