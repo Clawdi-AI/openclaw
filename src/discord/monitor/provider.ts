@@ -748,11 +748,18 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     };
     const client = new Client(
       {
-        // Carbon uses `baseUrl` as the prefix for every REST URL it builds.
-        // Default to real Discord; respect DISCORD_BOT_API_BASE_URL so an
-        // integration harness (e.g. msg-router's egress) can redirect the
-        // entire REST surface without patching Carbon.
+        // Carbon uses `baseUrl` on the Client for its own interaction/deploy
+        // URL construction and `requestOptions.baseUrl` on the REST client
+        // it builds internally; set both so DISCORD_BOT_API_BASE_URL
+        // redirects every outbound REST call (default: real Discord).
         baseUrl: resolveDiscordApiBaseUrl(),
+        requestOptions: {
+          // Carbon's request paths look like `/applications/.../commands`
+          // without an `/api/vN` prefix, so our override must include the
+          // full `/api/v10` suffix. That matches both real Discord and
+          // msg-router's emulator (which canonicalizes with the prefix).
+          baseUrl: `${resolveDiscordApiBaseUrl()}/api/v10`,
+        },
         deploySecret: "a",
         clientId: applicationId,
         publicKey: "a",
