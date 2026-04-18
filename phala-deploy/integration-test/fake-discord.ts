@@ -107,6 +107,11 @@ export class FakeDiscordApi {
 
   registerDmChannel(userId: string, channelId: string): void {
     this.dmChannelsByUser.set(userId, channelId);
+    // Also populate the channels map so `GET /channels/:id` on the DM
+    // channel returns the correct type — OpenClaw's Carbon fetches the
+    // channel to decide DM vs guild, and without this entry the lookup
+    // falls back to 404 and the message is silently dropped.
+    this.channels.set(channelId, { id: channelId, type: 1 });
   }
 
   registerGuildChannel(params: { guildId: string; channelId: string }): void {
@@ -154,6 +159,33 @@ export class FakeDiscordApi {
     current.push(message);
     current.sort((left, right) => Number(left.id) - Number(right.id));
     this.pendingMessagesByChannel.set(channelId, current);
+    // Also emit as a gateway MESSAGE_CREATE so gateway-only consumers
+    // (msg-router's ingress) see the DM without polling REST. The existing
+    // REST-polling queue above remains populated for mux-server clients.
+    this.gatewayFrames.push({
+      op: 0,
+      t: "MESSAGE_CREATE",
+      s: this.gatewaySequence++,
+      d: {
+        id: params.messageId,
+        channel_id: channelId,
+        // `type` on MESSAGE_CREATE is the Discord message type (0 = default),
+        // not the channel type; DM-ness is determined by the receiving
+        // client fetching `GET /channels/:id` and inspecting channel.type.
+        type: 0,
+        content: params.content,
+        author: {
+          id: params.userId,
+          bot: false,
+          ...(params.username ? { username: params.username } : {}),
+        },
+        attachments: [],
+        mentions: [],
+        mention_roles: [],
+        timestamp: params.timestamp ?? "2026-01-01T00:00:00.000Z",
+      },
+    });
+    this.flushGatewayFrames();
   }
 
   enqueueGuildMessage(params: {
@@ -278,6 +310,17 @@ export class FakeDiscordApi {
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const method = req.method ?? "GET";
     const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+    // Accept both prefixed (`/api/v10/...`) and unprefixed paths so the
+    // fake works for both mux-server (which calls unprefixed) and any
+    // direct Discord-wire caller (real clients and msg-router's egress
+    // both send `/api/v10/...`). Normalize once here so all downstream
+    // route matches stay simple.
+    const rawPath = requestUrl.pathname;
+    const normalizedPath = rawPath.replace(/^\/api\/v\d+/, "");
+    Object.defineProperty(requestUrl, "pathname", {
+      value: normalizedPath,
+      configurable: true,
+    });
 
     if (method === "GET" && requestUrl.pathname === "/gateway/bot") {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
