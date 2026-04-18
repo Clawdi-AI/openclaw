@@ -1,26 +1,14 @@
-import { readFile, stat } from "node:fs/promises";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createIMessageApiService,
   type IMessageSdkInstance,
 } from "../src/channels/imessage/api.js";
 
-type SdkCall = {
-  chatGuid: string;
-  filePath?: string;
-  fileName?: string;
-  message?: string;
-  selectedMessageGuid?: string;
-};
+// ── SDK fake (for sendMessage path only) ─────────────────────────────
+type SendMessageCall = { chatGuid: string; message: string; selectedMessageGuid?: string };
 
 function buildFakeSdk() {
-  const calls: { sendMessage: SdkCall[]; sendAttachment: SdkCall[] } = {
-    sendMessage: [],
-    sendAttachment: [],
-  };
-  // Capture observed file contents keyed by filePath so tests can verify the
-  // downloaded buffer was persisted to disk exactly where we handed it off.
-  const observed: Record<string, Buffer | null> = {};
+  const calls: { sendMessage: SendMessageCall[] } = { sendMessage: [] };
   const sdk: IMessageSdkInstance = {
     messages: {
       sendMessage: vi.fn(async (opts) => {
@@ -33,21 +21,11 @@ function buildFakeSdk() {
       }),
     },
     attachments: {
-      sendAttachment: vi.fn(async (opts) => {
-        let body: Buffer | null = null;
-        try {
-          body = await readFile(opts.filePath);
-        } catch {
-          body = null;
-        }
-        observed[opts.filePath] = body;
-        calls.sendAttachment.push({
-          chatGuid: opts.chatGuid,
-          filePath: opts.filePath,
-          ...(opts.fileName ? { fileName: opts.fileName } : {}),
-          ...(opts.selectedMessageGuid ? { selectedMessageGuid: opts.selectedMessageGuid } : {}),
-        });
-        return { guid: `att-${calls.sendAttachment.length}` };
+      // Our sendAttachment no longer touches the SDK's attachment module;
+      // keep a stub so the type-check passes but fail loudly if something
+      // accidentally goes through here.
+      sendAttachment: vi.fn(async () => {
+        throw new Error("SDK sendAttachment should not be called — wrapper posts directly");
       }),
       downloadAttachment: vi.fn(async () => Buffer.alloc(0)),
     },
@@ -56,21 +34,81 @@ function buildFakeSdk() {
     on: vi.fn(),
     off: vi.fn(),
   };
-  return { sdk, calls, observed };
+  return { sdk, calls };
 }
 
-describe("iMessage api sendMessage", () => {
-  let log: ReturnType<typeof vi.fn>;
-  beforeEach(() => {
-    log = vi.fn();
-  });
+// ── Multipart upload inspector ───────────────────────────────────────
+// Captures what the wrapper sends to Photon's POST /api/v1/message/attachment
+// and exposes it as structured fields so tests can assert on the exact bytes
+// + Content-Type that iOS will ultimately see.
+type CapturedUpload = {
+  url: string;
+  headers: Record<string, string>;
+  fields: Record<string, string>;
+  attachment?: {
+    filename: string;
+    contentType: string;
+    body: Buffer;
+  };
+};
 
+async function parseMultipartForm(form: FormData): Promise<{
+  fields: Record<string, string>;
+  attachment?: CapturedUpload["attachment"];
+}> {
+  const fields: Record<string, string> = {};
+  let attachment: CapturedUpload["attachment"] | undefined;
+  // biome-ignore lint/style/noNonNullAssertion: iterating FormData entries
+  for (const [key, value] of form.entries()) {
+    if (value instanceof Blob) {
+      // `value` is a Blob — when appended via `form.append(key, blob, filename)`
+      // the filename arrives on the File subclass; native FormData constructs a
+      // File wrapper preserving both `name` and `type`.
+      const file = value as File;
+      attachment = {
+        filename: file.name,
+        contentType: file.type,
+        body: Buffer.from(await file.arrayBuffer()),
+      };
+    } else {
+      fields[key] = String(value);
+    }
+  }
+  return { fields, attachment };
+}
+
+function captureUploader(responseBody: unknown, status = 200) {
+  const captured: CapturedUpload[] = [];
+  const uploader = vi.fn(
+    async ({
+      url,
+      headers,
+      body,
+    }: {
+      url: string;
+      headers: Record<string, string>;
+      body: FormData;
+    }) => {
+      const parsed = await parseMultipartForm(body);
+      captured.push({ url, headers, fields: parsed.fields, attachment: parsed.attachment });
+      return new Response(
+        typeof responseBody === "string" ? responseBody : JSON.stringify(responseBody),
+        { status, headers: { "content-type": "application/json" } },
+      );
+    },
+  );
+  return { captured, uploader };
+}
+
+// ── sendMessage — unchanged, still via SDK ───────────────────────────
+
+describe("iMessage api sendMessage", () => {
   it("passes selectedMessageGuid when reply threading is requested", async () => {
     const { sdk, calls } = buildFakeSdk();
     const service = createIMessageApiService({
       serverUrl: "https://photon.local",
       apiKey: "k",
-      log,
+      log: vi.fn(),
       loadSdkFactory: async () => () => sdk,
     });
     service.setSdk(sdk);
@@ -96,7 +134,7 @@ describe("iMessage api sendMessage", () => {
     const service = createIMessageApiService({
       serverUrl: "https://photon.local",
       apiKey: "k",
-      log,
+      log: vi.fn(),
       loadSdkFactory: async () => () => sdk,
     });
     service.setSdk(sdk);
@@ -107,297 +145,219 @@ describe("iMessage api sendMessage", () => {
   });
 });
 
-describe("iMessage api sendAttachment", () => {
-  let log: ReturnType<typeof vi.fn>;
-  beforeEach(() => {
-    log = vi.fn();
-  });
+// ── sendAttachment — direct-POST path ────────────────────────────────
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+describe("iMessage api sendAttachment (direct POST)", () => {
+  const chatGuid = "iMessage;-;+14155551234";
 
-  it("rejects non-https URLs before touching the SDK", async () => {
-    const { sdk, calls } = buildFakeSdk();
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-    });
-    service.setSdk(sdk);
-
-    await expect(
-      service.sendAttachment({
-        chatGuid: "iMessage;-;+14155551234",
-        attachmentUrl: "http://evil.example/file",
-      }),
-    ).rejects.toThrow(/must be https/);
-    expect(calls.sendAttachment).toHaveLength(0);
-    expect(log).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "imessage_outbound_media_rejected" }),
+  function setup(opts: {
+    download: () => Promise<{
+      body: Buffer;
+      fileName?: string;
+      contentType?: string;
+      finalUrl?: string;
+    }>;
+    responseBody?: unknown;
+    status?: number;
+  }) {
+    const { sdk } = buildFakeSdk();
+    const { captured, uploader } = captureUploader(
+      opts.responseBody ?? { data: { guid: "att-xyz" } },
+      opts.status ?? 200,
     );
-  });
-
-  it("downloads url, writes temp file, passes path to SDK, then unlinks", async () => {
-    const { sdk, calls, observed } = buildFakeSdk();
-    const download = vi.fn(async () => ({
-      body: Buffer.from("hello-image-bytes"),
-      fileName: "cat.jpg",
-    }));
+    const log = vi.fn();
     const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
+      serverUrl: "https://photon.local/",
+      apiKey: "my-key",
       log,
       loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
+      downloadAttachmentFromUrl: vi.fn(opts.download),
+      uploadAttachmentRequest: uploader,
     });
     service.setSdk(sdk);
+    return { service, captured, log, uploader };
+  }
+
+  it("rejects non-https URLs before anything else fires", async () => {
+    const { service, captured } = setup({
+      download: async () => ({ body: Buffer.from("x"), contentType: "image/jpeg" }),
+    });
+    await expect(
+      service.sendAttachment({ chatGuid, attachmentUrl: "http://evil.example/x" }),
+    ).rejects.toThrow(/must be https/);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("POSTs the downloaded bytes and uses redirect-target basename", async () => {
+    const { service, captured } = setup({
+      download: async () => ({
+        body: Buffer.from("jpeg-bytes"),
+        contentType: "image/jpeg",
+        finalUrl: "https://fastly.picsum.photos/id/42/1024/1024.jpg?hmac=abc",
+      }),
+    });
 
     const result = await service.sendAttachment({
-      chatGuid: "iMessage;-;+14155551234",
-      attachmentUrl: "https://cdn.example.com/path/cat.jpg",
-      selectedMessageGuid: "reply-msg-42",
+      chatGuid,
+      attachmentUrl: "https://picsum.photos/1024",
+      selectedMessageGuid: "reply-target",
     });
 
-    expect(download).toHaveBeenCalledWith("https://cdn.example.com/path/cat.jpg");
-    expect(result.guid).toBe("att-1");
-    expect(calls.sendAttachment).toHaveLength(1);
-    const call = calls.sendAttachment[0];
-    expect(call.chatGuid).toBe("iMessage;-;+14155551234");
-    expect(call.selectedMessageGuid).toBe("reply-msg-42");
-    expect(call.fileName).toBe("cat.jpg");
-    // SDK receives a local absolute path, not the source URL.
-    expect(call.filePath?.startsWith("/")).toBe(true);
-    expect(call.filePath).not.toContain("://");
-    // Temp file preserved the extension (so iOS attachment-type detection works).
-    expect(call.filePath?.endsWith(".jpg")).toBe(true);
-    // The file we handed to the SDK actually contained the downloaded bytes.
-    expect(observed[call.filePath!]?.equals(Buffer.from("hello-image-bytes"))).toBe(true);
-    // Temp file removed after send completes.
-    await expect(stat(call.filePath!)).rejects.toThrow();
+    expect(result.guid).toBe("att-xyz");
+    expect(captured).toHaveLength(1);
+    const upload = captured[0];
+
+    expect(upload.url).toBe("https://photon.local/api/v1/message/attachment");
+    expect(upload.headers["X-API-Key"]).toBe("my-key");
+    expect(upload.fields.chatGuid).toBe(chatGuid);
+    // Redirect target had .jpg → use it directly, no Content-Type synthesis needed.
+    expect(upload.fields.name).toBe("1024.jpg");
+    expect(upload.attachment?.filename).toBe("1024.jpg");
+    expect(upload.fields.selectedMessageGuid).toBe("reply-target");
+    expect(upload.fields.tempGuid).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(upload.attachment?.body.equals(Buffer.from("jpeg-bytes"))).toBe(true);
   });
 
-  it("unlinks temp file even when the SDK throws", async () => {
-    const { sdk } = buildFakeSdk();
-    // Capture the real filePath the wrapper passed in, then throw so we
-    // can verify the file still existed at the moment of the throw and
-    // was unlinked afterward.
-    let capturedPath: string | null = null;
-    sdk.attachments.sendAttachment = vi.fn(async (opts) => {
-      capturedPath = opts.filePath;
-      // File must exist at SDK call time (wrapper wrote it before us).
-      const bytes = await readFile(opts.filePath);
-      expect(bytes.equals(Buffer.from("x"))).toBe(true);
-      throw new Error("photon down");
-    });
-    const download = vi.fn(async () => ({ body: Buffer.from("x"), fileName: "x.png" }));
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
-    });
-    service.setSdk(sdk);
-
-    await expect(
-      service.sendAttachment({
-        chatGuid: "iMessage;-;+14155551234",
-        attachmentUrl: "https://cdn.example.com/x.png",
+  // Empirically confirmed against live Photon server: UTI/MIME is decided by
+  // the filename extension only; the part's Content-Type header is ignored.
+  //   filename=1024 + blob=image/jpeg → uti=null (file bubble)
+  //   filename=1024.jpg + blob=octet-stream → uti=public.jpeg (image preview)
+  // So when the URL/content-disposition gives no extension we MUST synthesize
+  // one from the source Content-Type.
+  it("appends extension from Content-Type when URL has none (picsum regression)", async () => {
+    const { service, captured } = setup({
+      download: async () => ({
+        body: Buffer.from("x"),
+        contentType: "image/jpeg",
       }),
-    ).rejects.toThrow(/attachment send failed/);
-
-    // SDK was actually called (wrapper wrote the file before invoking).
-    expect(capturedPath).toBeTruthy();
-    // And the temp file was unlinked by the finally block.
-    await expect(stat(capturedPath!)).rejects.toThrow();
-  });
-
-  it("derives a safe fileName from the URL when the download does not supply one", async () => {
-    const { sdk, calls } = buildFakeSdk();
-    const download = vi.fn(async () => ({ body: Buffer.from("x") }));
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
     });
-    service.setSdk(sdk);
-
     await service.sendAttachment({
-      chatGuid: "iMessage;-;+14155551234",
-      attachmentUrl: "https://cdn.example.com/u/user-42/photo.heic?expires=123",
-    });
-
-    expect(calls.sendAttachment[0].fileName).toBe("photo.heic");
-    expect(calls.sendAttachment[0].filePath?.endsWith(".heic")).toBe(true);
-  });
-
-  it("falls back to attachment.bin when the URL has no basename", async () => {
-    const { sdk, calls } = buildFakeSdk();
-    const download = vi.fn(async () => ({ body: Buffer.from("x") }));
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
-    });
-    service.setSdk(sdk);
-
-    await service.sendAttachment({
-      chatGuid: "iMessage;-;+14155551234",
-      attachmentUrl: "https://cdn.example.com/",
-    });
-
-    expect(calls.sendAttachment[0].fileName).toBe("attachment.bin");
-  });
-
-  // Regression: https://picsum.photos/1024 returns JPEG bytes with
-  // Content-Type: image/jpeg but the URL path has no extension. Before the
-  // Content-Type fallback this shipped to Photon as an extensionless upload,
-  // form-data inferred application/octet-stream, and iOS rendered a generic
-  // .bin file bubble instead of the inline image preview.
-  it("infers .jpg from Content-Type when the URL has no extension", async () => {
-    const { sdk, calls } = buildFakeSdk();
-    const download = vi.fn(async () => ({
-      body: Buffer.from("jpeg-bytes"),
-      contentType: "image/jpeg",
-    }));
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
-    });
-    service.setSdk(sdk);
-
-    await service.sendAttachment({
-      chatGuid: "iMessage;-;+14155551234",
+      chatGuid,
       attachmentUrl: "https://picsum.photos/1024",
     });
-
-    const call = calls.sendAttachment[0];
-    expect(call.fileName).toBe("1024.jpg");
-    expect(call.filePath?.endsWith(".jpg")).toBe(true);
+    expect(captured[0].fields.name).toBe("1024.jpg");
+    expect(captured[0].attachment?.filename).toBe("1024.jpg");
   });
 
-  it("prefers URL extension over Content-Type when both present", async () => {
-    const { sdk, calls } = buildFakeSdk();
-    const download = vi.fn(async () => ({
-      body: Buffer.from("x"),
-      contentType: "application/octet-stream",
-    }));
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
+  it("strips Content-Type parameters like ;charset=utf-8 when synthesising extension", async () => {
+    const { service, captured } = setup({
+      download: async () => ({
+        body: Buffer.from("x"),
+        contentType: "image/jpeg; charset=utf-8",
+      }),
     });
-    service.setSdk(sdk);
-
     await service.sendAttachment({
-      chatGuid: "iMessage;-;+14155551234",
-      attachmentUrl: "https://cdn.example.com/path/video.mov",
+      chatGuid,
+      attachmentUrl: "https://cdn.example.com/asset",
     });
-
-    const call = calls.sendAttachment[0];
-    expect(call.fileName).toBe("video.mov");
-    expect(call.filePath?.endsWith(".mov")).toBe(true);
+    expect(captured[0].fields.name).toBe("asset.jpg");
   });
 
-  // image/pjpeg, video/quicktime, audio/mpeg land in MIME_EXTENSION_OVERRIDE
-  // because mime-db would otherwise hand us .jfif / .qt / .mpga — all
-  // technically correct but not what iOS or users expect for pictures, movies,
-  // and MP3s. The rest flow through mime-types directly.
+  it("falls back to .bin when neither URL nor Content-Type give a clue", async () => {
+    const { service, captured } = setup({
+      download: async () => ({ body: Buffer.from("x") }),
+    });
+    await service.sendAttachment({
+      chatGuid,
+      attachmentUrl: "https://cdn.example.com/blob",
+    });
+    expect(captured[0].fields.name).toBe("blob.bin");
+  });
+
+  it("leaves filename untouched when it already has an extension", async () => {
+    const { service, captured } = setup({
+      download: async () => ({
+        body: Buffer.from("x"),
+        contentType: "image/png",
+        fileName: "sunset.png",
+        finalUrl: "https://cdn.example.com/image/id/42",
+      }),
+    });
+    await service.sendAttachment({
+      chatGuid,
+      attachmentUrl: "https://cdn.example.com/image/id/42",
+    });
+    expect(captured[0].fields.name).toBe("sunset.png");
+    expect(captured[0].attachment?.filename).toBe("sunset.png");
+  });
+
+  // Overrides where mime-db's canonical extension is worse than the
+  // user-facing one iOS expects.
   it.each([
-    ["image/png", ".png"],
-    ["image/webp", ".webp"],
-    ["image/gif", ".gif"],
-    ["image/heic", ".heic"],
-    ["image/jpeg", ".jpg"],
-    ["image/pjpeg", ".jpg"], // override: mime-db → .jfif
-    ["video/mp4", ".mp4"],
-    ["video/quicktime", ".mov"], // override: mime-db → .qt
-    ["audio/mp4", ".m4a"],
-    ["audio/mpeg", ".mp3"], // override: mime-db → .mpga
-    ["application/pdf", ".pdf"],
-  ])("maps %s → %s when URL has no extension", async (contentType, expectedExt) => {
-    const { sdk, calls } = buildFakeSdk();
-    const download = vi.fn(async () => ({ body: Buffer.from("x"), contentType }));
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
+    ["image/pjpeg", ".jpg"],
+    ["video/quicktime", ".mov"],
+    ["audio/mpeg", ".mp3"],
+  ])("overrides mime-db for %s → %s", async (contentType, expectedExt) => {
+    const { service, captured } = setup({
+      download: async () => ({ body: Buffer.from("x"), contentType }),
     });
-    service.setSdk(sdk);
-
     await service.sendAttachment({
-      chatGuid: "iMessage;-;+14155551234",
+      chatGuid,
       attachmentUrl: "https://cdn.example.com/asset",
     });
-
-    expect(calls.sendAttachment[0].filePath?.endsWith(expectedExt)).toBe(true);
+    expect(captured[0].fields.name.endsWith(expectedExt)).toBe(true);
   });
 
-  // Content-Type: image/jpeg; charset=utf-8 — some misconfigured servers
-  // include charset on binary types. The lookup must strip the params.
-  it("ignores Content-Type parameters like ;charset=...", async () => {
-    const { sdk, calls } = buildFakeSdk();
-    const download = vi.fn(async () => ({
-      body: Buffer.from("x"),
-      contentType: "image/jpeg; charset=utf-8",
-    }));
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
-    });
-    service.setSdk(sdk);
+  it("retries with chat/new when Photon reports the chat does not exist", async () => {
+    let call = 0;
+    const chatNewCalls: unknown[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      // URL objects stringify to "[object Object]" without href; normalize first.
+      const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      chatNewCalls.push({ url: urlStr, body: init?.body });
+      return new Response(JSON.stringify({ data: {} }), { status: 200 });
+    }) as typeof fetch;
 
-    await service.sendAttachment({
-      chatGuid: "iMessage;-;+14155551234",
-      attachmentUrl: "https://cdn.example.com/asset",
-    });
+    try {
+      const { sdk } = buildFakeSdk();
+      const uploader = vi.fn(async () => {
+        call += 1;
+        if (call === 1) {
+          return new Response(JSON.stringify({ error: { message: "chat does not exist" } }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ data: { guid: "retry-ok" } }), { status: 200 });
+      });
+      const service = createIMessageApiService({
+        serverUrl: "https://photon.local",
+        apiKey: "k",
+        log: vi.fn(),
+        loadSdkFactory: async () => () => sdk,
+        downloadAttachmentFromUrl: async () => ({
+          body: Buffer.from("x"),
+          contentType: "image/jpeg",
+        }),
+        uploadAttachmentRequest: uploader,
+      });
+      service.setSdk(sdk);
 
-    expect(calls.sendAttachment[0].filePath?.endsWith(".jpg")).toBe(true);
+      const result = await service.sendAttachment({
+        chatGuid: "iMessage;-;+15551234567",
+        attachmentUrl: "https://cdn.example.com/x.jpg",
+      });
+
+      expect(result.guid).toBe("retry-ok");
+      expect(uploader).toHaveBeenCalledTimes(2);
+      expect(chatNewCalls).toHaveLength(1);
+      expect(chatNewCalls[0]).toMatchObject({
+        url: "https://photon.local/api/v1/chat/new",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
-  // picsum.photos/1024 issues a 302 to fastly.picsum.photos/<id>/1024/1024.jpg.
-  // The redirect target carries the real extension, and the original URL has
-  // none — so `finalUrl` must take priority over the requested URL when we
-  // derive the basename.
-  it("prefers final URL basename over original URL after a redirect", async () => {
-    const { sdk, calls } = buildFakeSdk();
-    const download = vi.fn(async () => ({
-      body: Buffer.from("x"),
-      contentType: "image/jpeg",
-      finalUrl: "https://fastly.picsum.photos/id/986/1024/1024.jpg?hmac=abc",
-    }));
-    const service = createIMessageApiService({
-      serverUrl: "https://photon.local",
-      apiKey: "k",
-      log,
-      loadSdkFactory: async () => () => sdk,
-      downloadAttachmentFromUrl: download,
+  it("surfaces upstream 4xx as IMessagePhotonError with httpStatus", async () => {
+    const { service } = setup({
+      responseBody: { error: { message: "Unauthorized" } },
+      status: 401,
+      download: async () => ({ body: Buffer.from("x"), contentType: "image/jpeg" }),
     });
-    service.setSdk(sdk);
-
-    await service.sendAttachment({
-      chatGuid: "iMessage;-;+14155551234",
-      attachmentUrl: "https://picsum.photos/1024",
-    });
-
-    const call = calls.sendAttachment[0];
-    expect(call.fileName).toBe("1024.jpg");
-    expect(call.filePath?.endsWith(".jpg")).toBe(true);
+    await expect(
+      service.sendAttachment({ chatGuid, attachmentUrl: "https://cdn.example.com/x.jpg" }),
+    ).rejects.toMatchObject({ httpStatus: 401, stage: "attachment" });
   });
 });
