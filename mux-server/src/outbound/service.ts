@@ -170,7 +170,15 @@ export function createOutboundService(deps: {
       attachmentUrl: string;
       selectedMessageGuid?: string;
     }) => Promise<{ guid: string | null }>;
+    sendAttachmentBytes: (params: {
+      chatGuid: string;
+      body: Buffer;
+      contentType: string;
+      fileName: string;
+      selectedMessageGuid?: string;
+    }) => Promise<{ guid: string | null }>;
   };
+  imessageAttachmentMaxBytes: number;
 }): {
   runOutboundAction: (params: {
     tenant: TenantIdentity;
@@ -936,7 +944,74 @@ export function createOutboundService(deps: {
         return deduped;
       })();
 
-      if (!imessageText.trim() && imessageMediaUrls.length === 0) {
+      // Inline-bytes attachments: agent-side Photon-incompatible sources
+      // (local filesystem paths, in-memory buffers) are base64-encoded by
+      // openclaw and posted straight through mux to Photon's multipart
+      // endpoint. Lets us deliver iMessage media without forcing openclaw
+      // to publish everything to a public CDN first.
+      type InlineAttachment = {
+        filename: string;
+        contentType: string;
+        body: Buffer;
+      };
+      const imessageInlineAttachments: InlineAttachment[] = [];
+      let inlineAttachmentDecodeError: string | null = null;
+      const rawAttachments = imessageRawSend?.attachments;
+      if (Array.isArray(rawAttachments)) {
+        let cumulativeBytes = 0;
+        for (const item of rawAttachments) {
+          if (!item || typeof item !== "object") {
+            inlineAttachmentDecodeError = "raw.imessage.send.attachments entries must be objects";
+            break;
+          }
+          const entry = item as Record<string, unknown>;
+          const filename = readNonEmptyString(entry.filename);
+          const contentType = readNonEmptyString(entry.contentType);
+          const dataBase64 = readNonEmptyString(entry.dataBase64);
+          if (!filename || !contentType || !dataBase64) {
+            inlineAttachmentDecodeError =
+              "raw.imessage.send.attachments entry missing filename/contentType/dataBase64";
+            break;
+          }
+          let decoded: Buffer;
+          try {
+            decoded = Buffer.from(dataBase64, "base64");
+          } catch {
+            inlineAttachmentDecodeError = `attachment ${filename} base64 decode failed`;
+            break;
+          }
+          if (decoded.length === 0) {
+            inlineAttachmentDecodeError = `attachment ${filename} decoded to zero bytes`;
+            break;
+          }
+          if (decoded.length > deps.imessageAttachmentMaxBytes) {
+            inlineAttachmentDecodeError = `attachment ${filename} exceeds ${deps.imessageAttachmentMaxBytes} bytes (got ${decoded.length})`;
+            break;
+          }
+          cumulativeBytes += decoded.length;
+          if (cumulativeBytes > deps.imessageAttachmentMaxBytes) {
+            inlineAttachmentDecodeError = `cumulative attachment size exceeds ${deps.imessageAttachmentMaxBytes} bytes`;
+            break;
+          }
+          imessageInlineAttachments.push({ filename, contentType, body: decoded });
+        }
+      }
+
+      if (inlineAttachmentDecodeError) {
+        return {
+          statusCode: 400,
+          bodyText: JSON.stringify({
+            ok: false,
+            error: inlineAttachmentDecodeError,
+          }),
+        };
+      }
+
+      if (
+        !imessageText.trim() &&
+        imessageMediaUrls.length === 0 &&
+        imessageInlineAttachments.length === 0
+      ) {
         return {
           statusCode: 400,
           bodyText: JSON.stringify({
@@ -968,22 +1043,34 @@ export function createOutboundService(deps: {
       let sendError: unknown = null;
       let failedStage: "media" | "text" | null = null;
 
+      // Send URL-based attachments first (mux downloads then posts bytes),
+      // then inline-bytes attachments (openclaw-supplied, already decoded).
+      // Reply threading applies only to the *first* send across the whole
+      // batch so iOS renders a single quoted-reply chain, not one per piece.
+      let sendIndex = 0;
       try {
-        for (const [index, url] of imessageMediaUrls.entries()) {
-          // Photon supports reply threading via selectedMessageGuid, which we
-          // only apply to the FIRST send in a batch. A reply with multiple
-          // attachments should thread the first send; subsequent sends are
-          // continuation of the same reply and must not re-thread, or iOS
-          // renders a separate quoted reply for each attachment.
+        for (const url of imessageMediaUrls) {
           const sent = await deps.imessageApiService.sendAttachment({
             chatGuid,
             attachmentUrl: url,
-            ...(replyToId && index === 0 ? { selectedMessageGuid: replyToId } : {}),
+            ...(replyToId && sendIndex === 0 ? { selectedMessageGuid: replyToId } : {}),
           });
           // The SDK may return guid=null even on success; record as "unknown" so
           // the successful send still counts toward providerMessageIds (prevents
           // caller retry duplication) — matches the text-send path below.
           providerMessageIds.push(sent.guid ?? "unknown");
+          sendIndex += 1;
+        }
+        for (const attachment of imessageInlineAttachments) {
+          const sent = await deps.imessageApiService.sendAttachmentBytes({
+            chatGuid,
+            body: attachment.body,
+            contentType: attachment.contentType,
+            fileName: attachment.filename,
+            ...(replyToId && sendIndex === 0 ? { selectedMessageGuid: replyToId } : {}),
+          });
+          providerMessageIds.push(sent.guid ?? "unknown");
+          sendIndex += 1;
         }
       } catch (error) {
         sendError = error;

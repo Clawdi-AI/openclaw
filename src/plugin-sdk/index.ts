@@ -799,7 +799,7 @@ export {
 export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 // Media utilities
-export { loadWebMedia, type WebMediaResult } from "../web/media.js";
+export { loadWebMedia, loadWebMediaRaw, type WebMediaResult } from "../web/media.js";
 
 // Context engine
 export type {

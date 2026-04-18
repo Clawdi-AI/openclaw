@@ -6,7 +6,10 @@ import { createRuntimeLauncher } from "./app/runtime-launcher.js";
 import { createAuthService } from "./auth/service.js";
 import { createDiscordApiService } from "./channels/discord/api.js";
 import { createDiscordInboundRuntime } from "./channels/discord/inbound.js";
-import { createIMessageApiService } from "./channels/imessage/api.js";
+import {
+  createIMessageApiService,
+  IMESSAGE_ATTACHMENT_MAX_BYTES_EXPORT,
+} from "./channels/imessage/api.js";
 import { createIMessageInboundRuntime } from "./channels/imessage/inbound.js";
 import {
   loadIMessageRuntimeModules,
@@ -766,7 +769,9 @@ const { runOutboundAction, runOutboundSend } = createOutboundService({
     getSdk: () => imessageApiService.getSdk(),
     sendMessage: imessageApiService.sendMessage,
     sendAttachment: imessageApiService.sendAttachment,
+    sendAttachmentBytes: imessageApiService.sendAttachmentBytes,
   },
+  imessageAttachmentMaxBytes: IMESSAGE_ATTACHMENT_MAX_BYTES_EXPORT,
 });
 
 const { handleRequest } = createHttpRouteHandler({

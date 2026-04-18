@@ -638,6 +638,20 @@ export function createIMessageApiService(deps: {
     }
   }
 
+  // Thin alias for outbound inline-bytes delivery. Keeps the "public API"
+  // surface symmetric with sendAttachment (which takes a URL) and shields
+  // callers from the internal postBytesAsAttachment name so future
+  // refactors inside the api module don't ripple out to outbound/service.
+  async function sendAttachmentBytes(params: {
+    chatGuid: string;
+    body: Buffer;
+    contentType: string;
+    fileName: string;
+    selectedMessageGuid?: string;
+  }): Promise<{ guid: string | null }> {
+    return postBytesAsAttachment(params);
+  }
+
   return {
     getSdk,
     setSdk,
@@ -649,12 +663,15 @@ export function createIMessageApiService(deps: {
     markInboundSeen,
     sendMessage,
     sendAttachment,
+    sendAttachmentBytes,
     downloadAttachment,
     downloadAttachmentWith,
     sendPairingNotice,
     sendPairingContact,
   };
 }
+
+export const IMESSAGE_ATTACHMENT_MAX_BYTES_EXPORT = IMESSAGE_ATTACHMENT_MAX_BYTES;
 
 async function defaultDownloadAttachment(url: string): Promise<{
   body: Buffer;
