@@ -22,6 +22,14 @@ export type IMessageSdkInstance = {
     }) => Promise<{ guid?: string }>;
     downloadAttachment: (guid: string) => Promise<Buffer>;
   };
+  // enqueueSend is the SDK's send-queue primitive (dist/index.js:1023-1027).
+  // SDK methods (sendMessage, sendAttachment, sendSticker, etc.) all run
+  // through this single per-instance serial queue — so a reply "here's your
+  // image:" followed by the image itself always lands at Photon in the same
+  // order the caller issued them. Our direct-POST path for attachments MUST
+  // share this queue, otherwise native sendMessage and our attachment send
+  // race.
+  enqueueSend: <T>(task: () => Promise<T>) => Promise<T>;
   connect: () => Promise<void>;
   close: () => Promise<void>;
   on: (event: string, listener: (...args: unknown[]) => void) => void;
@@ -86,6 +94,8 @@ export function isIMessageSdkInstance(value: unknown): value is IMessageSdkInsta
     "close" in value &&
     "messages" in value &&
     "attachments" in value &&
+    "enqueueSend" in value &&
+    typeof (value as { enqueueSend?: unknown }).enqueueSend === "function" &&
     "on" in value &&
     "off" in value
   );
@@ -267,28 +277,41 @@ export function createIMessageApiService(deps: {
     }
   }
 
-  // Posts directly to Photon's POST /api/v1/message/attachment endpoint
-  // instead of going through the SDK's attachments.sendAttachment method.
+  // Posts directly to Photon's /api/v1/message/attachment instead of going
+  // through the SDK's attachments.sendAttachment method.
   //
   // Why bypass the SDK:
   //   The SDK helper does `readFile(options.filePath)` then
-  //   `form.append("attachment", buf, fileName)` — and exposes no way to pass
-  //   a Content-Type. `form.append` with a bare filename falls back to MIME
-  //   inference from the file extension; when an inbound URL like
-  //   https://picsum.photos/1024 gives us JPEG bytes but no path extension,
-  //   the upload goes out as application/octet-stream. Photon stores that
-  //   upload with uti/mimeType=null, and iOS Messages renders it as a
-  //   generic file bubble instead of an inline image.
+  //   `form.append("attachment", buf, fileName)` — forcing callers to land
+  //   bytes on disk first, and crashing on https:// URLs. Bypassing lets us
+  //   stream the downloaded buffer straight into multipart with zero
+  //   tempfile race surface, own error handling (preserve upstream 4xx/5xx
+  //   status through IMessagePhotonError), and match the contract Photon
+  //   actually expects.
   //
-  //   Building the multipart ourselves lets us pass the Content-Type we
-  //   already have from the HTTP response through directly, so filename can
-  //   stay exactly as the upstream source provided (no suffix-mangling), the
-  //   MIME stays whatever the source said, and iOS renders inline.
+  // Why the filename still carries an extension:
+  //   Photon's server decides UTI/MIME *purely* from the filename extension
+  //   (empirically A/B-tested: filename="1024" + blob type="image/jpeg" →
+  //   uti=null / file bubble on iOS; filename="1024.jpg" + blob type="octet-
+  //   stream" → uti=public.jpeg / inline image). Blob.type on the multipart
+  //   part is ignored by Photon. We still pass it through for correctness on
+  //   any RFC-compliant recipient, but extension synthesis is load-bearing.
+  //
+  // Why enqueueSend wraps the send:
+  //   SDK sendMessage / sendAttachment / sendSticker all run through a
+  //   single per-instance serial queue (dist/index.js:1023-1027) so that
+  //   ordered sends ("here's your image:" then the image) land at Photon in
+  //   caller order. Direct-POSTing without enqueueSend would race with SDK
+  //   text sends and deliver images before their captions.
   async function sendAttachment(params: {
     chatGuid: string;
     attachmentUrl: string;
     selectedMessageGuid?: string;
   }): Promise<{ guid: string | null }> {
+    const current = sdk;
+    if (!current) {
+      throw new Error("iMessage SDK not connected");
+    }
     if (!params.attachmentUrl.toLowerCase().startsWith("https://")) {
       deps.log({
         type: "imessage_outbound_media_rejected",
@@ -321,6 +344,16 @@ export function createIMessageApiService(deps: {
         : new Error("iMessage attachment download failed", { cause: error });
     }
 
+    if (download.body.length === 0) {
+      deps.log({
+        type: "imessage_outbound_media_rejected",
+        chatGuid: params.chatGuid,
+        url: params.attachmentUrl,
+        reason: "empty body",
+      });
+      throw new Error("iMessage attachment download returned zero bytes");
+    }
+
     // Prefer the FINAL URL (post-redirect) basename — picsum /1024
     // redirects to fastly.picsum.photos/.../1024.jpg, which carries the
     // extension the source URL lacked.
@@ -328,28 +361,22 @@ export function createIMessageApiService(deps: {
     const rawName = download.fileName ?? urlBaseName ?? "attachment";
     const contentType = download.contentType?.split(";")[0]?.trim() || "application/octet-stream";
 
-    // Photon's server decides UTI/MIME purely from the filename extension —
-    // the multipart part's Content-Type header is ignored (empirically
-    // confirmed: filename="1024" + blob type="image/jpeg" → uti/mimeType
-    // both null; filename="1024.jpg" + blob type="octet-stream" → public.jpeg).
-    // So when the filename has no extension we must synthesize one from the
-    // Content-Type we got from the source. Without this iOS renders a
-    // generic file bubble instead of an inline image.
     const nameExt = path.extname(rawName);
     const resolvedExt = nameExt || extensionForContentType(download.contentType) || ".bin";
     const fileName = nameExt ? rawName : `${rawName}${resolvedExt}`;
     const tempGuid = randomUUID();
 
     const postUpload = async (): Promise<Response> => {
-      // Native FormData + Blob so Content-Type comes from blob.type directly.
-      // Bypasses form-data's filename-extension inference entirely.
       const form = new FormData();
       form.append("chatGuid", params.chatGuid);
-      form.append(
-        "attachment",
-        new Blob([new Uint8Array(download.body)], { type: contentType }),
-        fileName,
-      );
+      // Node's Buffer.buffer is strictly ArrayBuffer (never a
+      // SharedArrayBuffer), but TS's widened types can't prove that to the
+      // Blob constructor. Copy the bytes into a plain ArrayBuffer so the
+      // Blob constructor accepts the part without a cast. The copy is
+      // unavoidable for strict typing but stays single-pass.
+      const bodyBuffer = new ArrayBuffer(download.body.byteLength);
+      new Uint8Array(bodyBuffer).set(download.body);
+      form.append("attachment", new Blob([bodyBuffer], { type: contentType }), fileName);
       form.append("name", fileName);
       form.append("tempGuid", tempGuid);
       if (params.selectedMessageGuid) {
@@ -366,48 +393,89 @@ export function createIMessageApiService(deps: {
       return await request({ url, headers, body: form });
     };
 
-    let response = await postUpload();
-    let responseText = await response.text();
+    // Wrap the entire send in the SDK's serial queue so ordered sends from
+    // the same instance stay in caller order — matches SDK semantics.
+    return await current.enqueueSend(async () => {
+      let response = await postUpload();
+      let responseText = await response.text();
 
-    // Mirror the SDK's chat-not-exist retry: if Photon rejects the upload
-    // because there's no existing conversation for this address, create the
-    // chat via POST /api/v1/chat/new and retry once. Pairing flows already
-    // create the chat (user SMSes the Photon number first), so this path
-    // rarely fires, but preserving it keeps behaviour parity with the SDK.
-    if (!response.ok && isChatNotExistResponse(responseText)) {
-      const parsed = parseChatGuid(params.chatGuid);
-      if (parsed?.address) {
-        await createChat({
-          address: parsed.address,
-          service: parsed.service,
-        });
-        response = await postUpload();
-        responseText = await response.text();
+      // Mirror SDK's chat-not-exist retry: if Photon rejects the upload
+      // because there's no existing conversation for this address, create
+      // the chat via POST /api/v1/chat/new and retry once.
+      if (!response.ok && isChatNotExistResponse(responseText)) {
+        const parsed = parseChatGuid(params.chatGuid);
+        if (parsed?.address) {
+          try {
+            await createChat({ address: parsed.address, service: parsed.service });
+          } catch (error) {
+            deps.log({
+              type: "imessage_send_attachment_error",
+              chatGuid: params.chatGuid,
+              phase: "chat_new_failed",
+              error: String(error),
+            });
+            throw new IMessagePhotonError("iMessage attachment send failed", {
+              httpStatus: null,
+              stage: "attachment",
+              cause: error,
+            });
+          }
+          response = await postUpload();
+          responseText = await response.text();
+        }
       }
-    }
 
-    if (!response.ok) {
-      deps.log({
-        type: "imessage_send_attachment_error",
-        chatGuid: params.chatGuid,
-        httpStatus: response.status,
-        body: responseText.slice(0, 300),
-      });
-      throw new IMessagePhotonError("iMessage attachment send failed", {
-        httpStatus: response.status,
-        stage: "attachment",
-        cause: responseText.slice(0, 300),
-      });
-    }
+      if (!response.ok) {
+        deps.log({
+          type: "imessage_send_attachment_error",
+          chatGuid: params.chatGuid,
+          httpStatus: response.status,
+          body: responseText.slice(0, 300),
+        });
+        throw new IMessagePhotonError("iMessage attachment send failed", {
+          httpStatus: response.status,
+          stage: "attachment",
+          cause: responseText.slice(0, 300),
+        });
+      }
 
-    let parsed: unknown;
-    try {
-      parsed = responseText ? JSON.parse(responseText) : null;
-    } catch {
-      parsed = null;
-    }
-    const guid = (parsed as { data?: { guid?: unknown } })?.data?.guid;
-    return { guid: typeof guid === "string" ? guid : null };
+      // Fail closed on protocol corruption. The SDK unconditionally returns
+      // response.data.data (dist/index.js:235-238); an empty body, invalid
+      // JSON, or data: null would all have thrown on a naive property read
+      // and we don't want to silently succeed with guid=null instead.
+      let parsed: unknown;
+      try {
+        parsed = responseText ? JSON.parse(responseText) : null;
+      } catch (error) {
+        deps.log({
+          type: "imessage_send_attachment_error",
+          chatGuid: params.chatGuid,
+          phase: "invalid_json",
+          body: responseText.slice(0, 200),
+        });
+        throw new IMessagePhotonError("iMessage attachment send failed", {
+          httpStatus: response.status,
+          stage: "attachment",
+          cause: error,
+        });
+      }
+      const data = (parsed as { data?: unknown } | null)?.data;
+      if (!data || typeof data !== "object") {
+        deps.log({
+          type: "imessage_send_attachment_error",
+          chatGuid: params.chatGuid,
+          phase: "missing_data",
+          body: responseText.slice(0, 200),
+        });
+        throw new IMessagePhotonError("iMessage attachment send failed", {
+          httpStatus: response.status,
+          stage: "attachment",
+          cause: "response missing data",
+        });
+      }
+      const guid = (data as { guid?: unknown }).guid;
+      return { guid: typeof guid === "string" ? guid : null };
+    });
   }
 
   async function createChat(params: { address: string; service?: string }): Promise<void> {

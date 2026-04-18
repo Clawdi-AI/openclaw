@@ -8,27 +8,43 @@ import {
 type SendMessageCall = { chatGuid: string; message: string; selectedMessageGuid?: string };
 
 function buildFakeSdk() {
-  const calls: { sendMessage: SendMessageCall[] } = { sendMessage: [] };
+  const calls: { sendMessage: SendMessageCall[]; enqueueSendOrder: string[] } = {
+    sendMessage: [],
+    enqueueSendOrder: [],
+  };
+  // Mirror the real SDK's serial queue so concurrency tests behave the
+  // same way production does.
+  let queue: Promise<unknown> = Promise.resolve();
+  const enqueueSend = <T>(task: () => Promise<T>): Promise<T> => {
+    const result = queue.then(() => task());
+    queue = result.catch(() => undefined);
+    return result;
+  };
   const sdk: IMessageSdkInstance = {
     messages: {
       sendMessage: vi.fn(async (opts) => {
-        calls.sendMessage.push({
-          chatGuid: opts.chatGuid,
-          message: opts.message,
-          ...(opts.selectedMessageGuid ? { selectedMessageGuid: opts.selectedMessageGuid } : {}),
+        // Routed through enqueueSend in production; mirror here.
+        return enqueueSend(async () => {
+          calls.enqueueSendOrder.push(`msg:${opts.message}`);
+          calls.sendMessage.push({
+            chatGuid: opts.chatGuid,
+            message: opts.message,
+            ...(opts.selectedMessageGuid ? { selectedMessageGuid: opts.selectedMessageGuid } : {}),
+          });
+          return { guid: `msg-${calls.sendMessage.length}` };
         });
-        return { guid: `msg-${calls.sendMessage.length}` };
       }),
     },
     attachments: {
-      // Our sendAttachment no longer touches the SDK's attachment module;
-      // keep a stub so the type-check passes but fail loudly if something
-      // accidentally goes through here.
       sendAttachment: vi.fn(async () => {
         throw new Error("SDK sendAttachment should not be called — wrapper posts directly");
       }),
       downloadAttachment: vi.fn(async () => Buffer.alloc(0)),
     },
+    enqueueSend: vi.fn((task) => {
+      calls.enqueueSendOrder.push("enqueue");
+      return enqueueSend(task);
+    }),
     connect: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     on: vi.fn(),
@@ -296,6 +312,185 @@ describe("iMessage api sendAttachment (direct POST)", () => {
       attachmentUrl: "https://cdn.example.com/asset",
     });
     expect(captured[0].fields.name.endsWith(expectedExt)).toBe(true);
+  });
+
+  // mime-db gives sensible canonical extensions for these; regression lock.
+  it.each([
+    ["image/png", ".png"],
+    ["image/gif", ".gif"],
+    ["image/webp", ".webp"],
+    ["image/heic", ".heic"],
+    ["video/mp4", ".mp4"],
+    ["audio/mp4", ".m4a"],
+    ["application/pdf", ".pdf"],
+  ])("mime-db lookup %s → %s", async (contentType, expectedExt) => {
+    const { service, captured } = setup({
+      download: async () => ({ body: Buffer.from("x"), contentType }),
+    });
+    await service.sendAttachment({
+      chatGuid,
+      attachmentUrl: "https://cdn.example.com/asset",
+    });
+    expect(captured[0].fields.name.endsWith(expectedExt)).toBe(true);
+  });
+
+  // Codex flagged: must keep SDK serial-queue semantics. A slow attachment
+  // issued first must complete before faster text sends issued after it.
+  it("serialises sends through the SDK's enqueueSend queue", async () => {
+    const { sdk, calls } = buildFakeSdk();
+    const { captured, uploader } = captureUploader({ data: { guid: "att" } });
+    const slowUploader = vi.fn(async (args) => {
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      return uploader(args);
+    });
+    const service = createIMessageApiService({
+      serverUrl: "https://photon.local",
+      apiKey: "k",
+      log: vi.fn(),
+      loadSdkFactory: async () => () => sdk,
+      downloadAttachmentFromUrl: async () => ({
+        body: Buffer.from("x"),
+        contentType: "image/jpeg",
+      }),
+      uploadAttachmentRequest: slowUploader,
+    });
+    service.setSdk(sdk);
+
+    await Promise.all([
+      service.sendAttachment({ chatGuid, attachmentUrl: "https://cdn.example.com/x.jpg" }),
+      service.sendMessage({ chatGuid, message: "T1" }),
+      service.sendMessage({ chatGuid, message: "T2" }),
+    ]);
+
+    // Attachment enqueued first → runs first → its entry is first in the
+    // order log, followed by the two text sends in dispatch order.
+    expect(calls.enqueueSendOrder[0]).toBe("enqueue");
+    expect(captured).toHaveLength(1);
+    expect(calls.sendMessage.map((c) => c.message)).toEqual(["T1", "T2"]);
+  });
+
+  // Codex flagged: fail closed on protocol corruption.
+  it("throws IMessagePhotonError on 200 + invalid JSON body", async () => {
+    const { sdk } = buildFakeSdk();
+    const service = createIMessageApiService({
+      serverUrl: "https://photon.local",
+      apiKey: "k",
+      log: vi.fn(),
+      loadSdkFactory: async () => () => sdk,
+      downloadAttachmentFromUrl: async () => ({
+        body: Buffer.from("x"),
+        contentType: "image/jpeg",
+      }),
+      uploadAttachmentRequest: vi.fn(
+        async () => new Response("<html>gateway broken</html>", { status: 200 }),
+      ),
+    });
+    service.setSdk(sdk);
+    await expect(
+      service.sendAttachment({ chatGuid, attachmentUrl: "https://cdn.example.com/x.jpg" }),
+    ).rejects.toMatchObject({ httpStatus: 200, stage: "attachment" });
+  });
+
+  it("throws when response body is missing `.data`", async () => {
+    const { service } = setup({
+      responseBody: { ok: true },
+      download: async () => ({ body: Buffer.from("x"), contentType: "image/jpeg" }),
+    });
+    await expect(
+      service.sendAttachment({ chatGuid, attachmentUrl: "https://cdn.example.com/x.jpg" }),
+    ).rejects.toMatchObject({ stage: "attachment" });
+  });
+
+  it("throws when response body is `{data: null}`", async () => {
+    const { service } = setup({
+      responseBody: { data: null },
+      download: async () => ({ body: Buffer.from("x"), contentType: "image/jpeg" }),
+    });
+    await expect(
+      service.sendAttachment({ chatGuid, attachmentUrl: "https://cdn.example.com/x.jpg" }),
+    ).rejects.toMatchObject({ stage: "attachment" });
+  });
+
+  it("throws when download returns zero bytes", async () => {
+    const { service } = setup({
+      download: async () => ({ body: Buffer.alloc(0), contentType: "image/jpeg" }),
+    });
+    await expect(
+      service.sendAttachment({ chatGuid, attachmentUrl: "https://cdn.example.com/x.jpg" }),
+    ).rejects.toThrow(/zero bytes/);
+  });
+
+  // Codex flagged: chat/new failure should surface as IMessagePhotonError,
+  // not leak whichever native fetch rejection produced it.
+  it("surfaces chat/new failure as IMessagePhotonError", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: { message: "boom" } }), {
+        status: 500,
+      })) as typeof fetch;
+    try {
+      const { sdk } = buildFakeSdk();
+      const service = createIMessageApiService({
+        serverUrl: "https://photon.local",
+        apiKey: "k",
+        log: vi.fn(),
+        loadSdkFactory: async () => () => sdk,
+        downloadAttachmentFromUrl: async () => ({
+          body: Buffer.from("x"),
+          contentType: "image/jpeg",
+        }),
+        uploadAttachmentRequest: async () =>
+          new Response(JSON.stringify({ error: { message: "chat does not exist" } }), {
+            status: 400,
+          }),
+      });
+      service.setSdk(sdk);
+      await expect(
+        service.sendAttachment({
+          chatGuid: "iMessage;-;+15551234567",
+          attachmentUrl: "https://cdn.example.com/x.jpg",
+        }),
+      ).rejects.toMatchObject({ stage: "attachment" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // Codex flagged: chat/new succeeds, second upload still fails — surface the
+  // second failure cleanly with its own httpStatus.
+  it("surfaces second upload failure after chat/new retry", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ data: {} }), { status: 200 })) as typeof fetch;
+    try {
+      const { sdk } = buildFakeSdk();
+      const service = createIMessageApiService({
+        serverUrl: "https://photon.local",
+        apiKey: "k",
+        log: vi.fn(),
+        loadSdkFactory: async () => () => sdk,
+        downloadAttachmentFromUrl: async () => ({
+          body: Buffer.from("x"),
+          contentType: "image/jpeg",
+        }),
+        uploadAttachmentRequest: vi.fn(
+          async () =>
+            new Response(JSON.stringify({ error: { message: "chat does not exist" } }), {
+              status: 400,
+            }),
+        ),
+      });
+      service.setSdk(sdk);
+      await expect(
+        service.sendAttachment({
+          chatGuid: "iMessage;-;+15551234567",
+          attachmentUrl: "https://cdn.example.com/x.jpg",
+        }),
+      ).rejects.toMatchObject({ httpStatus: 400, stage: "attachment" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("retries with chat/new when Photon reports the chat does not exist", async () => {
