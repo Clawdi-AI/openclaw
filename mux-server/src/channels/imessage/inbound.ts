@@ -426,6 +426,11 @@ export function createIMessageInboundRuntime(deps: {
             error: errorString(error),
           });
         }
+        // After the text pairing notice lands, send the Clawdi vCard so the
+        // user's Messages app offers "Add to Contacts" in-thread — avoids
+        // a forever-anonymous "+1415…" header bar. Best-effort: failures
+        // are logged inside sendPairingContact, not rethrown here.
+        await deps.apiService.sendPairingContact({ chatGuid });
         deps.log({
           type: "imessage_pairing_token_claimed",
           tenantId: claimed.tenantId,

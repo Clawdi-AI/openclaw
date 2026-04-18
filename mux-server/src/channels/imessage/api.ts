@@ -182,10 +182,17 @@ export function createIMessageApiService(deps: {
   loadSdkFactory: () => Promise<
     (opts: { serverUrl: string; apiKey?: string; logLevel?: string }) => unknown
   >;
+  // CDN URL of the Clawdi vCard (e.g. https://assets.clawdi.ai/clawdi.vcf).
+  // Fetched once on first pairing claim, cached for the process lifetime.
+  // Empty → pairing vCard send is skipped silently (pairing text notice
+  // still lands).
+  pairingContactVcardUrl?: string;
   // Tests override; production falls back to global fetch.
   downloadAttachmentFromUrl?: AttachmentDownloader;
   uploadAttachmentRequest?: AttachmentUploader;
 }) {
+  const pairingContactVcardUrl = deps.pairingContactVcardUrl?.trim() || null;
+  let pairingContactCache: { body: Buffer; fileName: string } | null = null;
   const health: IMessageHealth = {
     connected: false,
     loopStartedAtMs: null,
@@ -364,6 +371,32 @@ export function createIMessageApiService(deps: {
     const nameExt = path.extname(rawName);
     const resolvedExt = nameExt || extensionForContentType(download.contentType) || ".bin";
     const fileName = nameExt ? rawName : `${rawName}${resolvedExt}`;
+
+    return await postBytesAsAttachment({
+      chatGuid: params.chatGuid,
+      body: download.body,
+      contentType,
+      fileName,
+      selectedMessageGuid: params.selectedMessageGuid,
+    });
+  }
+
+  // Shared helper: POST raw bytes as an iMessage multipart attachment.
+  // Used by sendAttachment (URL-downloaded media) and sendPairingContact
+  // (locally-built vCard). Preserves SDK serial-send semantics, handles
+  // the chat-not-exist retry, and fails closed on upstream protocol
+  // corruption.
+  async function postBytesAsAttachment(params: {
+    chatGuid: string;
+    body: Buffer;
+    contentType: string;
+    fileName: string;
+    selectedMessageGuid?: string;
+  }): Promise<{ guid: string | null }> {
+    const current = sdk;
+    if (!current) {
+      throw new Error("iMessage SDK not connected");
+    }
     const tempGuid = randomUUID();
 
     const postUpload = async (): Promise<Response> => {
@@ -372,12 +405,15 @@ export function createIMessageApiService(deps: {
       // Node's Buffer.buffer is strictly ArrayBuffer (never a
       // SharedArrayBuffer), but TS's widened types can't prove that to the
       // Blob constructor. Copy the bytes into a plain ArrayBuffer so the
-      // Blob constructor accepts the part without a cast. The copy is
-      // unavoidable for strict typing but stays single-pass.
-      const bodyBuffer = new ArrayBuffer(download.body.byteLength);
-      new Uint8Array(bodyBuffer).set(download.body);
-      form.append("attachment", new Blob([bodyBuffer], { type: contentType }), fileName);
-      form.append("name", fileName);
+      // Blob constructor accepts the part without a cast. Single-pass.
+      const bodyBuffer = new ArrayBuffer(params.body.byteLength);
+      new Uint8Array(bodyBuffer).set(params.body);
+      form.append(
+        "attachment",
+        new Blob([bodyBuffer], { type: params.contentType }),
+        params.fileName,
+      );
+      form.append("name", params.fileName);
       form.append("tempGuid", tempGuid);
       if (params.selectedMessageGuid) {
         form.append("selectedMessageGuid", params.selectedMessageGuid);
@@ -393,15 +429,15 @@ export function createIMessageApiService(deps: {
       return await request({ url, headers, body: form });
     };
 
-    // Wrap the entire send in the SDK's serial queue so ordered sends from
-    // the same instance stay in caller order — matches SDK semantics.
+    // Wrap in the SDK's serial queue so ordered sends (text → attachment →
+    // text) stay in caller order at Photon. iMessage's own delivery pipeline
+    // can still reorder at the receiver (image takes longer via APNS) but
+    // that's platform-level, not ours.
     return await current.enqueueSend(async () => {
       let response = await postUpload();
       let responseText = await response.text();
 
-      // Mirror SDK's chat-not-exist retry: if Photon rejects the upload
-      // because there's no existing conversation for this address, create
-      // the chat via POST /api/v1/chat/new and retry once.
+      // Mirror SDK's chat-not-exist retry.
       if (!response.ok && isChatNotExistResponse(responseText)) {
         const parsed = parseChatGuid(params.chatGuid);
         if (parsed?.address) {
@@ -439,10 +475,7 @@ export function createIMessageApiService(deps: {
         });
       }
 
-      // Fail closed on protocol corruption. The SDK unconditionally returns
-      // response.data.data (dist/index.js:235-238); an empty body, invalid
-      // JSON, or data: null would all have thrown on a naive property read
-      // and we don't want to silently succeed with guid=null instead.
+      // Fail closed on protocol corruption.
       let parsed: unknown;
       try {
         parsed = responseText ? JSON.parse(responseText) : null;
@@ -476,6 +509,69 @@ export function createIMessageApiService(deps: {
       const guid = (data as { guid?: unknown }).guid;
       return { guid: typeof guid === "string" ? guid : null };
     });
+  }
+
+  // Sends the Clawdi vCard so the user's Messages app offers "Add Contact"
+  // right in-thread after pairing — avoids a forever-anonymous "+1415…"
+  // header bar.
+  //
+  // Source of truth for the vCard is a static file on assets.clawdi.ai
+  // (regenerated via scripts/generate-clawdi-vcard.py and re-uploaded when
+  // the number or logo changes — roughly never). Fetch once, cache for the
+  // process lifetime. Best-effort: failures log + swallow so a CDN blip
+  // cannot block the pairing text notice the user depends on.
+  async function sendPairingContact(params: { chatGuid: string }): Promise<void> {
+    if (!pairingContactVcardUrl) {
+      return;
+    }
+    if (!pairingContactCache) {
+      try {
+        const response = await fetch(pairingContactVcardUrl, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) {
+          deps.log({
+            type: "imessage_pairing_vcard_fetch_failed",
+            chatGuid: params.chatGuid,
+            url: pairingContactVcardUrl,
+            status: response.status,
+          });
+          return;
+        }
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length === 0) {
+          deps.log({
+            type: "imessage_pairing_vcard_fetch_failed",
+            chatGuid: params.chatGuid,
+            reason: "empty body",
+          });
+          return;
+        }
+        pairingContactCache = { body: bytes, fileName: "clawdi.vcf" };
+      } catch (error) {
+        deps.log({
+          type: "imessage_pairing_vcard_fetch_failed",
+          chatGuid: params.chatGuid,
+          url: pairingContactVcardUrl,
+          error: String(error),
+        });
+        return;
+      }
+    }
+    try {
+      await postBytesAsAttachment({
+        chatGuid: params.chatGuid,
+        body: pairingContactCache.body,
+        contentType: "text/vcard",
+        fileName: pairingContactCache.fileName,
+      });
+    } catch (error) {
+      deps.log({
+        type: "imessage_pairing_vcard_send_failed",
+        chatGuid: params.chatGuid,
+        error: String(error),
+      });
+    }
   }
 
   async function createChat(params: { address: string; service?: string }): Promise<void> {
@@ -556,6 +652,7 @@ export function createIMessageApiService(deps: {
     downloadAttachment,
     downloadAttachmentWith,
     sendPairingNotice,
+    sendPairingContact,
   };
 }
 
