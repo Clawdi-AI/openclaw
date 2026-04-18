@@ -2,8 +2,6 @@
 // SDK types are declared manually because the package does not ship typings.
 
 import { randomUUID } from "node:crypto";
-import { unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import mimeTypes from "mime-types";
 
@@ -101,14 +99,21 @@ type AttachmentDownloader = (url: string) => Promise<{
   finalUrl?: string;
 }>;
 
-// Overrides where `mime-types` (via mime-db) would pick a canonical extension
-// that isn't what iOS / the user expects. Every entry here is strictly more
-// readable than the mime-db default; leave out types where mime-db is already
-// right so the two sources of truth can't silently drift.
+// Override for tests: stub the POST /api/v1/message/attachment upload.
+type AttachmentUploader = (args: {
+  url: string;
+  headers: Record<string, string>;
+  body: FormData;
+}) => Promise<Response>;
+
+// mime-db canonical extensions that are technically correct but user-hostile
+// or iOS-unfriendly. Keep this intentionally tiny — every override is a
+// deliberate deviation from the db that form-data / mime-db would otherwise
+// pick automatically, backed by a specific reason.
 //
-//   image/pjpeg       mime-db → jfif       (we want .jpg)
-//   video/quicktime   mime-db → qt         (we want .mov)
-//   audio/mpeg        mime-db → mpga       (we want .mp3)
+//   image/pjpeg     → mime-db gives .jfif  (we want .jpg for iOS)
+//   video/quicktime → mime-db gives .qt    (we want .mov for iOS)
+//   audio/mpeg      → mime-db gives .mpga  (we want .mp3 for iOS)
 const MIME_EXTENSION_OVERRIDE: Readonly<Record<string, string>> = {
   "image/pjpeg": ".jpg",
   "video/quicktime": ".mov",
@@ -119,20 +124,45 @@ function extensionForContentType(contentType: string | null | undefined): string
   if (!contentType) {
     return null;
   }
-  // Strip `; charset=...` etc before lookup.
+  // Strip `; charset=...` parameters before lookup.
   const base = contentType.split(";")[0]?.trim().toLowerCase();
   if (!base) {
     return null;
   }
-  const override = MIME_EXTENSION_OVERRIDE[base];
-  if (override) {
-    return override;
+  if (MIME_EXTENSION_OVERRIDE[base]) {
+    return MIME_EXTENSION_OVERRIDE[base];
   }
-  // mime-types shares mime-db with form-data's inference, so whatever
-  // extension it returns here will round-trip to the same MIME when
-  // form-data's upload path re-infers from the filename.
   const ext = mimeTypes.extension(base);
   return ext ? `.${ext}` : null;
+}
+
+// Parse `{service};-;{address}` like `iMessage;-;+14155551234` or
+// `any;-;+14155551234`. Mirrors the SDK's internal extractAddress /
+// extractService so our chat-not-exist retry matches SDK behaviour.
+function parseChatGuid(chatGuid: string): { address: string; service?: string } | null {
+  const parts = chatGuid.split(";-;");
+  if (parts.length !== 2 || !parts[1]) {
+    return null;
+  }
+  const address = parts[1];
+  const prefix = chatGuid.split(";")[0]?.toLowerCase() ?? "";
+  let service: string | undefined;
+  if (prefix === "imessage") {
+    service = "iMessage";
+  } else if (prefix === "sms") {
+    service = "SMS";
+  }
+  return { address, service };
+}
+
+function isChatNotExistResponse(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body);
+    const message = (parsed?.error?.message || parsed?.message || "").toString().toLowerCase();
+    return message.includes("chat does not exist") || message.includes("chat not found");
+  } catch {
+    return false;
+  }
 }
 
 export function createIMessageApiService(deps: {
@@ -142,8 +172,9 @@ export function createIMessageApiService(deps: {
   loadSdkFactory: () => Promise<
     (opts: { serverUrl: string; apiKey?: string; logLevel?: string }) => unknown
   >;
-  // Tests override this; production falls back to global fetch.
+  // Tests override; production falls back to global fetch.
   downloadAttachmentFromUrl?: AttachmentDownloader;
+  uploadAttachmentRequest?: AttachmentUploader;
 }) {
   const health: IMessageHealth = {
     connected: false,
@@ -236,19 +267,28 @@ export function createIMessageApiService(deps: {
     }
   }
 
-  // Photon SDK's sendAttachment internally does `fs/promises.readFile(filePath)`
-  // (see @photon-ai/advanced-imessage-kit@1.14.3 dist/index.js:213). Passing an
-  // https:// URL therefore crashes with ENOENT. We download the URL to a temp
-  // file, hand that path to the SDK, and unlink on the way out.
+  // Posts directly to Photon's POST /api/v1/message/attachment endpoint
+  // instead of going through the SDK's attachments.sendAttachment method.
+  //
+  // Why bypass the SDK:
+  //   The SDK helper does `readFile(options.filePath)` then
+  //   `form.append("attachment", buf, fileName)` — and exposes no way to pass
+  //   a Content-Type. `form.append` with a bare filename falls back to MIME
+  //   inference from the file extension; when an inbound URL like
+  //   https://picsum.photos/1024 gives us JPEG bytes but no path extension,
+  //   the upload goes out as application/octet-stream. Photon stores that
+  //   upload with uti/mimeType=null, and iOS Messages renders it as a
+  //   generic file bubble instead of an inline image.
+  //
+  //   Building the multipart ourselves lets us pass the Content-Type we
+  //   already have from the HTTP response through directly, so filename can
+  //   stay exactly as the upstream source provided (no suffix-mangling), the
+  //   MIME stays whatever the source said, and iOS renders inline.
   async function sendAttachment(params: {
     chatGuid: string;
     attachmentUrl: string;
     selectedMessageGuid?: string;
   }): Promise<{ guid: string | null }> {
-    const current = sdk;
-    if (!current) {
-      throw new Error("iMessage SDK not connected");
-    }
     if (!params.attachmentUrl.toLowerCase().startsWith("https://")) {
       deps.log({
         type: "imessage_outbound_media_rejected",
@@ -281,55 +321,114 @@ export function createIMessageApiService(deps: {
         : new Error("iMessage attachment download failed", { cause: error });
     }
 
-    // Prefer the FINAL URL (post-redirect) over the original one. picsum
-    // does `/1024 → fastly.picsum.photos/id/.../1024.jpg?hmac=...` — the
-    // redirect target carries the real extension, the source URL does not.
+    // Prefer the FINAL URL (post-redirect) basename — picsum /1024
+    // redirects to fastly.picsum.photos/.../1024.jpg, which carries the
+    // extension the source URL lacked.
     const urlBaseName = safeBaseNameFromUrl(download.finalUrl ?? params.attachmentUrl);
     const rawName = download.fileName ?? urlBaseName ?? "attachment";
-    const rawExt = path.extname(rawName);
-    // If the URL / content-disposition already gave an extension, keep it.
-    // Otherwise infer from Content-Type. iMessage can't render attachments
-    // with an unknown MIME — iOS silently drops them into a generic file
-    // bubble, no preview, no inline playback — so we fall back to ".bin"
-    // only as a last resort (matches the rest of the codebase's convention
-    // of treating extensionless blobs as octet-stream).
-    const resolvedExt = rawExt || extensionForContentType(download.contentType) || ".bin";
-    const baseWithoutExt = rawExt ? rawName.slice(0, -rawExt.length) : rawName;
-    const fileName = `${baseWithoutExt}${resolvedExt}`;
-    const tempPath = path.join(tmpdir(), `imessage-${randomUUID()}${resolvedExt}`);
+    const contentType = download.contentType?.split(";")[0]?.trim() || "application/octet-stream";
 
+    // Photon's server decides UTI/MIME purely from the filename extension —
+    // the multipart part's Content-Type header is ignored (empirically
+    // confirmed: filename="1024" + blob type="image/jpeg" → uti/mimeType
+    // both null; filename="1024.jpg" + blob type="octet-stream" → public.jpeg).
+    // So when the filename has no extension we must synthesize one from the
+    // Content-Type we got from the source. Without this iOS renders a
+    // generic file bubble instead of an inline image.
+    const nameExt = path.extname(rawName);
+    const resolvedExt = nameExt || extensionForContentType(download.contentType) || ".bin";
+    const fileName = nameExt ? rawName : `${rawName}${resolvedExt}`;
+    const tempGuid = randomUUID();
+
+    const postUpload = async (): Promise<Response> => {
+      // Native FormData + Blob so Content-Type comes from blob.type directly.
+      // Bypasses form-data's filename-extension inference entirely.
+      const form = new FormData();
+      form.append("chatGuid", params.chatGuid);
+      form.append(
+        "attachment",
+        new Blob([new Uint8Array(download.body)], { type: contentType }),
+        fileName,
+      );
+      form.append("name", fileName);
+      form.append("tempGuid", tempGuid);
+      if (params.selectedMessageGuid) {
+        form.append("selectedMessageGuid", params.selectedMessageGuid);
+      }
+      const headers: Record<string, string> = {};
+      if (deps.apiKey) {
+        headers["X-API-Key"] = deps.apiKey;
+      }
+      const url = `${deps.serverUrl.replace(/\/+$/, "")}/api/v1/message/attachment`;
+      const request =
+        deps.uploadAttachmentRequest ??
+        (async ({ url, headers, body }) => fetch(url, { method: "POST", headers, body }));
+      return await request({ url, headers, body: form });
+    };
+
+    let response = await postUpload();
+    let responseText = await response.text();
+
+    // Mirror the SDK's chat-not-exist retry: if Photon rejects the upload
+    // because there's no existing conversation for this address, create the
+    // chat via POST /api/v1/chat/new and retry once. Pairing flows already
+    // create the chat (user SMSes the Photon number first), so this path
+    // rarely fires, but preserving it keeps behaviour parity with the SDK.
+    if (!response.ok && isChatNotExistResponse(responseText)) {
+      const parsed = parseChatGuid(params.chatGuid);
+      if (parsed?.address) {
+        await createChat({
+          address: parsed.address,
+          service: parsed.service,
+        });
+        response = await postUpload();
+        responseText = await response.text();
+      }
+    }
+
+    if (!response.ok) {
+      deps.log({
+        type: "imessage_send_attachment_error",
+        chatGuid: params.chatGuid,
+        httpStatus: response.status,
+        body: responseText.slice(0, 300),
+      });
+      throw new IMessagePhotonError("iMessage attachment send failed", {
+        httpStatus: response.status,
+        stage: "attachment",
+        cause: responseText.slice(0, 300),
+      });
+    }
+
+    let parsed: unknown;
     try {
-      await writeFile(tempPath, download.body);
-      try {
-        const result = await current.attachments.sendAttachment({
-          chatGuid: params.chatGuid,
-          filePath: tempPath,
-          fileName,
-          ...(params.selectedMessageGuid
-            ? { selectedMessageGuid: params.selectedMessageGuid }
-            : {}),
-        });
-        return { guid: typeof result?.guid === "string" ? result.guid : null };
-      } catch (error) {
-        const httpStatus = extractHttpStatus(error);
-        deps.log({
-          type: "imessage_send_attachment_error",
-          chatGuid: params.chatGuid,
-          error: String(error),
-          ...(httpStatus !== null ? { httpStatus } : {}),
-        });
-        throw new IMessagePhotonError("iMessage attachment send failed", {
-          httpStatus,
-          stage: "attachment",
-          cause: error,
-        });
-      }
-    } finally {
-      try {
-        await unlink(tempPath);
-      } catch {
-        // Best-effort cleanup; missing file is fine (write never landed).
-      }
+      parsed = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      parsed = null;
+    }
+    const guid = (parsed as { data?: { guid?: unknown } })?.data?.guid;
+    return { guid: typeof guid === "string" ? guid : null };
+  }
+
+  async function createChat(params: { address: string; service?: string }): Promise<void> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (deps.apiKey) {
+      headers["X-API-Key"] = deps.apiKey;
+    }
+    const url = `${deps.serverUrl.replace(/\/+$/, "")}/api/v1/chat/new`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        addresses: [params.address],
+        ...(params.service ? { service: params.service } : {}),
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`iMessage chat/new failed: ${response.status} ${body.slice(0, 200)}`);
     }
   }
 
