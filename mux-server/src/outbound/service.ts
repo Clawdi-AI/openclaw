@@ -920,13 +920,12 @@ export function createOutboundService(deps: {
             ? text
             : "";
       const imessageRawSingleMedia = readNonEmptyString(imessageRawSend?.mediaUrl);
-      const imessageRawMediaList =
-        Array.isArray(imessageRawSend?.mediaUrls) && imessageRawSend
-          ? (imessageRawSend.mediaUrls as unknown[])
-              .filter((item): item is string => typeof item === "string")
-              .map((item) => item.trim())
-              .filter((item) => item.length > 0)
-          : mediaUrls;
+      const imessageRawMediaList = Array.isArray(imessageRawSend?.mediaUrls)
+        ? (imessageRawSend.mediaUrls as unknown[])
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0)
+        : mediaUrls;
       const imessageMediaUrls = (() => {
         const ordered = [
           ...(imessageRawSingleMedia ? [imessageRawSingleMedia] : []),
@@ -959,6 +958,14 @@ export function createOutboundService(deps: {
       // Buffer.from(..., "base64") silently drops invalid characters and
       // returns partial bytes rather than throwing — so a pre-decode regex
       // plus a length%4 check is the actual guard against malformed input.
+      // URL-safe base64 (`-_` instead of `+/`) is INTENTIONALLY rejected
+      // here: Buffer.from would silently accept it and decode to the same
+      // bytes, but forcing callers to send standard base64 keeps the
+      // charset contract explicit and avoids any downstream tool that
+      // hashes the raw string getting confused by encoding drift.
+      // Regex is linear-time on input length (no nested quantifiers, no
+      // backreferences) so there is no ReDoS risk from attacker-controlled
+      // payload size.
       const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
       const imessageInlineAttachments: InlineAttachment[] = [];
       let inlineAttachmentDecodeError: string | null = null;
@@ -1012,7 +1019,12 @@ export function createOutboundService(deps: {
             inlineAttachmentDecodeError = `attachment ${filename} decoded to zero bytes`;
             break;
           }
-          cumulativeBytes += decoded.length;
+          // Accumulate using the pre-decode estimate so the cumulative cap
+          // accounting stays in a single unit with the per-attachment check
+          // above. For valid standard base64 `decoded.length` equals the
+          // estimate; mixing the two would drift if a future change
+          // relaxed the charset guard.
+          cumulativeBytes += estimatedDecodedBytes;
           imessageInlineAttachments.push({ filename, contentType, body: decoded });
         }
       }
@@ -1156,6 +1168,11 @@ export function createOutboundService(deps: {
       }
 
       if (providerMessageIds.length === 0) {
+        // Invariant guard: the pre-send validation above returns 400 when
+        // text + URL + inline attachments are all empty, so the send
+        // loops always execute at least one branch and push at least
+        // "unknown". Kept as a defense-in-depth 502 in case a future
+        // refactor reorders the branches and breaks the invariant.
         return {
           statusCode: 502,
           bodyText: JSON.stringify({ ok: false, error: "imessage send returned no messageId" }),

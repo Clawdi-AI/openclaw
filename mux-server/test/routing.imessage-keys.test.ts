@@ -9,20 +9,25 @@ describe("buildIMessageRawSend", () => {
   });
 
   test("includes attachments when provided", () => {
+    // Fixture is a properly-padded 4-char base64 string so it survives
+    // the outbound service's pre-decode validation (length % 4 === 0 +
+    // charset regex). "AAAA" decodes to 3 zero bytes — valid standard
+    // base64, will not be rejected if this payload is ever piped through
+    // the full service path in an integration test.
     const env = buildIMessageRawSend({
       text: "",
-      attachments: [{ filename: "pic.jpg", contentType: "image/jpeg", dataBase64: "AAA" }],
+      attachments: [{ filename: "pic.jpg", contentType: "image/jpeg", dataBase64: "AAAA" }],
     });
     expect(env.send.attachments).toEqual([
-      { filename: "pic.jpg", contentType: "image/jpeg", dataBase64: "AAA" },
+      { filename: "pic.jpg", contentType: "image/jpeg", dataBase64: "AAAA" },
     ]);
   });
 
-  test("mediaUrl and attachments can coexist", () => {
+  test("mediaUrl and attachments can coexist in the envelope", () => {
     const env = buildIMessageRawSend({
       text: "both",
       mediaUrl: "https://example/image.png",
-      attachments: [{ filename: "x.pdf", contentType: "application/pdf", dataBase64: "BB" }],
+      attachments: [{ filename: "x.pdf", contentType: "application/pdf", dataBase64: "AAAA" }],
     });
     expect(env.send.mediaUrl).toBe("https://example/image.png");
     expect(env.send.attachments).toHaveLength(1);
