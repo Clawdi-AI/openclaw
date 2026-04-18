@@ -9,6 +9,25 @@ function readEnvString(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+// Prefer /data (docker volume convention) when it exists and is writable,
+// so `docker restart` without an explicit MUX_DB_PATH env doesn't silently
+// wipe bindings. Fall back to cwd for local dev.
+function defaultDbPath(cwd: string): string {
+  try {
+    const dataDir = "/data";
+    const stat = fs.statSync(dataDir);
+    if (stat.isDirectory()) {
+      // Ensure a sub-directory exists so the sqlite file plus its
+      // -wal / -shm siblings don't race with other /data tenants.
+      fs.mkdirSync(path.join(dataDir, "mux"), { recursive: true });
+      return path.join(dataDir, "mux", "mux-server.sqlite");
+    }
+  } catch {
+    // /data doesn't exist or isn't accessible — fall through to dev path.
+  }
+  return path.resolve(cwd, "mux-server", "data", "mux-server.sqlite");
+}
+
 export type NoticesConfigEntry = { text: string | null };
 export type NoticesConfig = Partial<{
   clawdiIntro: NoticesConfigEntry;
@@ -51,7 +70,14 @@ export function readRuntimeConfig(env: NodeJS.ProcessEnv, cwd = process.cwd()): 
     port,
     muxPublicUrl: (env.MUX_PUBLIC_URL || `http://${host}:${port}`).replace(/\/+$/, ""),
     logPath: env.MUX_LOG_PATH || path.resolve(cwd, "mux-server", "logs", "mux-server.log"),
-    dbPath: env.MUX_DB_PATH || path.resolve(cwd, "mux-server", "data", "mux-server.sqlite"),
+    // Default to the docker-convention persistent mount point when it
+    // exists, not a cwd-relative path. Previous default buried the
+    // SQLite inside the container's ephemeral filesystem; `docker
+    // restart mux-server` wiped every binding + session route. Ops now
+    // only need a `mux_data:/data` volume (common dstack / docker
+    // pattern) and persistence is automatic — no forgotten MUX_DB_PATH
+    // env var required.
+    dbPath: env.MUX_DB_PATH || defaultDbPath(cwd),
     idempotencyTtlMs: Number(env.MUX_IDEMPOTENCY_TTL_MS || 10 * 60 * 1000),
     telegramApiBaseUrl: (env.MUX_TELEGRAM_API_BASE_URL || "https://api.telegram.org").replace(
       /\/+$/,
