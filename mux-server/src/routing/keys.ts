@@ -389,17 +389,30 @@ export function listIMessageOutboundRouteKeys(params: {
   // A chatGuid containing ";+;" is a group chat in iMessage.
   const isGroupChatGuid = chatGuid.includes(";+;");
   const chatType: "direct" | "group" = isGroupChatGuid ? "group" : "direct";
-  // Bindings created via pairing store the full BlueBubbles chat_guid
-  // (e.g., "any;-;+15551234567"), but agents routinely send bare handles
-  // as `to` ("imessage:+15551234567" → "+15551234567"). Target-first
-  // lookup would then miss the binding. Probe the bare handle first for
-  // backwards compat, then fall back to the canonical `any;-;${handle}`
-  // DM chat_guid. Only synthesize the fallback for 1:1 targets — groups
-  // are always delivered via the full chat_guid.
+  // Bindings created via pairing store the full BlueBubbles chat_guid. The
+  // service-prefix BlueBubbles emits depends on how the message arrived:
+  //   - "any;-;+...": service-agnostic DM (most common in the Photon setup)
+  //   - "iMessage;-;+...": explicit iMessage delivery
+  //   - "SMS;-;+..." : fallback SMS delivery (green bubble)
+  // Agents normalize their outbound target to the bare handle
+  // ("imessage:+15551234567" → "+15551234567"), so target-first lookup
+  // would miss the binding without a fallback synthesis. Generate all
+  // three service-prefix variants for 1:1 targets; tenant scoping in the
+  // downstream resolveIMessageBoundRoute prevents cross-tenant collision
+  // (lookup filters by tenantId + exact route_key). Only direct targets
+  // get the fallback — groups are always delivered via the full ";+;"
+  // chat_guid the creator supplied.
   const isAlreadyChatGuid = chatGuid.includes(";-;") || isGroupChatGuid;
   const candidates: string[] = [buildIMessageRouteKey({ chatGuid, chatType })];
   if (!isAlreadyChatGuid && chatType === "direct") {
-    candidates.push(buildIMessageRouteKey({ chatGuid: `any;-;${chatGuid}`, chatType: "direct" }));
+    for (const servicePrefix of ["any", "iMessage", "SMS"] as const) {
+      candidates.push(
+        buildIMessageRouteKey({
+          chatGuid: `${servicePrefix};-;${chatGuid}`,
+          chatType: "direct",
+        }),
+      );
+    }
   }
   return uniqueRouteKeys(candidates);
 }

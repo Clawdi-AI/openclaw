@@ -56,20 +56,38 @@ describe("listIMessageOutboundRouteKeys", () => {
   // doesn't know to expand to the BlueBubbles chat_guid format. Without
   // this fallback every outbound hits 403 ROUTE_NOT_BOUND because pairing
   // stored "imessage:direct:any;-;+15551234567" as the binding key.
-  test("bare phone yields both plain and any;-; chat_guid variants", () => {
+  test("bare phone yields plain + any;-;/iMessage;-;/SMS;-; chat_guid variants", () => {
     expect(
       listIMessageOutboundRouteKeys({
         requestedTo: "imessage:+15551234567",
       }),
-    ).toEqual(["imessage:direct:+15551234567", "imessage:direct:any;-;+15551234567"]);
+    ).toEqual([
+      "imessage:direct:+15551234567",
+      "imessage:direct:any;-;+15551234567",
+      "imessage:direct:iMessage;-;+15551234567",
+      "imessage:direct:SMS;-;+15551234567",
+    ]);
   });
 
-  test("bare email yields both plain and any;-; chat_guid variants", () => {
+  test("bare email yields plain + any;-;/iMessage;-;/SMS;-; chat_guid variants", () => {
     expect(
       listIMessageOutboundRouteKeys({
         requestedTo: "user@example.com",
       }),
-    ).toEqual(["imessage:direct:user@example.com", "imessage:direct:any;-;user@example.com"]);
+    ).toEqual([
+      "imessage:direct:user@example.com",
+      "imessage:direct:any;-;user@example.com",
+      "imessage:direct:iMessage;-;user@example.com",
+      "imessage:direct:SMS;-;user@example.com",
+    ]);
+  });
+
+  test("full chat_guid with iMessage service prefix stays canonical", () => {
+    expect(
+      listIMessageOutboundRouteKeys({
+        requestedTo: "iMessage;-;+15551234567",
+      }),
+    ).toEqual(["imessage:direct:iMessage;-;+15551234567"]);
   });
 
   test("mismatched outer and inner guid returns empty", () => {

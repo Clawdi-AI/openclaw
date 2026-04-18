@@ -954,17 +954,24 @@ export function createOutboundService(deps: {
         contentType: string;
         body: Buffer;
       };
+
+      // Base64 charset: standard alphabet + 0-2 trailing '=' padding. Node's
+      // Buffer.from(..., "base64") silently drops invalid characters and
+      // returns partial bytes rather than throwing — so a pre-decode regex
+      // plus a length%4 check is the actual guard against malformed input.
+      const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
       const imessageInlineAttachments: InlineAttachment[] = [];
       let inlineAttachmentDecodeError: string | null = null;
       const rawAttachments = imessageRawSend?.attachments;
       if (Array.isArray(rawAttachments)) {
+        const maxBytes = deps.imessageAttachmentMaxBytes;
         let cumulativeBytes = 0;
         for (const item of rawAttachments) {
           if (!item || typeof item !== "object") {
             inlineAttachmentDecodeError = "raw.imessage.send.attachments entries must be objects";
             break;
           }
-          const entry = item as Record<string, unknown>;
+          const entry = asRecord(item) ?? {};
           const filename = readNonEmptyString(entry.filename);
           const contentType = readNonEmptyString(entry.contentType);
           const dataBase64 = readNonEmptyString(entry.dataBase64);
@@ -973,26 +980,39 @@ export function createOutboundService(deps: {
               "raw.imessage.send.attachments entry missing filename/contentType/dataBase64";
             break;
           }
-          let decoded: Buffer;
-          try {
-            decoded = Buffer.from(dataBase64, "base64");
-          } catch {
-            inlineAttachmentDecodeError = `attachment ${filename} base64 decode failed`;
+          if (dataBase64.length % 4 !== 0 || !BASE64_PATTERN.test(dataBase64)) {
+            inlineAttachmentDecodeError = `attachment ${filename} is not valid base64`;
             break;
           }
+          // Enforce caps BEFORE Buffer.from allocates memory. Base64 decodes
+          // to ~3/4 of its source length (minus '=' padding), so this is a
+          // tight upper bound — never under-counts, never allocates past the
+          // limit. Protects against a runtime-token holder shipping a single
+          // oversized payload, and against many smaller payloads that would
+          // add up to the cap only after all buffers are already allocated.
+          const paddingMatch = dataBase64.match(/=+$/);
+          const paddingChars = paddingMatch ? paddingMatch[0].length : 0;
+          const estimatedDecodedBytes = Math.floor((dataBase64.length * 3) / 4) - paddingChars;
+          if (estimatedDecodedBytes <= 0) {
+            inlineAttachmentDecodeError = `attachment ${filename} decoded to zero bytes`;
+            break;
+          }
+          if (estimatedDecodedBytes > maxBytes) {
+            inlineAttachmentDecodeError = `attachment ${filename} exceeds ${maxBytes} bytes (estimated ${estimatedDecodedBytes})`;
+            break;
+          }
+          if (cumulativeBytes + estimatedDecodedBytes > maxBytes) {
+            inlineAttachmentDecodeError = `cumulative attachment size exceeds ${maxBytes} bytes`;
+            break;
+          }
+          const decoded = Buffer.from(dataBase64, "base64");
+          // Post-decode length MUST match estimate now that the charset is
+          // validated. Defensive guard in case Node changes behavior.
           if (decoded.length === 0) {
             inlineAttachmentDecodeError = `attachment ${filename} decoded to zero bytes`;
             break;
           }
-          if (decoded.length > deps.imessageAttachmentMaxBytes) {
-            inlineAttachmentDecodeError = `attachment ${filename} exceeds ${deps.imessageAttachmentMaxBytes} bytes (got ${decoded.length})`;
-            break;
-          }
           cumulativeBytes += decoded.length;
-          if (cumulativeBytes > deps.imessageAttachmentMaxBytes) {
-            inlineAttachmentDecodeError = `cumulative attachment size exceeds ${deps.imessageAttachmentMaxBytes} bytes`;
-            break;
-          }
           imessageInlineAttachments.push({ filename, contentType, body: decoded });
         }
       }
@@ -1003,6 +1023,20 @@ export function createOutboundService(deps: {
           bodyText: JSON.stringify({
             ok: false,
             error: inlineAttachmentDecodeError,
+          }),
+        };
+      }
+
+      // If a caller ships the same logical attachment under both `mediaUrl`
+      // and `attachments[]`, we'd deliver it twice. Reject the ambiguous
+      // payload loudly rather than guess which path to trust.
+      if (imessageMediaUrls.length > 0 && imessageInlineAttachments.length > 0) {
+        return {
+          statusCode: 400,
+          bodyText: JSON.stringify({
+            ok: false,
+            error:
+              "imessage outbound cannot combine mediaUrl/mediaUrls with raw.imessage.send.attachments; pick one",
           }),
         };
       }
@@ -1082,12 +1116,12 @@ export function createOutboundService(deps: {
           const sent = await deps.imessageApiService.sendMessage({
             chatGuid,
             message: imessageText,
-            // Only thread the text send if no media preceded it — otherwise
-            // the first attachment already carried the reply context and we
-            // do not want a second quoted-reply bubble on iOS.
-            ...(replyToId && imessageMediaUrls.length === 0
-              ? { selectedMessageGuid: replyToId }
-              : {}),
+            // Only thread the text send if NOTHING landed before it —
+            // otherwise the first attachment (URL or inline) already
+            // carried the reply context and a second selectedMessageGuid
+            // would render a duplicate quoted-reply bubble on iOS.
+            // sendIndex counts URL + inline attachments landed so far.
+            ...(replyToId && sendIndex === 0 ? { selectedMessageGuid: replyToId } : {}),
           });
           if (sent.guid) {
             providerMessageIds.push(sent.guid);
