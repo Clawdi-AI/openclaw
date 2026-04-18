@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import mimeTypes from "mime-types";
 
 export type IMessageSdkInstance = {
   messages: {
@@ -93,52 +94,45 @@ export function isIMessageSdkInstance(value: unknown): value is IMessageSdkInsta
 }
 
 // Override for tests: inject a pre-built buffer instead of hitting the network.
-type AttachmentDownloader = (
-  url: string,
-) => Promise<{ body: Buffer; fileName?: string; contentType?: string }>;
+type AttachmentDownloader = (url: string) => Promise<{
+  body: Buffer;
+  fileName?: string;
+  contentType?: string;
+  finalUrl?: string;
+}>;
 
-// Minimal MIME → extension table for the attachments iOS actually renders inline.
-// iMessage silently falls back to a generic file bubble (no preview, no inline
-// playback) when the upload extension is unknown — so URLs like
-// https://picsum.photos/1024 (no extension, served as image/jpeg) need the
-// extension derived from Content-Type or the recipient gets a `.bin` file.
-const MIME_EXTENSION_MAP: Readonly<Record<string, string>> = {
-  "image/jpeg": ".jpg",
-  "image/jpg": ".jpg",
+// Overrides where `mime-types` (via mime-db) would pick a canonical extension
+// that isn't what iOS / the user expects. Every entry here is strictly more
+// readable than the mime-db default; leave out types where mime-db is already
+// right so the two sources of truth can't silently drift.
+//
+//   image/pjpeg       mime-db → jfif       (we want .jpg)
+//   video/quicktime   mime-db → qt         (we want .mov)
+//   audio/mpeg        mime-db → mpga       (we want .mp3)
+const MIME_EXTENSION_OVERRIDE: Readonly<Record<string, string>> = {
   "image/pjpeg": ".jpg",
-  "image/png": ".png",
-  "image/gif": ".gif",
-  "image/webp": ".webp",
-  "image/heic": ".heic",
-  "image/heif": ".heif",
-  "image/svg+xml": ".svg",
-  "image/bmp": ".bmp",
-  "image/tiff": ".tiff",
-  "video/mp4": ".mp4",
   "video/quicktime": ".mov",
-  "video/webm": ".webm",
-  "video/3gpp": ".3gp",
-  "audio/mp4": ".m4a",
   "audio/mpeg": ".mp3",
-  "audio/ogg": ".ogg",
-  "audio/wav": ".wav",
-  "audio/webm": ".webm",
-  "application/pdf": ".pdf",
-  "application/zip": ".zip",
-  "application/json": ".json",
-  "text/plain": ".txt",
-  "text/html": ".html",
 };
 
 function extensionForContentType(contentType: string | null | undefined): string | null {
   if (!contentType) {
     return null;
   }
+  // Strip `; charset=...` etc before lookup.
   const base = contentType.split(";")[0]?.trim().toLowerCase();
   if (!base) {
     return null;
   }
-  return MIME_EXTENSION_MAP[base] ?? null;
+  const override = MIME_EXTENSION_OVERRIDE[base];
+  if (override) {
+    return override;
+  }
+  // mime-types shares mime-db with form-data's inference, so whatever
+  // extension it returns here will round-trip to the same MIME when
+  // form-data's upload path re-infers from the filename.
+  const ext = mimeTypes.extension(base);
+  return ext ? `.${ext}` : null;
 }
 
 export function createIMessageApiService(deps: {
@@ -265,7 +259,12 @@ export function createIMessageApiService(deps: {
       throw new Error("iMessage attachment URL must be https://");
     }
 
-    let download: { body: Buffer; fileName?: string };
+    let download: {
+      body: Buffer;
+      fileName?: string;
+      contentType?: string;
+      finalUrl?: string;
+    };
     try {
       download = await (deps.downloadAttachmentFromUrl ?? defaultDownloadAttachment)(
         params.attachmentUrl,
@@ -282,7 +281,10 @@ export function createIMessageApiService(deps: {
         : new Error("iMessage attachment download failed", { cause: error });
     }
 
-    const urlBaseName = safeBaseNameFromUrl(params.attachmentUrl);
+    // Prefer the FINAL URL (post-redirect) over the original one. picsum
+    // does `/1024 → fastly.picsum.photos/id/.../1024.jpg?hmac=...` — the
+    // redirect target carries the real extension, the source URL does not.
+    const urlBaseName = safeBaseNameFromUrl(download.finalUrl ?? params.attachmentUrl);
     const rawName = download.fileName ?? urlBaseName ?? "attachment";
     const rawExt = path.extname(rawName);
     // If the URL / content-disposition already gave an extension, keep it.
@@ -390,9 +392,12 @@ export function createIMessageApiService(deps: {
   };
 }
 
-async function defaultDownloadAttachment(
-  url: string,
-): Promise<{ body: Buffer; fileName?: string; contentType?: string }> {
+async function defaultDownloadAttachment(url: string): Promise<{
+  body: Buffer;
+  fileName?: string;
+  contentType?: string;
+  finalUrl?: string;
+}> {
   const response = await fetch(url, {
     signal: AbortSignal.timeout(IMESSAGE_ATTACHMENT_DOWNLOAD_TIMEOUT_MS),
   });
@@ -417,7 +422,12 @@ async function defaultDownloadAttachment(
   const disposition = response.headers.get("content-disposition");
   const fileName = parseContentDispositionFileName(disposition) ?? undefined;
   const contentType = response.headers.get("content-type") ?? undefined;
-  return { body: Buffer.from(arrayBuffer), fileName, contentType };
+  return {
+    body: Buffer.from(arrayBuffer),
+    fileName,
+    contentType,
+    finalUrl: response.url,
+  };
 }
 
 function parseContentDispositionFileName(header: string | null | undefined): string | null {
