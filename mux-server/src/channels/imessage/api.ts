@@ -429,6 +429,32 @@ export function createIMessageApiService(deps: {
       return await request({ url, headers, body: form });
     };
 
+    // Logs + throws an attachment-stage IMessagePhotonError in one call so
+    // the upload code below reads as a straight-line happy path rather than
+    // four near-identical 10-line fail branches. `stage` is always
+    // "attachment" here; the preserved httpStatus lets the outbound
+    // service differentiate retryable (5xx) from permanent (4xx) failures.
+    const fail = (opts: {
+      phase?: string;
+      httpStatus: number | null;
+      body?: string;
+      cause: unknown;
+    }): never => {
+      deps.log({
+        type: "imessage_send_attachment_error",
+        chatGuid: params.chatGuid,
+        ...(opts.phase ? { phase: opts.phase } : {}),
+        ...(opts.httpStatus !== null ? { httpStatus: opts.httpStatus } : {}),
+        ...(opts.body ? { body: opts.body } : {}),
+        error: String(opts.cause).slice(0, 300),
+      });
+      throw new IMessagePhotonError("iMessage attachment send failed", {
+        httpStatus: opts.httpStatus,
+        stage: "attachment",
+        cause: opts.cause,
+      });
+    };
+
     // Wrap in the SDK's serial queue so ordered sends (text → attachment →
     // text) stay in caller order at Photon. iMessage's own delivery pipeline
     // can still reorder at the receiver (image takes longer via APNS) but
@@ -444,17 +470,7 @@ export function createIMessageApiService(deps: {
           try {
             await createChat({ address: parsed.address, service: parsed.service });
           } catch (error) {
-            deps.log({
-              type: "imessage_send_attachment_error",
-              chatGuid: params.chatGuid,
-              phase: "chat_new_failed",
-              error: String(error),
-            });
-            throw new IMessagePhotonError("iMessage attachment send failed", {
-              httpStatus: null,
-              stage: "attachment",
-              cause: error,
-            });
+            fail({ phase: "chat_new_failed", httpStatus: null, cause: error });
           }
           response = await postUpload();
           responseText = await response.text();
@@ -462,15 +478,9 @@ export function createIMessageApiService(deps: {
       }
 
       if (!response.ok) {
-        deps.log({
-          type: "imessage_send_attachment_error",
-          chatGuid: params.chatGuid,
+        fail({
           httpStatus: response.status,
           body: responseText.slice(0, 300),
-        });
-        throw new IMessagePhotonError("iMessage attachment send failed", {
-          httpStatus: response.status,
-          stage: "attachment",
           cause: responseText.slice(0, 300),
         });
       }
@@ -480,29 +490,19 @@ export function createIMessageApiService(deps: {
       try {
         parsed = responseText ? JSON.parse(responseText) : null;
       } catch (error) {
-        deps.log({
-          type: "imessage_send_attachment_error",
-          chatGuid: params.chatGuid,
+        fail({
           phase: "invalid_json",
-          body: responseText.slice(0, 200),
-        });
-        throw new IMessagePhotonError("iMessage attachment send failed", {
           httpStatus: response.status,
-          stage: "attachment",
+          body: responseText.slice(0, 200),
           cause: error,
         });
       }
       const data = (parsed as { data?: unknown } | null)?.data;
       if (!data || typeof data !== "object") {
-        deps.log({
-          type: "imessage_send_attachment_error",
-          chatGuid: params.chatGuid,
+        fail({
           phase: "missing_data",
-          body: responseText.slice(0, 200),
-        });
-        throw new IMessagePhotonError("iMessage attachment send failed", {
           httpStatus: response.status,
-          stage: "attachment",
+          body: responseText.slice(0, 200),
           cause: "response missing data",
         });
       }
