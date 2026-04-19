@@ -13,9 +13,16 @@ describe("parseInlineAttachments", () => {
     expect(parseInlineAttachments(null, MAX)).toEqual({ ok: true, attachments: [] });
   });
 
-  test("non-array fails loudly", () => {
-    const result = parseInlineAttachments({ not: "an array" }, MAX);
-    expect(result).toEqual({ ok: false, error: expect.stringContaining("array") });
+  test("non-array is silently treated as empty (no-op)", () => {
+    // Preserves the pre-extraction behavior of the inline decode loop:
+    // callers who ship a malformed `attachments` field still fall
+    // through to text/mediaUrl handling rather than hitting a 400.
+    expect(parseInlineAttachments({ not: "an array" }, MAX)).toEqual({
+      ok: true,
+      attachments: [],
+    });
+    expect(parseInlineAttachments(42, MAX)).toEqual({ ok: true, attachments: [] });
+    expect(parseInlineAttachments("a string", MAX)).toEqual({ ok: true, attachments: [] });
   });
 
   test("empty array is valid (zero attachments)", () => {

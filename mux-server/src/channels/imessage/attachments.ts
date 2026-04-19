@@ -32,28 +32,29 @@ function estimateDecodedBytes(dataBase64: string): number {
  * Decode + validate the `raw.imessage.send.attachments[]` envelope field.
  *
  * Rules:
- *   - Each entry must be an object with non-empty `filename`, `contentType`,
- *     and `dataBase64` (standard base64, length divisible by 4).
+ *   - Non-array input → silently treat as empty (no-op).
+ *   - Each entry must be an object with non-empty `filename`,
+ *     `contentType`, and `dataBase64` (standard base64, length divisible
+ *     by 4).
  *   - No entry's decoded size may exceed `maxBytes`.
  *   - The sum of decoded sizes must not exceed `maxBytes`.
  *
- * All caps are enforced against the pre-decode estimate so nothing is
- * allocated past the limit. The decoded buffer length must match the
- * estimate exactly once the charset guard has passed; the empty-buffer
- * check is defense-in-depth against a future Node behavior change.
+ * Caps are enforced against the pre-decode estimate so nothing is
+ * allocated past the limit. A defensive zero-length check after decode
+ * guards against a future Node behavior change around `Buffer.from`.
  */
 export function parseInlineAttachments(
   raw: unknown,
   maxBytes: number,
 ): InlineAttachmentParseResult {
-  if (raw === undefined || raw === null) {
-    return { ok: true, attachments: [] };
-  }
+  // Non-arrays (including undefined/null/object/number) are silently
+  // treated as "no inline attachments" to preserve the pre-extraction
+  // behavior of the inline decode loop. Callers that ship a malformed
+  // field get no attachments but still fall through to the usual
+  // text/mediaUrl handling rather than a 400 — matching how other mux
+  // envelope fields tolerate a non-canonical shape.
   if (!Array.isArray(raw)) {
-    return {
-      ok: false,
-      error: "raw.imessage.send.attachments must be an array",
-    };
+    return { ok: true, attachments: [] };
   }
 
   const attachments: InlineIMessageAttachment[] = [];

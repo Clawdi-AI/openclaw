@@ -122,6 +122,9 @@ node --import tsx mux-server/src/server.ts
 - `MUX_WHATSAPP_QUEUE_RETRY_MAX_MS` (default `60000`): max retry backoff for queued WhatsApp inbound deliveries.
 - `MUX_WHATSAPP_QUEUE_BATCH_SIZE` (default `20`): max number of queued WhatsApp inbound deliveries processed per pass.
 - `MUX_WHATSAPP_QUEUE_MAX_AGE_MS` (default `86400000`): maximum delivery-window age for queued WhatsApp inbound deliveries before they are explicitly exhausted and dropped; the window resets when the tenant re-registers, even if the inbound URL stays the same.
+- `MUX_IMESSAGE_SERVER_URL` (optional): Photon Advanced iMessage Kit BlueBubbles-style server URL (e.g. `https://…photon.codes`). Required for iMessage inbound and outbound.
+- `MUX_IMESSAGE_API_KEY` (optional): API key for the Photon iMessage server.
+- `MUX_IMESSAGE_VCARD_URL` (default `https://assets.clawdi.ai/clawdi.vcf`): https URL of the bot vCard sent as an attachment after pairing so iOS offers "Add to Contacts". Empty disables the attachment. Must be https.
 - `MUX_TELEGRAM_BOT_USERNAME` (optional): enables Telegram deep link in pairing-token response.
 - `MUX_PAIRING_TOKEN_TTL_SEC` (default `900`): default one-time pairing-token TTL in seconds.
 - `MUX_PAIRING_TOKEN_MAX_TTL_SEC` (default `3600`): max allowed one-time pairing-token TTL.
@@ -136,6 +139,7 @@ Notes:
 - Telegram when `TELEGRAM_BOT_TOKEN` is set.
 - Discord when `DISCORD_BOT_TOKEN` is set.
 - WhatsApp when `<MUX_WHATSAPP_AUTH_DIR>/creds.json` exists.
+- iMessage when `MUX_IMESSAGE_SERVER_URL` is set (and `MUX_IMESSAGE_API_KEY` for the Photon REST calls).
 
 ### OpenClaw Account Model
 
