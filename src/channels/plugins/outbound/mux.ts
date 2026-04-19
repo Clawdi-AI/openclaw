@@ -42,6 +42,16 @@ type MuxSendResponse = {
   pollId?: string;
   topicId?: number;
   name?: string;
+  // Partial-success signaling from non-atomic channels (iMessage batches
+  // separate sendAttachment + sendMessage calls). When mux-server reports
+  // partial=true the caller should NOT retry — some provider messages
+  // already landed, the provider-side IDs are in providerMessageIds, and
+  // retrying would duplicate the delivered parts. Present for iMessage
+  // today; other channels always land atomic so these stay undefined.
+  partial?: boolean;
+  failedStage?: string;
+  partialError?: string;
+  providerMessageIds?: string[];
 };
 
 type MuxSendResponseBody = {
@@ -53,6 +63,10 @@ type MuxSendResponseBody = {
   pollId?: unknown;
   topicId?: unknown;
   name?: unknown;
+  partial?: unknown;
+  failedStage?: unknown;
+  partialError?: unknown;
+  providerMessageIds?: unknown;
   error?: unknown;
 };
 
@@ -265,6 +279,10 @@ function mapMuxSendResponse(
     throw new Error(`mux outbound success missing messageId for channel ${channel}`);
   }
 
+  const providerMessageIds = Array.isArray(payload.providerMessageIds)
+    ? payload.providerMessageIds.filter((v): v is string => typeof v === "string")
+    : undefined;
+
   return {
     messageId,
     chatId: readString(payload.chatId),
@@ -277,6 +295,10 @@ function mapMuxSendResponse(
         ? Math.trunc(payload.topicId)
         : undefined,
     name: readString(payload.name),
+    partial: payload.partial === true ? true : undefined,
+    failedStage: readString(payload.failedStage),
+    partialError: readString(payload.partialError),
+    providerMessageIds: providerMessageIds?.length ? providerMessageIds : undefined,
   };
 }
 

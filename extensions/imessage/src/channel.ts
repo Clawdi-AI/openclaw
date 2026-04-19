@@ -111,13 +111,26 @@ function deriveAttachmentFilename(mediaUrl: string): string {
 // they are reachable over public HTTPS; rather than forcing every call site
 // to stage media on a CDN, we let openclaw load bytes from its own sandbox
 // and ship them through the raw.imessage.send.attachments envelope.
+
+// Hard ceiling enforced by mux-server's parseInlineAttachments —
+// IMESSAGE_ATTACHMENT_MAX_BYTES in mux-server/src/channels/imessage/api.ts.
+// Clamping here means a deployment misconfigured with a higher channel-level
+// mediaMaxMb still fails fast with a readable "exceeds ... bytes" error from
+// loadWebMediaRaw instead of a cryptic "estimated X bytes" 400 after the
+// file is already on disk and base64-encoded in memory.
+const IMESSAGE_MUX_INLINE_MAX_BYTES = 100 * 1024 * 1024;
+
 async function loadInlineAttachment(params: {
   mediaUrl: string;
   maxBytes?: number;
   mediaLocalRoots?: readonly string[];
 }): Promise<IMessageInlineAttachment> {
+  const effectiveMax = Math.min(
+    params.maxBytes ?? IMESSAGE_MUX_INLINE_MAX_BYTES,
+    IMESSAGE_MUX_INLINE_MAX_BYTES,
+  );
   const media = await loadWebMediaRaw(params.mediaUrl, {
-    maxBytes: params.maxBytes,
+    maxBytes: effectiveMax,
     optimizeImages: false,
     localRoots: params.mediaLocalRoots?.length ? params.mediaLocalRoots : undefined,
   });
