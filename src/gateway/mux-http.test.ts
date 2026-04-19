@@ -796,13 +796,19 @@ describe("handleMuxInboundHttpRequest", () => {
       expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
       expect(res.statusCode).toBe(202);
       await waitForAsyncDispatch();
+      const expectedTypingTarget =
+        channel === "discord"
+          ? "user:42"
+          : channel === "whatsapp"
+            ? "whatsapp:+42"
+            : "telegram:123";
       expect(mocks.sendTypingViaMux).toHaveBeenCalledWith(
         expect.objectContaining({
           cfg: expect.any(Object),
           channel,
           accountId: "default",
           sessionKey: "agent:main:main",
-          to: channel === "discord" ? "user:42" : `${channel}:123`,
+          to: expectedTypingTarget,
         }),
       );
     },
@@ -1052,7 +1058,26 @@ describe("handleMuxInboundHttpRequest", () => {
         sessionKey: "agent:main:main",
         surface: "mux",
         originatingChannel: "whatsapp",
-        originatingTo: "whatsapp:+15551230000",
+        originatingTo: "whatsapp:+15550001111",
+        messageThreadId: undefined,
+      },
+    },
+    {
+      name: "whatsapp dm lid target",
+      body: {
+        channel: "whatsapp",
+        sessionKey: "wa:dm:258862678593671@lid",
+        to: "whatsapp:258862678593671@lid",
+        from: "whatsapp:+15550001111",
+        body: "hello wa lid dm",
+        messageId: "wa-dm-lid-1",
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:main",
+        surface: "mux",
+        originatingChannel: "whatsapp",
+        originatingTo: "whatsapp:+15550001111",
         messageThreadId: undefined,
       },
     },

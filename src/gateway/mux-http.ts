@@ -337,6 +337,10 @@ function resolveMuxInboundOriginatingTo(params: {
     }
     return peer.kind === "direct" ? `user:${peer.id}` : `channel:${peer.id}`;
   }
+  if (params.channel === "whatsapp") {
+    const peer = resolveWhatsAppInboundPeer({ payload: params.payload });
+    return peer ? `whatsapp:${peer.id}` : null;
+  }
   return readMuxNonEmptyString(params.payload.to) ?? null;
 }
 
