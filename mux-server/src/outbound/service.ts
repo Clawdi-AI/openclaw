@@ -30,6 +30,13 @@ export type SendResult = {
   bodyText: string;
 };
 
+function badRequest(error: string): SendResult {
+  return {
+    statusCode: 400,
+    bodyText: JSON.stringify({ ok: false, error }),
+  };
+}
+
 // Extracts the upstream Photon HTTP status from an IMessagePhotonError without
 // importing the class (avoids a circular type dep through api.ts). A duck-type
 // check is sufficient because this module is the only consumer.
@@ -915,11 +922,8 @@ export function createOutboundService(deps: {
       const { chatGuid } = resolvedRoute.route;
       const replyToId = readNonEmptyString(payload.replyToId);
       const imessageText =
-        typeof imessageRawSend?.text === "string"
-          ? imessageRawSend.text
-          : typeof text === "string"
-            ? text
-            : "";
+        (typeof imessageRawSend?.text === "string" ? imessageRawSend.text : null) ??
+        (typeof text === "string" ? text : "");
       const imessageRawSingleMedia = readNonEmptyString(imessageRawSend?.mediaUrl);
       const imessageRawMediaList = Array.isArray(imessageRawSend?.mediaUrls)
         ? (imessageRawSend.mediaUrls as unknown[])
@@ -927,22 +931,15 @@ export function createOutboundService(deps: {
             .map((item) => item.trim())
             .filter((item) => item.length > 0)
         : mediaUrls;
-      const imessageMediaUrls = (() => {
-        const ordered = [
+      // Order-preserving dedup: single-value mediaUrl first, then mediaUrls
+      // list. Duplicates arise when an agent sets both fields to the same
+      // URL; Photon would deliver it twice without this.
+      const imessageMediaUrls = [
+        ...new Set([
           ...(imessageRawSingleMedia ? [imessageRawSingleMedia] : []),
           ...imessageRawMediaList,
-        ];
-        const seen = new Set<string>();
-        const deduped: string[] = [];
-        for (const media of ordered) {
-          if (seen.has(media)) {
-            continue;
-          }
-          seen.add(media);
-          deduped.push(media);
-        }
-        return deduped;
-      })();
+        ]),
+      ];
 
       // Inline-bytes attachments: agent-side Photon-incompatible sources
       // (local filesystem paths, in-memory buffers) are base64-encoded by
@@ -954,39 +951,22 @@ export function createOutboundService(deps: {
         deps.imessageAttachmentMaxBytes,
       );
       if (!inlineParsed.ok) {
-        return {
-          statusCode: 400,
-          bodyText: JSON.stringify({ ok: false, error: inlineParsed.error }),
-        };
+        return badRequest(inlineParsed.error);
       }
       const imessageInlineAttachments = inlineParsed.attachments;
 
-      // If a caller ships the same logical attachment under both `mediaUrl`
-      // and `attachments[]`, we'd deliver it twice. Reject the ambiguous
-      // payload loudly rather than guess which path to trust.
+      // If a caller ships both mediaUrl[s] and attachments[] we'd deliver
+      // the same logical payload twice. Reject rather than guess.
       if (imessageMediaUrls.length > 0 && imessageInlineAttachments.length > 0) {
-        return {
-          statusCode: 400,
-          bodyText: JSON.stringify({
-            ok: false,
-            error:
-              "imessage outbound cannot combine mediaUrl/mediaUrls with raw.imessage.send.attachments; pick one",
-          }),
-        };
+        return badRequest(
+          "imessage outbound cannot combine mediaUrl/mediaUrls with raw.imessage.send.attachments; pick one",
+        );
       }
 
-      if (
-        !imessageText.trim() &&
-        imessageMediaUrls.length === 0 &&
-        imessageInlineAttachments.length === 0
-      ) {
-        return {
-          statusCode: 400,
-          bodyText: JSON.stringify({
-            ok: false,
-            error: "imessage outbound requires text/media or raw.imessage.send",
-          }),
-        };
+      const hasContent =
+        imessageText.trim() || imessageMediaUrls.length > 0 || imessageInlineAttachments.length > 0;
+      if (!hasContent) {
+        return badRequest("imessage outbound requires text/media or raw.imessage.send");
       }
 
       // iMessage outbound is NOT a single atomic transaction: attachments and
