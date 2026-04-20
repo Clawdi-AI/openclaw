@@ -1,6 +1,54 @@
 import { describe, expect, it } from "vitest";
 import { resolveLastChannelRaw, resolveLastToRaw } from "./session-delivery.js";
 
+describe("session delivery preserves whatsapp chatJid for mux routing", () => {
+  // Regression: the mux-server binds by chatJid (e.g. Baileys JIDs like
+  // `15105989468:0@s.whatsapp.net`). Any rewrite of originatingTo or
+  // persistedLastTo along the reply / cron path produces a mismatched
+  // chatJid and a 403 "route not bound".
+
+  const baileysJid = "whatsapp:15105989468:0@s.whatsapp.net";
+
+  it("preserves a fresh inbound whatsapp JID for the reply path", () => {
+    expect(
+      resolveLastToRaw({
+        originatingChannelRaw: "whatsapp",
+        originatingToRaw: baileysJid,
+        persistedLastChannel: "whatsapp",
+        persistedLastTo: undefined,
+        sessionKey: "agent:main:main",
+      }),
+    ).toBe(baileysJid);
+  });
+
+  it("preserves a persisted whatsapp JID for the cron path (no fresh inbound)", () => {
+    expect(
+      resolveLastToRaw({
+        originatingChannelRaw: undefined,
+        originatingToRaw: undefined,
+        persistedLastChannel: "whatsapp",
+        persistedLastTo: baileysJid,
+        sessionKey: "agent:main:cron:job-1",
+      }),
+    ).toBe(baileysJid);
+  });
+
+  it("preserves a persisted whatsapp JID when a cron turn's internal origin is webchat", () => {
+    // Cron jobs often run with an internal/webchat-like origin for the
+    // current turn, but should still deliver back over the previously
+    // known external whatsapp route without rewriting the chatJid.
+    expect(
+      resolveLastToRaw({
+        originatingChannelRaw: "webchat",
+        originatingToRaw: "session:dashboard",
+        persistedLastChannel: "whatsapp",
+        persistedLastTo: baileysJid,
+        sessionKey: "agent:main:cron:job-1",
+      }),
+    ).toBe(baileysJid);
+  });
+});
+
 describe("session delivery direct-session routing overrides", () => {
   it.each([
     "agent:main:direct:user-1",
