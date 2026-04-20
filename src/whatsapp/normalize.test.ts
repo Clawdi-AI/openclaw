@@ -23,9 +23,18 @@ describe("normalizeWhatsAppTarget", () => {
     expect(normalizeWhatsAppTarget("41796666864@s.whatsapp.net")).toBe("+41796666864");
   });
 
-  it("normalizes LID JIDs to E.164", () => {
-    expect(normalizeWhatsAppTarget("123456789@lid")).toBe("+123456789");
-    expect(normalizeWhatsAppTarget("123456789@LID")).toBe("+123456789");
+  it("preserves LID JIDs verbatim (they have no phone-number representation)", () => {
+    // LIDs are opaque WhatsApp Linked IDs — the digits are NOT a phone
+    // number. Previously we ran them through normalizeE164, producing a
+    // bogus fake E.164 that broke allowFrom checks and mux route lookups.
+    expect(normalizeWhatsAppTarget("123456789@lid")).toBe("123456789@lid");
+    expect(normalizeWhatsAppTarget("123456789@LID")).toBe("123456789@LID");
+    // Baileys device-suffix LIDs (`<lid>:0@lid`) round-trip too.
+    expect(normalizeWhatsAppTarget("258862678593671:0@lid")).toBe("258862678593671:0@lid");
+    // Hosted LID variant.
+    expect(normalizeWhatsAppTarget("987654321@hosted.lid")).toBe("987654321@hosted.lid");
+    // `whatsapp:` prefix is still stripped, but the LID body is preserved.
+    expect(normalizeWhatsAppTarget("whatsapp:123456789@lid")).toBe("123456789@lid");
   });
 
   it("rejects invalid targets", () => {
@@ -51,6 +60,10 @@ describe("isWhatsAppUserTarget", () => {
     expect(isWhatsAppUserTarget("1234567890@s.whatsapp.net")).toBe(true);
     expect(isWhatsAppUserTarget("123456789@lid")).toBe(true);
     expect(isWhatsAppUserTarget("123456789@LID")).toBe(true);
+    // Baileys device-suffix LID (colon *before* @).
+    expect(isWhatsAppUserTarget("123456789:0@lid")).toBe(true);
+    expect(isWhatsAppUserTarget("123456789@hosted.lid")).toBe(true);
+    // Colon after @ is not a valid WhatsApp JID suffix.
     expect(isWhatsAppUserTarget("123@lid:0")).toBe(false);
     expect(isWhatsAppUserTarget("abc@s.whatsapp.net")).toBe(false);
     expect(isWhatsAppUserTarget("123456789-987654321@g.us")).toBe(false);

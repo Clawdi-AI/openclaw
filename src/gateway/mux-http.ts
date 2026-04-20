@@ -339,19 +339,6 @@ function resolveMuxInboundOriginatingTo(params: {
     }
     return peer.kind === "direct" ? `user:${peer.id}` : `channel:${peer.id}`;
   }
-  if (params.channel === "whatsapp") {
-    // Preserve the raw mux inbound `to` so downstream route-key lookup on the
-    // mux-server still matches the binding registered from the exact same
-    // JID (including the optional Baileys device suffix, e.g. `:0`). LID
-    // targets have no phone number and cannot be replied to directly, so fall
-    // back to the sender there.
-    const rawTo = readMuxNonEmptyString(params.payload.to);
-    if (rawTo && !/@lid\b/i.test(rawTo)) {
-      return rawTo;
-    }
-    const peer = resolveWhatsAppInboundPeer({ payload: params.payload });
-    return peer ? `whatsapp:${peer.id}` : null;
-  }
   return readMuxNonEmptyString(params.payload.to) ?? null;
 }
 

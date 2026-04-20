@@ -200,6 +200,48 @@ describe("resolveWhatsAppOutboundTarget", () => {
     });
   });
 
+  describe("LID target handling", () => {
+    // LID peers are gated upstream (mux-server's binding claim is the
+    // access-control point). An E.164 allowFrom list cannot validate LIDs
+    // because their digits are opaque, not phone numbers. Trust model
+    // matches groups: if normalize returns a LID, pass through.
+    it("passes LID target through regardless of allowList", () => {
+      const LID = "258862678593671@lid";
+      // normalizeWhatsAppTarget is called once per allowFrom entry and
+      // once for the `to` — order: allowFrom entries first, `to` last.
+      vi.mocked(normalize.normalizeWhatsAppTarget)
+        .mockReturnValueOnce("+15105989468") // for allowFrom[0]
+        .mockReturnValueOnce(LID); // for to
+      vi.mocked(normalize.isWhatsAppGroupJid).mockReturnValueOnce(false);
+      expectResolutionOk(
+        {
+          to: LID,
+          allowFrom: ["+15105989468"],
+          mode: "implicit",
+        },
+        LID,
+      );
+    });
+
+    it("passes device-suffix LID target through regardless of allowList", () => {
+      const LID = "258862678593671:0@lid";
+      vi.mocked(normalize.normalizeWhatsAppTarget)
+        .mockReturnValueOnce("+15105989468")
+        .mockReturnValueOnce(LID);
+      vi.mocked(normalize.isWhatsAppGroupJid).mockReturnValueOnce(false);
+      expectResolutionOk({ to: LID, allowFrom: ["+15105989468"], mode: undefined }, LID);
+    });
+
+    it("passes hosted LID target through regardless of allowList", () => {
+      const LID = "987654321@hosted.lid";
+      vi.mocked(normalize.normalizeWhatsAppTarget)
+        .mockReturnValueOnce("+15105989468")
+        .mockReturnValueOnce(LID);
+      vi.mocked(normalize.isWhatsAppGroupJid).mockReturnValueOnce(false);
+      expectResolutionOk({ to: LID, allowFrom: ["+15105989468"], mode: "heartbeat" }, LID);
+    });
+  });
+
   describe("whitespace handling", () => {
     it("trims whitespace from to parameter", () => {
       mockNormalizedDirectMessage(PRIMARY_TARGET);
