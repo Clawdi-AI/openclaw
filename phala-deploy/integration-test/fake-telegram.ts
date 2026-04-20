@@ -324,7 +324,17 @@ export class FakeTelegramApi {
           ok: true,
           result: {
             message_id: messageId,
-            chat: { id: chatId },
+            // `date` is required by the Bot API Message schema; strict clients
+            // (e.g. python-telegram-bot) raise KeyError when it's absent.
+            date: Math.floor(Date.now() / 1000),
+            chat: { id: chatId, type: "private" },
+            from: {
+              id: 0,
+              is_bot: true,
+              first_name: "fake-bot",
+              username: "fake_bot",
+            },
+            ...(toScalarString(body.text) ? { text: toScalarString(body.text) } : {}),
             ...(method === "sendPoll"
               ? {
                   poll: {
