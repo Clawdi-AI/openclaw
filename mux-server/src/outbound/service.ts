@@ -1,7 +1,9 @@
 import { RequestClient } from "@buape/carbon";
+import { parseInlineAttachments } from "../channels/imessage/attachments.js";
 import type { MuxConfig } from "../config/env.js";
 import type {
   DiscordBoundRoute,
+  IMessageBoundRoute,
   OutboundResolutionMode,
   ResolvedBoundRoute,
   TelegramBoundRoute,
@@ -10,6 +12,7 @@ import type {
 } from "../domain/types.js";
 import {
   asRecord,
+  errorString,
   readNonEmptyString,
   readPositiveInt,
   readUnsignedNumericString,
@@ -27,6 +30,27 @@ export type SendResult = {
   bodyText: string;
 };
 
+function badRequest(error: string): SendResult {
+  return {
+    statusCode: 400,
+    bodyText: JSON.stringify({ ok: false, error }),
+  };
+}
+
+// Extracts the upstream Photon HTTP status from an IMessagePhotonError without
+// importing the class (avoids a circular type dep through api.ts). A duck-type
+// check is sufficient because this module is the only consumer.
+function readIMessagePhotonStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  const httpStatus = (error as { httpStatus?: unknown }).httpStatus;
+  if (typeof httpStatus === "number" && Number.isFinite(httpStatus)) {
+    return httpStatus;
+  }
+  return null;
+}
+
 export function createOutboundService(deps: {
   config: Pick<
     MuxConfig,
@@ -40,7 +64,7 @@ export function createOutboundService(deps: {
   metrics: {
     recordAuthFailure: (surface: "tenant") => void;
     recordOutboundRouteResolution: (params: {
-      channel: "telegram" | "discord" | "whatsapp";
+      channel: "telegram" | "discord" | "whatsapp" | "imessage";
       mode: OutboundResolutionMode;
       via: "session" | "route";
     }) => void;
@@ -59,6 +83,10 @@ export function createOutboundService(deps: {
   listWhatsAppOutboundRouteKeys: (params: {
     requestedTo: unknown;
     accountIds: Array<string | null | undefined>;
+    rawSend?: Record<string, unknown>;
+  }) => string[];
+  listIMessageOutboundRouteKeys: (params: {
+    requestedTo: unknown;
     rawSend?: Record<string, unknown>;
   }) => string[];
   resolveTelegramBoundRoute: (params: {
@@ -82,6 +110,13 @@ export function createOutboundService(deps: {
     routeKeys?: string[];
     mode?: OutboundResolutionMode;
   }) => ResolvedBoundRoute<WhatsAppBoundRoute> | null;
+  resolveIMessageBoundRoute: (params: {
+    tenantId: string;
+    channel: "imessage";
+    sessionKey: string;
+    routeKeys?: string[];
+    mode?: OutboundResolutionMode;
+  }) => ResolvedBoundRoute<IMessageBoundRoute> | null;
   resolveDiscordOutboundChannelId: (params: {
     boundRoute: DiscordBoundRoute;
     requestedTo: unknown;
@@ -131,6 +166,27 @@ export function createOutboundService(deps: {
     ) => Promise<{ messageId: string; toJid: string }>;
     sendTypingWhatsApp: (to: string, options: { accountId?: string }) => Promise<void>;
   }>;
+  imessageApiService: {
+    getSdk: () => unknown;
+    sendMessage: (params: {
+      chatGuid: string;
+      message: string;
+      selectedMessageGuid?: string;
+    }) => Promise<{ guid: string | null }>;
+    sendAttachment: (params: {
+      chatGuid: string;
+      attachmentUrl: string;
+      selectedMessageGuid?: string;
+    }) => Promise<{ guid: string | null }>;
+    sendAttachmentBytes: (params: {
+      chatGuid: string;
+      body: Buffer;
+      contentType: string;
+      fileName: string;
+      selectedMessageGuid?: string;
+    }) => Promise<{ guid: string | null }>;
+  };
+  imessageAttachmentMaxBytes: number;
 }): {
   runOutboundAction: (params: {
     tenant: TenantIdentity;
@@ -814,6 +870,244 @@ export function createOutboundService(deps: {
           toJid: firstToJid,
           providerMessageIds,
           rawPassthrough: Boolean(whatsappRawSend),
+        }),
+      };
+    }
+
+    if (channel === "imessage") {
+      if (!deps.imessageApiService.getSdk()) {
+        return {
+          statusCode: 503,
+          bodyText: JSON.stringify({ ok: false, error: "iMessage transport not connected" }),
+        };
+      }
+
+      const imessageRaw = asRecord(rawOutbound?.imessage);
+      const imessageRawSend = asRecord(imessageRaw?.send);
+      const resolvedRoute = deps.resolveIMessageBoundRoute({
+        tenantId: tenant.id,
+        channel,
+        sessionKey,
+        mode: deps.config.outboundResolutionMode,
+        routeKeys: deps.listIMessageOutboundRouteKeys({
+          requestedTo: payload.to,
+          rawSend: imessageRawSend ?? undefined,
+        }),
+      });
+      if (!resolvedRoute) {
+        return {
+          statusCode: 403,
+          bodyText: JSON.stringify({
+            ok: false,
+            error: "route not bound",
+            code: "ROUTE_NOT_BOUND",
+          }),
+        };
+      }
+      deps.metrics.recordOutboundRouteResolution({
+        channel: "imessage",
+        mode: deps.config.outboundResolutionMode,
+        via: resolvedRoute.via,
+      });
+      if (resolvedRoute.via === "route" && deps.config.outboundResolutionMode === "session-first") {
+        deps.log({
+          type: "outbound_route_fallback",
+          tenantId: tenant.id,
+          channel,
+          sessionKey,
+          routeKey: resolvedRoute.routeKey,
+        });
+      }
+
+      const { chatGuid } = resolvedRoute.route;
+      const replyToId = readNonEmptyString(payload.replyToId);
+      const imessageText =
+        (typeof imessageRawSend?.text === "string" ? imessageRawSend.text : null) ??
+        (typeof text === "string" ? text : "");
+      const imessageRawSingleMedia = readNonEmptyString(imessageRawSend?.mediaUrl);
+      const imessageRawMediaList = Array.isArray(imessageRawSend?.mediaUrls)
+        ? (imessageRawSend.mediaUrls as unknown[])
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0)
+        : mediaUrls;
+      // Order-preserving dedup: single-value mediaUrl first, then mediaUrls
+      // list. Duplicates arise when an agent sets both fields to the same
+      // URL; Photon would deliver it twice without this.
+      const imessageMediaUrls = [
+        ...new Set([
+          ...(imessageRawSingleMedia ? [imessageRawSingleMedia] : []),
+          ...imessageRawMediaList,
+        ]),
+      ];
+
+      // Inline-bytes attachments: agent-side Photon-incompatible sources
+      // (local filesystem paths, in-memory buffers) are base64-encoded by
+      // openclaw and posted straight through mux to Photon's multipart
+      // endpoint. Decoding + size validation lives in parseInlineAttachments
+      // so caps are enforced before Buffer.from allocates anything.
+      const inlineParsed = parseInlineAttachments(
+        imessageRawSend?.attachments,
+        deps.imessageAttachmentMaxBytes,
+      );
+      if (!inlineParsed.ok) {
+        return badRequest(inlineParsed.error);
+      }
+      const imessageInlineAttachments = inlineParsed.attachments;
+
+      // If a caller ships both mediaUrl[s] and attachments[] we'd deliver
+      // the same logical payload twice. Reject rather than guess.
+      if (imessageMediaUrls.length > 0 && imessageInlineAttachments.length > 0) {
+        return badRequest(
+          "imessage outbound cannot combine mediaUrl/mediaUrls with raw.imessage.send.attachments; pick one",
+        );
+      }
+
+      const hasContent =
+        imessageText.trim() || imessageMediaUrls.length > 0 || imessageInlineAttachments.length > 0;
+      if (!hasContent) {
+        return badRequest("imessage outbound requires text/media or raw.imessage.send");
+      }
+
+      // iMessage outbound is NOT a single atomic transaction: attachments and
+      // text are separate SDK calls. If any earlier call succeeds and a later
+      // one fails, a naive 502 would cause the caller to retry the entire
+      // request — duplicating the media that already went through.
+      //
+      // Retry semantics:
+      //   - If nothing succeeded -> return 502 (safe to retry).
+      //   - If ANY send succeeded -> return 200 with partial=true. The
+      //     providerMessageIds array surfaces exactly which sends landed so
+      //     the caller can dedupe or skip the already-delivered parts on a
+      //     follow-up request.
+      //   - The caller is expected to treat partial=true responses as a
+      //     terminal delivery for the listed providerMessageIds and decide at
+      //     the application layer whether to resend the missing text.
+      //
+      // This matches the pragmatic choice other channels make when a single
+      // logical send spans multiple provider RPCs (WhatsApp multi-media, etc.)
+      // and the protocol doesn't offer batch atomicity.
+      const providerMessageIds: string[] = [];
+      let sendError: unknown = null;
+      let failedStage: "media" | "text" | null = null;
+
+      // Send URL-based attachments first (mux downloads then posts bytes),
+      // then inline-bytes attachments (openclaw-supplied, already decoded).
+      // Reply threading applies only to the *first* send across the whole
+      // batch so iOS renders a single quoted-reply chain, not one per piece.
+      let sendIndex = 0;
+      try {
+        for (const url of imessageMediaUrls) {
+          const sent = await deps.imessageApiService.sendAttachment({
+            chatGuid,
+            attachmentUrl: url,
+            ...(replyToId && sendIndex === 0 ? { selectedMessageGuid: replyToId } : {}),
+          });
+          // The SDK may return guid=null even on success; record as "unknown" so
+          // the successful send still counts toward providerMessageIds (prevents
+          // caller retry duplication) — matches the text-send path below.
+          providerMessageIds.push(sent.guid ?? "unknown");
+          sendIndex += 1;
+        }
+        for (const attachment of imessageInlineAttachments) {
+          const sent = await deps.imessageApiService.sendAttachmentBytes({
+            chatGuid,
+            body: attachment.body,
+            contentType: attachment.contentType,
+            fileName: attachment.filename,
+            ...(replyToId && sendIndex === 0 ? { selectedMessageGuid: replyToId } : {}),
+          });
+          providerMessageIds.push(sent.guid ?? "unknown");
+          sendIndex += 1;
+        }
+      } catch (error) {
+        sendError = error;
+        failedStage = "media";
+      }
+
+      if (!sendError && imessageText.trim()) {
+        try {
+          const sent = await deps.imessageApiService.sendMessage({
+            chatGuid,
+            message: imessageText,
+            // Only thread the text send if NOTHING landed before it —
+            // otherwise the first attachment (URL or inline) already
+            // carried the reply context and a second selectedMessageGuid
+            // would render a duplicate quoted-reply bubble on iOS.
+            // sendIndex counts URL + inline attachments landed so far.
+            ...(replyToId && sendIndex === 0 ? { selectedMessageGuid: replyToId } : {}),
+          });
+          if (sent.guid) {
+            providerMessageIds.push(sent.guid);
+          } else {
+            providerMessageIds.push("unknown");
+          }
+        } catch (error) {
+          sendError = error;
+          failedStage = "text";
+        }
+      }
+
+      if (sendError && providerMessageIds.length === 0) {
+        // Nothing landed — safe to fail; caller retry will not duplicate.
+        // Pass through Photon's HTTP status when available: permanent 4xx
+        // client errors (invalid chat, unauthorized, attachment too large)
+        // must not be misreported as retryable 502s or the caller will
+        // duplicate the failed send on its retry timer.
+        const photonStatus = readIMessagePhotonStatus(sendError);
+        const isClientError = photonStatus !== null && photonStatus >= 400 && photonStatus < 500;
+        return {
+          statusCode: isClientError ? photonStatus : 502,
+          bodyText: JSON.stringify({
+            ok: false,
+            error: "imessage send failed",
+            details: errorString(sendError),
+            ...(failedStage ? { failedStage } : {}),
+            ...(photonStatus !== null ? { photonStatus } : {}),
+            ...(isClientError ? { retryable: false } : {}),
+          }),
+        };
+      }
+
+      if (providerMessageIds.length === 0) {
+        // Invariant guard: the pre-send validation above returns 400 when
+        // text + URL + inline attachments are all empty, so the send
+        // loops always execute at least one branch and push at least
+        // "unknown". Kept as a defense-in-depth 502 in case a future
+        // refactor reorders the branches and breaks the invariant.
+        return {
+          statusCode: 502,
+          bodyText: JSON.stringify({ ok: false, error: "imessage send returned no messageId" }),
+        };
+      }
+
+      const partial = Boolean(sendError);
+      if (partial) {
+        deps.log({
+          type: "imessage_outbound_partial_success",
+          chatGuid,
+          providerMessageIds,
+          failedStage,
+          error: errorString(sendError),
+        });
+      }
+
+      const messageId = providerMessageIds[0] ?? "unknown";
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          ok: true,
+          messageId,
+          chatId: chatGuid,
+          providerMessageIds,
+          rawPassthrough: Boolean(imessageRawSend),
+          ...(partial
+            ? {
+                partial: true,
+                failedStage,
+                partialError: errorString(sendError),
+              }
+            : {}),
         }),
       };
     }

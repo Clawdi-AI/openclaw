@@ -1,4 +1,4 @@
-type ChannelName = "telegram" | "discord" | "whatsapp";
+type ChannelName = "telegram" | "discord" | "whatsapp" | "imessage";
 
 type ChannelHealthState = {
   status: string;
@@ -41,6 +41,16 @@ export type WhatsAppRuntimeSnapshot = {
   lastListenerStartAtMs: number | null;
   lastListenerErrorAtMs: number | null;
   lastListenerError: string | null;
+  lastInboundSeenAtMs: number | null;
+};
+
+export type IMessageRuntimeSnapshot = {
+  connected: boolean;
+  loopStartedAtMs: number | null;
+  lastSdkConnectedAtMs: number | null;
+  lastSdkClosedAtMs: number | null;
+  lastSdkErrorAtMs: number | null;
+  lastSdkError: string | null;
   lastInboundSeenAtMs: number | null;
 };
 
@@ -101,11 +111,13 @@ export function buildObservabilityQueueSnapshot(params: {
       telegram: countPendingRetries(params.telegramBgRetryCount),
       discord: countPendingRetries(params.discordBgRetryCount),
       whatsapp: params.whatsappQueueDepth,
+      imessage: 0,
     },
     oldestQueuedAgeMs: {
       telegram: resolveOldestRetryAgeMs(params.telegramBgRetryQueuedAtMs, params.nowMs),
       discord: resolveOldestRetryAgeMs(params.discordBgRetryQueuedAtMs, params.nowMs),
       whatsapp: params.whatsappOldestQueuedAgeMs,
+      imessage: null,
     },
   };
 }
@@ -121,6 +133,8 @@ export function buildObservabilityReadinessReport(params: {
   whatsappInboundEnabled: boolean;
   whatsappRuntimeHealth: WhatsAppRuntimeSnapshot;
   whatsappCredentialStatus: string;
+  imessageInboundEnabled: boolean;
+  imessageRuntimeHealth: IMessageRuntimeSnapshot;
 }): {
   ready: boolean;
   channels: Record<ChannelName, ChannelHealthState>;
@@ -226,7 +240,34 @@ export function buildObservabilityReadinessReport(params: {
     } as const;
   })();
 
-  const channels = { telegram, discord, whatsapp };
+  const imessage = (() => {
+    if (!params.imessageInboundEnabled) {
+      return { status: "disabled", ready: true } as const;
+    }
+    if (!params.imessageRuntimeHealth.loopStartedAtMs) {
+      return { status: "starting", ready: false, reason: "loop_not_started" } as const;
+    }
+    if (params.imessageRuntimeHealth.connected) {
+      return {
+        status: "ready",
+        ready: true,
+        lastSuccessAtMs: params.imessageRuntimeHealth.lastSdkConnectedAtMs,
+        lastErrorAtMs: params.imessageRuntimeHealth.lastSdkErrorAtMs,
+        lastError: params.imessageRuntimeHealth.lastSdkError,
+        lastInboundSeenAtMs: params.imessageRuntimeHealth.lastInboundSeenAtMs,
+      } as const;
+    }
+    return {
+      status: "degraded",
+      ready: false,
+      reason: "sdk_not_connected",
+      lastErrorAtMs: params.imessageRuntimeHealth.lastSdkErrorAtMs,
+      lastError: params.imessageRuntimeHealth.lastSdkError,
+      lastInboundSeenAtMs: params.imessageRuntimeHealth.lastInboundSeenAtMs,
+    } as const;
+  })();
+
+  const channels = { telegram, discord, whatsapp, imessage };
   const degraded = (
     Object.entries(channels) as Array<[ChannelName, { ready: boolean; reason?: string }]>
   )
@@ -253,6 +294,7 @@ export function buildObservabilitySnapshot(params: {
     telegram: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
     discord: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
     whatsapp: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
+    imessage: { events: 0, errors: 0, forwarded: 0, deferred: 0, dropped: 0 },
   };
   return {
     generatedAtMs: params.nowMs,

@@ -26,6 +26,8 @@ export function createRuntimeLauncher(deps: {
     | "discordGatewayGuildEnabled"
     | "discordGatewayIntents"
     | "discordGatewayDefaultIntents"
+    | "imessageInboundEnabled"
+    | "imessageServerUrl"
   > & { telegramBotToken?: string };
   server: http.Server;
   countActiveTenantInboundTargets: () => number;
@@ -43,6 +45,7 @@ export function createRuntimeLauncher(deps: {
   }) => Promise<{ response: Response; result: Record<string, unknown> }>;
   runDiscordInboundLoop: () => Promise<void>;
   runDiscordGatewayDmLoop: () => Promise<void>;
+  runIMessageInboundLoop: () => Promise<void>;
 }): {
   startMuxServerRuntime: () => Promise<void>;
 } {
@@ -159,6 +162,17 @@ export function createRuntimeLauncher(deps: {
             deps.log({ type: "discord_gateway_dm_loop_fatal", error: String(error) });
           });
         }
+      }
+      if (deps.config.imessageInboundEnabled && deps.config.imessageServerUrl) {
+        deps.log({
+          type: "imessage_inbound_started",
+          tenantTargetCount,
+          openclawAccountId: deps.config.openclawMuxAccountId,
+          serverUrl: deps.config.imessageServerUrl,
+        });
+        void deps.runIMessageInboundLoop().catch((error) => {
+          deps.log({ type: "imessage_inbound_loop_fatal", error: String(error) });
+        });
       }
     });
   }

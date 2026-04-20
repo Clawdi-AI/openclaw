@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   buildAccountScopedDmSecurityPolicy,
   collectAllowlistProviderRestrictSendersWarnings,
@@ -5,14 +6,17 @@ import {
 import {
   applyAccountNameToChannelSection,
   buildChannelConfigSchema,
+  buildIMessageRawSend,
   collectStatusIssuesFromLastError,
   DEFAULT_ACCOUNT_ID,
   deleteAccountFromConfigSection,
   formatTrimmedAllowFromEntries,
   getChatChannelMeta,
+  type IMessageInlineAttachment,
   imessageOnboardingAdapter,
   IMessageConfigSchema,
   listIMessageAccountIds,
+  loadWebMediaRaw,
   looksLikeIMessageTargetId,
   migrateBaseNameToDefaultAccount,
   normalizeAccountId,
@@ -25,6 +29,8 @@ import {
   resolveIMessageConfigDefaultTo,
   resolveIMessageGroupRequireMention,
   resolveIMessageGroupToolPolicy,
+  isMuxEnabled,
+  sendViaMux,
   setAccountEnabledInConfigSection,
   type ChannelPlugin,
   type ResolvedIMessageAccount,
@@ -78,6 +84,69 @@ async function sendIMessageOutbound(params: {
     maxBytes,
     accountId: params.accountId ?? undefined,
     replyToId: params.replyToId ?? undefined,
+  });
+}
+
+function isHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+function deriveAttachmentFilename(mediaUrl: string): string {
+  // `new URL()` throws on plain filesystem paths; fall through to a
+  // direct path.basename in that case.
+  const source = (() => {
+    try {
+      return new URL(mediaUrl).pathname;
+    } catch {
+      return mediaUrl;
+    }
+  })();
+  const base = path.basename(source);
+  return base && base !== "/" ? base : "attachment";
+}
+
+// Convert a non-http media reference (local filesystem path, file:// URL,
+// data: URL) into an inline base64 attachment the mux-server can post
+// straight to Photon's multipart endpoint. Photon rejects bare URLs unless
+// they are reachable over public HTTPS; rather than forcing every call site
+// to stage media on a CDN, we let openclaw load bytes from its own sandbox
+// and ship them through the raw.imessage.send.attachments envelope.
+
+// Hard ceiling enforced by mux-server's parseInlineAttachments —
+// IMESSAGE_ATTACHMENT_MAX_BYTES in mux-server/src/channels/imessage/api.ts.
+// Clamping here means a deployment misconfigured with a higher channel-level
+// mediaMaxMb still fails fast with a readable "exceeds ... bytes" error from
+// loadWebMediaRaw instead of a cryptic "estimated X bytes" 400 after the
+// file is already on disk and base64-encoded in memory.
+const IMESSAGE_MUX_INLINE_MAX_BYTES = 100 * 1024 * 1024;
+
+async function loadInlineAttachment(params: {
+  mediaUrl: string;
+  maxBytes?: number;
+  mediaLocalRoots?: readonly string[];
+}): Promise<IMessageInlineAttachment> {
+  const effectiveMax = Math.min(
+    params.maxBytes ?? IMESSAGE_MUX_INLINE_MAX_BYTES,
+    IMESSAGE_MUX_INLINE_MAX_BYTES,
+  );
+  const media = await loadWebMediaRaw(params.mediaUrl, {
+    maxBytes: effectiveMax,
+    optimizeImages: false,
+    localRoots: params.mediaLocalRoots?.length ? params.mediaLocalRoots : undefined,
+  });
+  return {
+    filename: media.fileName ?? deriveAttachmentFilename(params.mediaUrl),
+    contentType: media.contentType ?? "application/octet-stream",
+    dataBase64: media.buffer.toString("base64"),
+  };
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
   });
 }
 
@@ -229,7 +298,22 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
     chunker: (text, limit) => getIMessageRuntime().channel.text.chunkText(text, limit),
     chunkerMode: "text",
     textChunkLimit: 4000,
-    sendText: async ({ cfg, to, text, accountId, deps, replyToId }) => {
+    sendText: async ({ cfg, to, text, accountId, deps, replyToId, sessionKey }) => {
+      if (isMuxEnabled({ cfg, channel: "imessage", accountId: accountId ?? undefined })) {
+        const result = await sendViaMux({
+          cfg,
+          channel: "imessage",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text,
+          replyToId,
+          raw: {
+            imessage: buildIMessageRawSend({ text }),
+          },
+        });
+        return { channel: "imessage", ...result };
+      }
       const result = await sendIMessageOutbound({
         cfg,
         to,
@@ -240,7 +324,60 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
       });
       return { channel: "imessage", ...result };
     },
-    sendMedia: async ({ cfg, to, text, mediaUrl, mediaLocalRoots, accountId, deps, replyToId }) => {
+    sendMedia: async ({
+      cfg,
+      to,
+      text,
+      mediaUrl,
+      mediaLocalRoots,
+      accountId,
+      deps,
+      replyToId,
+      sessionKey,
+    }) => {
+      if (isMuxEnabled({ cfg, channel: "imessage", accountId: accountId ?? undefined })) {
+        // Photon's attachment endpoint expects either a reachable https URL
+        // (mux fetches then re-posts) or raw multipart bytes. Local paths
+        // and file:/data:/blob: URLs are unreachable from mux-server's
+        // network namespace; inline them as base64 so Photon still gets
+        // raw bytes, gated by the channel's configured media size limit.
+        let rawMediaUrl: string | undefined = mediaUrl;
+        let inlineAttachments: IMessageInlineAttachment[] | undefined;
+        if (mediaUrl && !isHttpUrl(mediaUrl)) {
+          const maxBytes = resolveChannelMediaMaxBytes({
+            cfg,
+            resolveChannelLimitMb: ({ cfg: inner, accountId: innerAccount }) =>
+              inner.channels?.imessage?.accounts?.[innerAccount]?.mediaMaxMb ??
+              inner.channels?.imessage?.mediaMaxMb,
+            accountId: accountId ?? undefined,
+          });
+          const attachment = await loadInlineAttachment({
+            mediaUrl,
+            maxBytes,
+            mediaLocalRoots,
+          });
+          inlineAttachments = [attachment];
+          rawMediaUrl = undefined;
+        }
+        const result = await sendViaMux({
+          cfg,
+          channel: "imessage",
+          accountId: accountId ?? undefined,
+          sessionKey,
+          to,
+          text,
+          ...(rawMediaUrl ? { mediaUrl: rawMediaUrl } : {}),
+          replyToId,
+          raw: {
+            imessage: buildIMessageRawSend({
+              text,
+              ...(rawMediaUrl ? { mediaUrl: rawMediaUrl } : {}),
+              ...(inlineAttachments ? { attachments: inlineAttachments } : {}),
+            }),
+          },
+        });
+        return { channel: "imessage", ...result };
+      }
       const result = await sendIMessageOutbound({
         cfg,
         to,
@@ -292,6 +429,10 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount> = {
   gateway: {
     startAccount: async (ctx) => {
       const account = ctx.account;
+      if (isMuxEnabled({ cfg: ctx.cfg, channel: "imessage", accountId: account.accountId })) {
+        ctx.log?.info(`[${account.accountId}] mux enabled; skipping native provider startup`);
+        return await waitForAbort(ctx.abortSignal);
+      }
       const cliPath = account.config.cliPath?.trim() || "imsg";
       const dbPath = account.config.dbPath?.trim();
       ctx.setStatus({

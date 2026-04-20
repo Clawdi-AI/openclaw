@@ -14,8 +14,10 @@ import { readNonEmptyString } from "../domain/values.js";
 import {
   buildDiscordRouteKey,
   buildDiscordThreadScopedSessionKey,
+  buildIMessageRouteKey,
   buildTelegramRouteKey,
   buildWhatsAppRouteKey,
+  deriveIMessageSessionKey,
   deriveTelegramSessionKey,
   deriveWhatsAppSessionKey,
   parseDiscordRouteKey,
@@ -682,6 +684,147 @@ export function createPairingService(deps: {
     });
   }
 
+  function claimIMessagePairingToken(params: {
+    token: string;
+    chatGuid: string;
+    chatType: "direct" | "group";
+  }): ClaimResult | null {
+    return runTokenClaimTransaction(() => {
+      const now = Date.now();
+      purgeExpiredPairingTokens(now);
+      const tokenHash = hashPairingToken(params.token);
+      const row = deps.db.stmtSelectActivePairingTokenByHash.get(tokenHash, now) as
+        | PairingTokenRow
+        | undefined;
+      if (!row) {
+        return null;
+      }
+
+      const tenantId = String(row.tenant_id);
+      const routeKey = buildIMessageRouteKey({
+        chatGuid: params.chatGuid,
+        chatType: params.chatType,
+      });
+
+      let claimType: ClaimType = "fresh";
+      let previousTenantId: string | undefined;
+
+      const liveBinding = deps.resolveLiveBindingByRouteKey("imessage", routeKey);
+      if (liveBinding && liveBinding.tenant_id !== tenantId) {
+        // Takeover: a different tenant currently owns this route.
+        previousTenantId = liveBinding.tenant_id;
+        deps.db.stmtDeactivateLiveBinding.run(now, liveBinding.binding_id, liveBinding.tenant_id);
+        deps.db.stmtDeleteSessionRoutesByBinding.run(liveBinding.binding_id, liveBinding.tenant_id);
+        deps.writeAuditLog(
+          liveBinding.tenant_id,
+          "pairing_unbound_by_route_takeover",
+          {
+            bindingId: liveBinding.binding_id,
+            routeKey,
+            takeoverTenantId: tenantId,
+          },
+          now,
+        );
+        claimType = "takeover";
+      }
+
+      const existing = deps.db.stmtSelectActiveBindingByTenantAndRoute.get(
+        tenantId,
+        "imessage",
+        routeKey,
+      ) as ExistingBindingRow | undefined;
+
+      if (existing?.binding_id && existing?.status === "active") {
+        // Same tenant already active — re-pair.
+        const bindingId = String(existing.binding_id);
+        const preferredSessionKey = readNonEmptyString(row.session_key);
+        const sessionKey =
+          preferredSessionKey ??
+          deriveIMessageSessionKey({
+            chatGuid: params.chatGuid,
+            chatType: params.chatType,
+          });
+        deps.db.stmtUpsertSessionRoute.run(
+          tenantId,
+          "imessage",
+          sessionKey,
+          bindingId,
+          JSON.stringify({ routeKey, chatGuid: params.chatGuid }),
+          now,
+        );
+        const consumeRepaired = deps.db.stmtConsumePairingToken.run(now, tokenHash, now);
+        if (consumeRepaired.changes === 0) {
+          return null;
+        }
+        deps.db.stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+        deps.writeAuditLog(
+          tenantId,
+          "pairing_token_claimed",
+          { bindingId, routeKey, claimType: "repaired" },
+          now,
+        );
+        return { tenantId, bindingId, routeKey, sessionKey, claimType: "repaired" };
+      }
+
+      const bindingId =
+        (existing?.binding_id && String(existing.binding_id)) || `bind_${randomUUID()}`;
+      if (!existing?.binding_id) {
+        try {
+          deps.db.stmtInsertBinding.run(
+            bindingId,
+            tenantId,
+            "imessage",
+            params.chatType === "group" ? "group" : "chat",
+            routeKey,
+            now,
+            now,
+          );
+        } catch (error) {
+          if (deps.isSqliteUniqueConstraintError(error)) {
+            return null;
+          }
+          throw error;
+        }
+      }
+
+      const preferredSessionKey = readNonEmptyString(row.session_key);
+      const sessionKey =
+        preferredSessionKey ??
+        deriveIMessageSessionKey({
+          chatGuid: params.chatGuid,
+          chatType: params.chatType,
+        });
+      deps.db.stmtUpsertSessionRoute.run(
+        tenantId,
+        "imessage",
+        sessionKey,
+        bindingId,
+        JSON.stringify({ routeKey, chatGuid: params.chatGuid }),
+        now,
+      );
+
+      const consumeResult = deps.db.stmtConsumePairingToken.run(now, tokenHash, now);
+      if (consumeResult.changes === 0) {
+        return null;
+      }
+      deps.db.stmtAttachPairingTokenBinding.run(bindingId, routeKey, tokenHash);
+      deps.writeAuditLog(
+        tenantId,
+        "pairing_token_claimed",
+        { bindingId, routeKey, claimType, ...(previousTenantId ? { previousTenantId } : {}) },
+        now,
+      );
+      return {
+        tenantId,
+        bindingId,
+        routeKey,
+        sessionKey,
+        claimType,
+        ...(previousTenantId ? { previousTenantId } : {}),
+      };
+    });
+  }
+
   function claimPairingForTenant(tenant: TenantIdentity, code: string, sessionKey?: string) {
     const now = Date.now();
     const row = deps.db.stmtSelectPairingCodeByCode.get(code) as PairingCodeRow | undefined;
@@ -798,6 +941,7 @@ export function createPairingService(deps: {
     claimTelegramPairingToken,
     claimDiscordPairingToken,
     claimWhatsAppPairingToken,
+    claimIMessagePairingToken,
     claimPairingForTenant,
     listPairingsForTenant,
     unbindPairingForTenant,

@@ -11,7 +11,7 @@ import {
 export function createObservabilityRuntime(deps: {
   metrics: {
     renderPrometheus: (
-      queueDepthByChannel: Record<"telegram" | "discord" | "whatsapp", number>,
+      queueDepthByChannel: Record<"telegram" | "discord" | "whatsapp" | "imessage", number>,
       nowMs?: number,
     ) => Promise<string>;
   };
@@ -65,17 +65,27 @@ export function createObservabilityRuntime(deps: {
   whatsappAuthDir: string;
   whatsappAccountId: string;
   openclawMuxAccountId: string;
+  imessageInboundEnabled: boolean;
+  imessageRuntimeHealth: {
+    connected: boolean;
+    loopStartedAtMs: number | null;
+    lastSdkConnectedAtMs: number | null;
+    lastSdkClosedAtMs: number | null;
+    lastSdkErrorAtMs: number | null;
+    lastSdkError: string | null;
+    lastInboundSeenAtMs: number | null;
+  };
 }): {
   countActiveTenantInboundTargets: () => number;
   renderMetricsPayload: () => Promise<string>;
   buildQueueSnapshot: (nowMs?: number) => {
-    depth: Record<"telegram" | "discord" | "whatsapp", number>;
-    oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp", number | null>;
+    depth: Record<"telegram" | "discord" | "whatsapp" | "imessage", number>;
+    oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp" | "imessage", number | null>;
   };
   buildReadinessReport: (nowMs?: number) => {
     ready: boolean;
     channels: Record<
-      "telegram" | "discord" | "whatsapp",
+      "telegram" | "discord" | "whatsapp" | "imessage",
       {
         status: string;
         ready: boolean;
@@ -87,10 +97,10 @@ export function createObservabilityRuntime(deps: {
       }
     >;
     queues: {
-      depth: Record<"telegram" | "discord" | "whatsapp", number>;
-      oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp", number | null>;
+      depth: Record<"telegram" | "discord" | "whatsapp" | "imessage", number>;
+      oldestQueuedAgeMs: Record<"telegram" | "discord" | "whatsapp" | "imessage", number | null>;
     };
-    degraded: Array<{ channel: "telegram" | "discord" | "whatsapp"; reason: string }>;
+    degraded: Array<{ channel: "telegram" | "discord" | "whatsapp" | "imessage"; reason: string }>;
   };
   renderObservabilitySnapshot: (params: {
     nowMs?: number;
@@ -272,6 +282,8 @@ export function createObservabilityRuntime(deps: {
       whatsappInboundEnabled: deps.whatsappInboundEnabled,
       whatsappRuntimeHealth: deps.whatsappRuntimeHealth,
       whatsappCredentialStatus: whatsAppCredentialHealth.status,
+      imessageInboundEnabled: deps.imessageInboundEnabled,
+      imessageRuntimeHealth: deps.imessageRuntimeHealth,
     });
   }
 

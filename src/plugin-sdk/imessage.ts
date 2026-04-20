@@ -28,3 +28,9 @@ export { IMessageConfigSchema } from "../config/zod-schema.providers-core.js";
 
 export { resolveChannelMediaMaxBytes } from "../channels/plugins/media-limits.js";
 export { collectStatusIssuesFromLastError } from "./status-helpers.js";
+export { isMuxEnabled, sendViaMux } from "../channels/plugins/outbound/mux.js";
+export {
+  buildIMessageRawSend,
+  type IMessageInlineAttachment,
+} from "../channels/plugins/mux-envelope.js";
+export { loadWebMediaRaw, type WebMediaResult } from "../web/media.js";

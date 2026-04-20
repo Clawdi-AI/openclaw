@@ -1276,6 +1276,7 @@ export const IMessageAccountSchemaBase = z
       .optional(),
     heartbeat: ChannelHeartbeatVisibilitySchema,
     responsePrefix: z.string().optional(),
+    mux: ChannelMuxSchema,
   })
   .strict();
 

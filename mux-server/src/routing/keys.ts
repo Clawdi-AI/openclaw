@@ -1,6 +1,7 @@
 import type {
   DiscordBoundRoute,
   DiscordOutboundTarget,
+  IMessageBoundRoute,
   OutboundResolutionMode,
   WhatsAppBoundRoute,
   TelegramBoundRoute,
@@ -389,4 +390,82 @@ export function listWhatsAppOutboundRouteKeys(params: {
     }
   }
   return uniqueRouteKeys(routeKeys);
+}
+
+export function buildIMessageRouteKey(params: {
+  chatGuid: string;
+  chatType: "direct" | "group";
+}): string {
+  return `imessage:${params.chatType}:${params.chatGuid}`;
+}
+
+export function parseIMessageRouteKey(routeKey: string): IMessageBoundRoute | null {
+  const match = routeKey.match(/^imessage:(direct|group):(.+)$/);
+  if (!match?.[1] || !match?.[2]) {
+    return null;
+  }
+  const chatType = match[1] === "group" ? "group" : "direct";
+  const chatGuid = match[2].trim();
+  return chatGuid ? { chatGuid, chatType } : null;
+}
+
+export function deriveIMessageSessionKey(params: {
+  chatGuid: string;
+  chatType: "direct" | "group";
+}): string {
+  return params.chatType === "group"
+    ? `agent:main:imessage:group:${params.chatGuid}`
+    : `agent:main:imessage:direct:${params.chatGuid}`;
+}
+
+export function parseIMessageOutboundChatGuid(value: unknown): string | null {
+  const raw = readNonEmptyString(value);
+  if (!raw) {
+    return null;
+  }
+  return raw.replace(/^imessage:/i, "").trim() || null;
+}
+
+export function listIMessageOutboundRouteKeys(params: {
+  requestedTo?: unknown;
+  rawSend?: Record<string, unknown> | null;
+}): string[] {
+  const outerGuid = parseIMessageOutboundChatGuid(params.requestedTo);
+  const innerGuid =
+    parseIMessageOutboundChatGuid(params.rawSend?.to) ??
+    parseIMessageOutboundChatGuid(params.rawSend?.chatGuid);
+  if (outerGuid && innerGuid && outerGuid !== innerGuid) {
+    return [];
+  }
+  const chatGuid = outerGuid ?? innerGuid;
+  if (!chatGuid) {
+    return [];
+  }
+  // Bindings created via pairing store the full BlueBubbles chat_guid. The
+  // service prefix BlueBubbles emits depends on how the message arrived:
+  //   - "any;-;+...": service-agnostic DM (most common in the Photon setup)
+  //   - "iMessage;-;+...": explicit iMessage delivery
+  //   - "SMS;-;+...": fallback SMS delivery (green bubble)
+  // Agents normalize outbound targets to the bare handle
+  // ("imessage:+15551234567" → "+15551234567"), so target-first lookup
+  // would miss the binding without a fallback synthesis. Groups stay on
+  // their full ";+;" chat_guid (creator-supplied and canonical).
+  //
+  // Multi-tenant safety: `resolveRouteKeyByTarget` filters by tenantId +
+  // exact route_key, so the synthesized fallback keys can only match a
+  // binding owned by the same tenant issuing the outbound — no cross-tenant
+  // collision risk even when the same phone number is paired in two tenants.
+  const isGroupChatGuid = chatGuid.includes(";+;");
+  const isAlreadyChatGuid = isGroupChatGuid || chatGuid.includes(";-;");
+  const chatType: "direct" | "group" = isGroupChatGuid ? "group" : "direct";
+  const fallbackPrefixes =
+    !isAlreadyChatGuid && chatType === "direct"
+      ? (["any", "iMessage", "SMS"] as const)
+      : ([] as const);
+  return uniqueRouteKeys([
+    buildIMessageRouteKey({ chatGuid, chatType }),
+    ...fallbackPrefixes.map((prefix) =>
+      buildIMessageRouteKey({ chatGuid: `${prefix};-;${chatGuid}`, chatType: "direct" }),
+    ),
+  ]);
 }

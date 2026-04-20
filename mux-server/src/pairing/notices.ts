@@ -239,7 +239,9 @@ export function createPairingNotices(deps: {
         ? "telegram"
         : params.channel === "discord"
           ? "discord"
-          : "whatsapp";
+          : params.channel === "imessage"
+            ? "imessage"
+            : "whatsapp";
     const lines = [
       styleBold(params.channel, "Bot status"),
       `Channel: ${styleText(params.channel, channelLabel)}`,
@@ -265,7 +267,13 @@ export function createPairingNotices(deps: {
       deps.getNoticeText("postPairingPrompt") ||
       "Hey, please introduce yourself in this way:\n- Understand who I am (user). If you don't know (e.g. it's called \"there\"), feel free to ask.\n- Then check what connector you have the access to using composio MCP tool (clawdi-mcp.COMPOSIO_SEARCH_TOOLS). It's ok to have no connection, but if there are some, you can tell me what I can do with the connectors.\n- If there are connectors, suggest me 3-4 compound multi-app automations. Each with one sentence, combining 2-3 apps to complete some potential useful tasks.\n- Otherwise, you can suggest me what the most popular connectors can do if I have them connected (Gmail, notion, drive, slack). Then it's a good opportunity to invite me to set up the connectors.\n- Ask me my background like name and role (occupation) if you don't know. Guide me to find out what I can do with you. You are so powerful. So you can do a lot of awesome things.\nReply me concisely and friendly within 100 words. Don't be verbose. We are in a conversation and feel free to explore it together with me.";
     const channelLabel =
-      channel === "telegram" ? "Telegram" : channel === "discord" ? "Discord" : "WhatsApp";
+      channel === "telegram"
+        ? "Telegram"
+        : channel === "discord"
+          ? "Discord"
+          : channel === "imessage"
+            ? "iMessage"
+            : "WhatsApp";
     return template.replace(/\{\{channel\}\}/g, channelLabel);
   }
 

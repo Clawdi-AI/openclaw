@@ -7,6 +7,12 @@ import { createAuthService } from "./auth/service.js";
 import { createDiscordApiService } from "./channels/discord/api.js";
 import { createDiscordInboundRuntime } from "./channels/discord/inbound.js";
 import {
+  createIMessageApiService,
+  IMESSAGE_ATTACHMENT_MAX_BYTES_EXPORT,
+} from "./channels/imessage/api.js";
+import { createIMessageInboundRuntime } from "./channels/imessage/inbound.js";
+import {
+  loadIMessageRuntimeModules,
   loadWebRuntimeModules as loadWebRuntimeModulesBase,
   loadDiscordRuntimeModules,
 } from "./channels/runtime-modules.js";
@@ -52,6 +58,7 @@ import { createPairingService } from "./pairing/service.js";
 import {
   buildDiscordChannelSessionKey,
   buildDiscordDirectSessionKey,
+  listIMessageOutboundRouteKeys,
   listTelegramOutboundRouteKeys,
   listWhatsAppOutboundRouteKeys,
   normalizeDiscordSessionAgentId,
@@ -414,6 +421,17 @@ const {
   deriveDiscordSessionKey,
 });
 
+const imessageApiService = createIMessageApiService({
+  serverUrl: config.imessageServerUrl ?? "",
+  apiKey: config.imessageApiKey ?? null,
+  pairingContactVcardUrl: config.imessagePairingContactVcardUrl ?? undefined,
+  log,
+  loadSdkFactory: async () => {
+    const runtime = await loadIMessageRuntimeModules();
+    return runtime.createSdk;
+  },
+});
+
 const {
   buildInboundAuthHeaders,
   isWhatsAppCommandText,
@@ -422,10 +440,12 @@ const {
   resolveTelegramBoundRoute,
   resolveDiscordBoundRoute,
   resolveWhatsAppBoundRoute,
+  resolveIMessageBoundRoute,
   resolveDiscordOutboundChannelId,
   resolveTelegramIncomingTopicId,
   resolveTelegramBindingForIncoming,
   resolveWhatsAppBindingForIncoming,
+  resolveIMessageBindingForIncoming,
   deactivateLiveBinding,
   setBindingPending,
   resolveBindingSessionKey,
@@ -490,6 +510,7 @@ const {
   claimTelegramPairingToken,
   claimDiscordPairingToken,
   claimWhatsAppPairingToken,
+  claimIMessagePairingToken,
   claimPairingForTenant,
   listPairingsForTenant,
   unbindPairingForTenant,
@@ -589,6 +610,8 @@ const {
   whatsappAuthDir: config.whatsappAuthDir,
   whatsappAccountId: config.whatsappAccountId,
   openclawMuxAccountId: config.openclawMuxAccountId,
+  imessageInboundEnabled: config.imessageInboundEnabled,
+  imessageRuntimeHealth: imessageApiService.getHealth(),
 });
 
 const { runTelegramInboundLoop } = createTelegramInboundRuntime({
@@ -670,6 +693,28 @@ const { runDiscordInboundLoop, runDiscordGatewayDmLoop } = createDiscordInboundR
   fetchDiscordGatewayUrl,
 });
 
+const { start: startIMessageInbound, stop: stopIMessageInbound } = createIMessageInboundRuntime({
+  config,
+  apiService: imessageApiService,
+  metrics,
+  log,
+  db: stmts,
+  selectActiveBindingByRouteKey: (channel, routeKey) => {
+    if (channel !== "imessage") {
+      return null;
+    }
+    return resolveIMessageBindingForIncoming(routeKey);
+  },
+  resolveTenantInboundTarget,
+  buildInboundAuthHeaders,
+  claimIMessagePairingToken,
+  renderUnpairedHintNotice,
+  sendPostClaimNotices,
+});
+// Reference stopIMessageInbound so typecheck does not drop the export; reserved for future
+// graceful-shutdown wiring (mirrors discord/whatsapp pattern where close is per-listener).
+void stopIMessageInbound;
+
 const { runWhatsAppInboundLoop } = createWhatsAppInboundRuntime({
   config,
   whatsappRuntimeHealth,
@@ -706,9 +751,11 @@ const { runOutboundAction, runOutboundSend } = createOutboundService({
   listTelegramOutboundRouteKeys,
   listDiscordOutboundRouteKeys,
   listWhatsAppOutboundRouteKeys,
+  listIMessageOutboundRouteKeys,
   resolveTelegramBoundRoute,
   resolveDiscordBoundRoute,
   resolveWhatsAppBoundRoute,
+  resolveIMessageBoundRoute,
   resolveDiscordOutboundChannelId,
   sendTelegram,
   sendTelegramWithFallbacks,
@@ -718,6 +765,13 @@ const { runOutboundAction, runOutboundSend } = createOutboundService({
   requireDiscordBotToken,
   loadDiscordRuntimeModules,
   loadWebRuntimeModules,
+  imessageApiService: {
+    getSdk: () => imessageApiService.getSdk(),
+    sendMessage: imessageApiService.sendMessage,
+    sendAttachment: imessageApiService.sendAttachment,
+    sendAttachmentBytes: imessageApiService.sendAttachmentBytes,
+  },
+  imessageAttachmentMaxBytes: IMESSAGE_ATTACHMENT_MAX_BYTES_EXPORT,
 });
 
 const { handleRequest } = createHttpRouteHandler({
@@ -831,6 +885,7 @@ export const { startMuxServerRuntime } = createRuntimeLauncher({
   discordRequest,
   runDiscordInboundLoop,
   runDiscordGatewayDmLoop,
+  runIMessageInboundLoop: startIMessageInbound,
 });
 
 await startMuxServerRuntime();
