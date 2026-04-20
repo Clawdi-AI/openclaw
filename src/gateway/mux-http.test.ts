@@ -796,19 +796,13 @@ describe("handleMuxInboundHttpRequest", () => {
       expect(await handleMuxInboundHttpRequest(req, res)).toBe(true);
       expect(res.statusCode).toBe(202);
       await waitForAsyncDispatch();
-      const expectedTypingTarget =
-        channel === "discord"
-          ? "user:42"
-          : channel === "whatsapp"
-            ? "whatsapp:+42"
-            : "telegram:123";
       expect(mocks.sendTypingViaMux).toHaveBeenCalledWith(
         expect.objectContaining({
           cfg: expect.any(Object),
           channel,
           accountId: "default",
           sessionKey: "agent:main:main",
-          to: expectedTypingTarget,
+          to: channel === "discord" ? "user:42" : `${channel}:123`,
         }),
       );
     },
@@ -1058,7 +1052,35 @@ describe("handleMuxInboundHttpRequest", () => {
         sessionKey: "agent:main:main",
         surface: "mux",
         originatingChannel: "whatsapp",
-        originatingTo: "whatsapp:+15550001111",
+        // The raw mux inbound `to` is preserved verbatim so that the reply
+        // path fed to the mux-server carries a chatJid which matches the
+        // binding's routeKey. Over-normalizing (e.g. to the sender E164)
+        // makes the mux-server's target-based route lookup rewrite the
+        // chatJid and miss the binding with a 403 route-not-bound.
+        originatingTo: "whatsapp:+15551230000",
+        messageThreadId: undefined,
+      },
+    },
+    {
+      // Regression: standard Baileys JID in `payload.to` (including the
+      // optional `:0` device suffix) must round-trip verbatim into
+      // originatingTo so mux-server can match the binding that was
+      // registered from the same JID.
+      name: "whatsapp dm with baileys JID",
+      body: {
+        channel: "whatsapp",
+        sessionKey: "wa:dm:15105989468@s.whatsapp.net",
+        to: "whatsapp:15105989468:0@s.whatsapp.net",
+        from: "whatsapp:+15105989468",
+        body: "hello from baileys",
+        messageId: "wa-dm-baileys-1",
+      },
+      expected: {
+        accountId: "default",
+        sessionKey: "agent:main:main",
+        surface: "mux",
+        originatingChannel: "whatsapp",
+        originatingTo: "whatsapp:15105989468:0@s.whatsapp.net",
         messageThreadId: undefined,
       },
     },
