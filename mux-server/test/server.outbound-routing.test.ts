@@ -2924,4 +2924,123 @@ describe("mux server", () => {
       error: "whatsapp send failed",
     });
   });
+
+  // Regression suite: route-key candidate expansion
+  //
+  // Bindings are observed in production as E164 bare (`+15550001111`) — the
+  // shape the current bridge emits for DMs — and as the canonical
+  // `<digits>@s.whatsapp.net` JID that the historical lookup always
+  // synthesized and that the rest of this file uses as fixture. The outbound
+  // route-key lookup must resolve an outbound `to` to either form without
+  // returning `403 route not bound` (the bug that left hangyin@phala.network's
+  // `/status` reply stuck in the delivery queue).
+  //
+  // 502 "whatsapp send failed" in these tests means the route lookup matched
+  // — the subsequent bridge send is a stub that always fails. 403 would mean
+  // the route lookup missed.
+
+  test("whatsapp outbound matches E164-bare binding when the caller provides E164 `to`", async () => {
+    const server = await h.startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-E164-BARE",
+          channel: "whatsapp",
+          // Binding stored as E164 bare — the historical chatJid shape that
+          // silently broke outbound routing.
+          routeKey: "whatsapp:default:chat:+15550001111",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    expect(
+      (
+        await h.claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-WA-E164-BARE",
+          sessionKey: "agent:main:whatsapp:direct:+15550001111",
+        })
+      ).status,
+    ).toBe(200);
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "whatsapp",
+        sessionKey: "agent:main:main",
+        to: "whatsapp:+15550001111",
+        raw: {
+          whatsapp: {
+            send: {
+              text: "hello e164-bare",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: "whatsapp send failed",
+    });
+  });
+
+  test("whatsapp outbound still matches canonical `<digits>@s.whatsapp.net` binding (regression floor)", async () => {
+    const server = await h.startServer({
+      tenantsJson: JSON.stringify([{ id: "tenant-a", name: "Tenant A", apiKey: "tenant-a-key" }]),
+      pairingCodesJson: JSON.stringify([
+        {
+          code: "PAIR-WA-CANONICAL-E164",
+          channel: "whatsapp",
+          routeKey: "whatsapp:default:chat:15550001111@s.whatsapp.net",
+          scope: "chat",
+        },
+      ]),
+    });
+
+    expect(
+      (
+        await h.claimPairing({
+          port: server.port,
+          apiKey: "tenant-a-key",
+          code: "PAIR-WA-CANONICAL-E164",
+          sessionKey: "agent:main:whatsapp:direct:+15550001111",
+        })
+      ).status,
+    ).toBe(200);
+
+    // Caller sends E164 `to` — must still resolve to the canonical binding.
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/mux/outbound/send`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tenant-a-key",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        channel: "whatsapp",
+        sessionKey: "agent:main:main",
+        to: "whatsapp:+15550001111",
+        raw: {
+          whatsapp: {
+            send: {
+              text: "hello canonical via e164",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: "whatsapp send failed",
+    });
+  });
 });

@@ -315,23 +315,78 @@ export function parseWhatsAppOutboundChatJid(value: unknown): string | null {
   return `${digits}@s.whatsapp.net`;
 }
 
+/**
+ * Expand an outbound chatJid-shaped value into the set of forms the matching
+ * binding might have been stored under.
+ *
+ * Any chatJid with an `@` (canonical `s.whatsapp.net` JID, `g.us` group, or
+ * `lid` target) is unambiguous and passes through verbatim. Bare-number
+ * inputs are the ambiguous case: bindings have been observed as E164 bare
+ * (`+<digits>`) — the shape the current WhatsApp bridge emits for DMs — and
+ * as the canonical `<digits>@s.whatsapp.net` JID that the historical
+ * `parseWhatsAppOutboundChatJid` always synthesized, which is also the
+ * shape legacy bridge/mux-server paths produced and what the rest of the
+ * suite uses as routeKey fixtures. We return both, input-shape first so
+ * the first-match lookup picks the form that most likely matches the
+ * binding for this tenant.
+ *
+ * We deliberately do *not* expand to digits-only (`<digits>`) or the
+ * Baileys device-suffix JID (`<digits>:0@s.whatsapp.net`): neither has
+ * been observed as a persisted binding. Extend here if one ever is.
+ */
+export function expandWhatsAppOutboundChatJidCandidates(value: unknown): string[] {
+  const raw = readNonEmptyString(value);
+  if (!raw) {
+    return [];
+  }
+  const withoutPrefix = raw.replace(/^whatsapp:/i, "").trim();
+  if (!withoutPrefix) {
+    return [];
+  }
+  if (withoutPrefix.includes("@")) {
+    return [withoutPrefix];
+  }
+  const digits = withoutPrefix.replace(/[^\d]/g, "");
+  if (!digits) {
+    return [];
+  }
+  return withoutPrefix.startsWith("+")
+    ? [`+${digits}`, `${digits}@s.whatsapp.net`]
+    : [`${digits}@s.whatsapp.net`, `+${digits}`];
+}
+
 export function listWhatsAppOutboundRouteKeys(params: {
   requestedTo?: unknown;
   accountIds: Array<string | null | undefined>;
   rawSend?: Record<string, unknown> | null;
 }): string[] {
-  const outerChatJid = parseWhatsAppOutboundChatJid(params.requestedTo);
-  const innerChatJid =
-    parseWhatsAppOutboundChatJid(params.rawSend?.to) ??
-    parseWhatsAppOutboundChatJid(params.rawSend?.chatJid);
-  if (outerChatJid && innerChatJid && outerChatJid !== innerChatJid) {
+  const outerCandidates = expandWhatsAppOutboundChatJidCandidates(params.requestedTo);
+  const innerRaw = params.rawSend?.to ?? params.rawSend?.chatJid;
+  const innerCandidates = expandWhatsAppOutboundChatJidCandidates(innerRaw);
+
+  // Cross-field consistency: if both outer (`to`) and inner (`raw.to`/`raw.chatJid`)
+  // are provided, their candidate sets must overlap — otherwise the caller asked
+  // for two different peers and we refuse to guess.
+  let chatJidCandidates: string[];
+  if (outerCandidates.length > 0 && innerCandidates.length > 0) {
+    const innerSet = new Set(innerCandidates);
+    const intersection = outerCandidates.filter((c) => innerSet.has(c));
+    if (intersection.length === 0) {
+      return [];
+    }
+    chatJidCandidates = intersection;
+  } else {
+    chatJidCandidates = outerCandidates.length > 0 ? outerCandidates : innerCandidates;
+  }
+  if (chatJidCandidates.length === 0) {
     return [];
   }
-  const chatJid = outerChatJid;
-  if (!chatJid) {
-    return [];
+  const accountIds = uniqueRouteKeys(params.accountIds);
+  const routeKeys: Array<string | null> = [];
+  for (const accountId of accountIds) {
+    for (const chatJid of chatJidCandidates) {
+      routeKeys.push(buildWhatsAppRouteKey(chatJid, accountId));
+    }
   }
-  return uniqueRouteKeys(params.accountIds).map((accountId) =>
-    buildWhatsAppRouteKey(chatJid, accountId),
-  );
+  return uniqueRouteKeys(routeKeys);
 }
