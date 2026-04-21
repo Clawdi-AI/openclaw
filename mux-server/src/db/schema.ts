@@ -49,6 +49,13 @@ export function initializeDatabase(database: DatabaseSync) {
       channel TEXT NOT NULL,
       scope TEXT NOT NULL,
       route_key TEXT NOT NULL,
+      -- JSON array of alternate routeKeys that also resolve to this binding.
+      -- Populated when a binding is healed from a legacy chatJid form (e.g.
+      -- <lid>@lid) to a canonical one (<digits>@s.whatsapp.net); the
+      -- legacy form is kept here so outbound lookups whose target was frozen
+      -- under the old form -- mainly cron delivery.to baked in at job
+      -- creation -- still resolve to this binding.
+      previous_route_keys TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'active',
       created_at_ms INTEGER NOT NULL,
       updated_at_ms INTEGER NOT NULL
@@ -122,6 +129,15 @@ export function initializeDatabase(database: DatabaseSync) {
   ensureTenantInboundTargetColumns(database);
   ensurePairingTokenColumns(database);
   ensureWhatsAppInboundQueueColumns(database);
+  ensureBindingsRouteKeyAliasColumn(database);
+}
+
+export function ensureBindingsRouteKeyAliasColumn(database: DatabaseSync) {
+  const rows = database.prepare("PRAGMA table_info(bindings)").all() as Array<{ name?: unknown }>;
+  const columnNames = new Set(rows.map((row) => (typeof row.name === "string" ? row.name : "")));
+  if (!columnNames.has("previous_route_keys")) {
+    database.exec("ALTER TABLE bindings ADD COLUMN previous_route_keys TEXT NOT NULL DEFAULT '[]'");
+  }
 }
 
 export function ensureTenantInboundTargetColumns(database: DatabaseSync) {

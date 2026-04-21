@@ -358,7 +358,7 @@ function resolveLiveBindingByRouteKey(
   channel: string,
   routeKey: string,
 ): LiveBindingLookupRow | null {
-  const row = stmtSelectLiveBindingByRouteKey.get(channel, routeKey) as
+  const row = stmtSelectLiveBindingByRouteKey.get(channel, routeKey, routeKey) as
     | LiveBindingLookupRow
     | undefined;
   if (!row?.tenant_id || !row?.binding_id || !row?.status) {
@@ -725,6 +725,7 @@ const { runWhatsAppInboundLoop } = createWhatsAppInboundRuntime({
   loadWebRuntimeModules,
   log,
   db: stmts,
+  writeAuditLog,
   metrics,
   parseBotControlCommand,
   handleWhatsAppBotControlCommand,

@@ -74,11 +74,16 @@ export function createRouteResolutionHelpers(deps: {
       sessionKey: string,
     ) => Record<string, unknown> | undefined;
   };
+  // The statement binds the routeKey twice: once for the direct
+  // `route_key = ?` match and once for the `previous_route_keys` alias
+  // check. See `stmtSelectActiveBindingByTenantAndRoute` in
+  // `src/db/statements.ts`.
   stmtSelectActiveBindingByTenantAndRoute: {
     get: (
       tenantId: string,
       channel: "telegram" | "discord" | "whatsapp" | "imessage",
       routeKey: string,
+      routeKeyAlias: string,
     ) => Record<string, unknown> | undefined;
   };
   resolveDiscordChannelInfo: (channelId: string) => Promise<{
@@ -257,6 +262,7 @@ export function createRouteResolutionHelpers(deps: {
       const row = deps.stmtSelectActiveBindingByTenantAndRoute.get(
         params.tenantId,
         params.channel,
+        routeKey,
         routeKey,
       ) as ExistingBindingRow | undefined;
       if (!row?.binding_id || row.status !== "active") {

@@ -7,7 +7,7 @@ import type { ClaimResult, StyledNotice, TenantInboundTarget } from "../../domai
 import { errorString, readNonEmptyString } from "../../domain/values.js";
 import { buildWhatsAppInboundEnvelope } from "../../mux-envelope.js";
 import { createInboundTraceId } from "../../observability/tracing.js";
-import { deriveWhatsAppSessionKey } from "../../routing/keys.js";
+import { buildWhatsAppRouteKey, deriveWhatsAppSessionKey } from "../../routing/keys.js";
 import {
   classifyWhatsAppInboundDeliveryError,
   resolveWhatsAppInboundQueueRetryState,
@@ -33,7 +33,16 @@ type WebInboundMessage = {
   body: string;
   timestamp?: number;
   chatType: "direct" | "group";
+  // The canonical chatId emitted by the bridge -- `<digits>@s.whatsapp.net`
+  // for DMs (resolved via lidMapping when the WhatsApp side used a LID),
+  // `<jid>@g.us` for groups.
   chatId: string;
+  // The raw `remoteJid` from Baileys before LID resolution. Equals `chatId`
+  // for non-LID peers; for LID peers this is the `<lid>@lid` form. Used
+  // for the one-time binding heal that rewrites legacy LID-keyed bindings
+  // to their canonical form while keeping the LID as an alias so frozen
+  // `delivery.to` targets on existing crons still resolve.
+  remoteJidRaw?: string;
   senderJid?: string;
   senderE164?: string;
   senderName?: string;
@@ -164,7 +173,14 @@ export function createWhatsAppInboundRuntime(deps: {
     | "stmtDeferWhatsAppInboundQueueById"
     | "stmtSelectSessionKeyByBinding"
     | "stmtUpsertSessionRoute"
+    | "stmtMigrateBindingRouteKeyWithAlias"
   >;
+  writeAuditLog: (
+    tenantId: string,
+    eventType: string,
+    payload: Record<string, unknown>,
+    createdAtMs: number,
+  ) => void;
   metrics: Metrics;
   parseBotControlCommand: (input: string) => BotControlCommand | null;
   handleWhatsAppBotControlCommand: (params: {
@@ -233,6 +249,7 @@ export function createWhatsAppInboundRuntime(deps: {
           : undefined,
       chatType: message.chatType === "group" ? "group" : "direct",
       chatId: readNonEmptyString(message.chatId) ?? readNonEmptyString(message.from) ?? "",
+      remoteJidRaw: readNonEmptyString(message.remoteJidRaw) ?? undefined,
       senderJid: readNonEmptyString(message.senderJid) ?? undefined,
       senderE164: readNonEmptyString(message.senderE164) ?? undefined,
       senderName: readNonEmptyString(message.senderName) ?? undefined,
@@ -346,6 +363,7 @@ export function createWhatsAppInboundRuntime(deps: {
     if (!chatJid) {
       return;
     }
+    const remoteJidRaw = readNonEmptyString(message.remoteJidRaw);
     const accountId = readNonEmptyString(message.accountId) ?? deps.config.whatsappAccountId;
     const chatType = message.chatType === "group" ? "group" : "direct";
     const directPeerId =
@@ -353,10 +371,63 @@ export function createWhatsAppInboundRuntime(deps: {
         ? (readNonEmptyString(message.senderE164) ?? readNonEmptyString(message.from) ?? undefined)
         : undefined;
     const body = typeof message.body === "string" ? message.body : "";
-    const binding = deps.resolveWhatsAppBindingForIncoming({
+    // Canonical lookup first. Covers new users and previously-healed
+    // LID bindings (where the LID now lives in `previous_route_keys`).
+    let binding = deps.resolveWhatsAppBindingForIncoming({
       chatJid,
       accountId,
     });
+    // Legacy LID fallback: if the canonical chatJid missed AND the bridge
+    // gave us a raw LID that differs from the canonical form, try looking
+    // the binding up under its original LID routeKey. On a hit, heal the
+    // binding -- rewrite `route_key` to the canonical form and push the
+    // LID into `previous_route_keys` so it keeps resolving for anyone
+    // still holding the LID (e.g. cron `delivery.to`).
+    if (
+      !binding &&
+      remoteJidRaw &&
+      remoteJidRaw !== chatJid &&
+      /@(?:lid|hosted\.lid)$/i.test(remoteJidRaw)
+    ) {
+      const legacyBinding = deps.resolveWhatsAppBindingForIncoming({
+        chatJid: remoteJidRaw,
+        accountId,
+      });
+      if (legacyBinding) {
+        const canonicalRouteKey = buildWhatsAppRouteKey(chatJid, accountId);
+        const legacyRouteKey = buildWhatsAppRouteKey(remoteJidRaw, accountId);
+        try {
+          deps.db.stmtMigrateBindingRouteKeyWithAlias.run(
+            canonicalRouteKey,
+            legacyRouteKey,
+            Date.now(),
+            legacyBinding.bindingId,
+            legacyBinding.tenantId,
+          );
+          deps.writeAuditLog(
+            legacyBinding.tenantId,
+            "whatsapp_binding_healed_from_lid",
+            {
+              bindingId: legacyBinding.bindingId,
+              legacyRouteKey,
+              canonicalRouteKey,
+            },
+            Date.now(),
+          );
+        } catch (error) {
+          deps.log({
+            type: "whatsapp_binding_heal_error",
+            bindingId: legacyBinding.bindingId,
+            error: String(error),
+          });
+        }
+        binding = {
+          tenantId: legacyBinding.tenantId,
+          bindingId: legacyBinding.bindingId,
+          routeKey: canonicalRouteKey,
+        };
+      }
+    }
     const botControlCommand = deps.parseBotControlCommand(body);
     if (botControlCommand) {
       try {
