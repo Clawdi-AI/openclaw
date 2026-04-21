@@ -1311,7 +1311,7 @@ describe("hooks", () => {
       }
     });
 
-    test("passes through when result is below threshold", async () => {
+    test("passes through when re-fetched HTML is too short to index", async () => {
       const { registerTransformToolResultHook } = await import("./hooks/transform-tool-result.js");
       const { SessionReadTracker, DocMetaCache } = await import("./session-state.js");
 
@@ -1331,28 +1331,47 @@ describe("hooks", () => {
         isHealthy: vi.fn(() => true),
         indexContent: vi.fn(),
       };
-      const cfg = { compressThresholdTokens: 5000 }; // high threshold
+      // Note: WebFetch deliberately bypasses `compressThresholdTokens`
+      // (see transform-tool-result.ts — "we always index" comment). The
+      // meaningful early-exit is `html.length <= 50` from `fetchRawHtml`.
+      const cfg = { compressThresholdTokens: 5000 };
 
-      registerTransformToolResultHook(
-        api as never,
-        client as never,
-        cfg as never,
-        new SessionReadTracker(),
-        new DocMetaCache(),
-      );
+      // Mock fetch to return a trivially short body so the length gate
+      // fires and we never reach indexContent. Without this, the test
+      // would hit the live internet and assertions would depend on the
+      // remote server's current response.
+      const origFetch = globalThis.fetch;
+      const shortBody = "<p>hi</p>"; // 9 bytes, well under the 50-char gate
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        arrayBuffer: async () => new TextEncoder().encode(shortBody).buffer,
+      })) as unknown as typeof fetch;
 
-      const result = await handlers[0](
-        {
-          toolName: "WebFetch",
-          params: { url: "https://example.com" },
-          result: { content: [{ type: "text", text: "short result" }] },
-        },
-        { toolName: "WebFetch" },
-      );
+      try {
+        registerTransformToolResultHook(
+          api as never,
+          client as never,
+          cfg as never,
+          new SessionReadTracker(),
+          new DocMetaCache(),
+        );
 
-      // Below threshold — should not index or compress
-      expect(result).toBeUndefined();
-      expect(client.indexContent).not.toHaveBeenCalled();
+        const result = await handlers[0](
+          {
+            toolName: "WebFetch",
+            params: { url: "https://example.com" },
+            result: { content: [{ type: "text", text: "short result" }] },
+          },
+          { toolName: "WebFetch" },
+        );
+
+        // Re-fetched HTML is below the length gate — hook returns without
+        // indexing or rewriting the tool result.
+        expect(result).toBeUndefined();
+        expect(client.indexContent).not.toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = origFetch;
+      }
     });
 
     test("passes through for non-WebFetch tools", async () => {
