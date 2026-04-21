@@ -77,14 +77,14 @@ async function parseMultipartForm(form: FormData): Promise<{
   // biome-ignore lint/style/noNonNullAssertion: iterating FormData entries
   for (const [key, value] of form.entries()) {
     if (value instanceof Blob) {
-      // `value` is a Blob — when appended via `form.append(key, blob, filename)`
-      // the filename arrives on the File subclass; native FormData constructs a
-      // File wrapper preserving both `name` and `type`.
-      const file = value as File;
+      // `FormDataEntryValue` is `File | string`, so `instanceof Blob`
+      // narrows to `File` directly — native FormData always wraps
+      // `form.append(key, blob, filename)` in a File preserving both
+      // `name` and `type`. No cast needed.
       attachment = {
-        filename: file.name,
-        contentType: file.type,
-        body: Buffer.from(await file.arrayBuffer()),
+        filename: value.name,
+        contentType: value.type,
+        body: Buffer.from(await value.arrayBuffer()),
       };
     } else {
       fields[key] = String(value);
