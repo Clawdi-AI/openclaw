@@ -286,10 +286,25 @@ export function createPreparedStatements(db: DatabaseSync) {
     LIMIT 1
   `);
 
+  // The `OR EXISTS (... json_each(previous_route_keys) ...)` clause lets a
+  // binding that has been healed from a legacy chatJid form (e.g. `@lid`)
+  // to the canonical form (`@s.whatsapp.net`) still resolve lookups whose
+  // caller is holding the legacy routeKey — this is how we keep existing
+  // cron `delivery.to` entries (frozen at cron-creation time) working
+  // without a bulk openclaw-side migration.
+  //
+  // Callers pass the search routeKey twice: once for the direct match and
+  // once for the alias-existence check. The `json_each` extension is part
+  // of the SQLite JSON1 module, built into `node:sqlite`.
   const stmtSelectActiveBindingByRouteKey = db.prepare(`
     SELECT tenant_id, binding_id
     FROM bindings
-    WHERE channel = ? AND route_key = ? AND status = 'active'
+    WHERE channel = ?
+      AND (
+        route_key = ?
+        OR EXISTS (SELECT 1 FROM json_each(previous_route_keys) WHERE value = ?)
+      )
+      AND status = 'active'
     ORDER BY updated_at_ms DESC
     LIMIT 1
   `);
@@ -297,7 +312,12 @@ export function createPreparedStatements(db: DatabaseSync) {
   const stmtSelectLiveBindingByRouteKey = db.prepare(`
     SELECT tenant_id, binding_id, status
     FROM bindings
-    WHERE channel = ? AND route_key = ? AND status IN ('active', 'pending')
+    WHERE channel = ?
+      AND (
+        route_key = ?
+        OR EXISTS (SELECT 1 FROM json_each(previous_route_keys) WHERE value = ?)
+      )
+      AND status IN ('active', 'pending')
     ORDER BY updated_at_ms DESC
     LIMIT 1
   `);
@@ -305,9 +325,32 @@ export function createPreparedStatements(db: DatabaseSync) {
   const stmtSelectActiveBindingByTenantAndRoute = db.prepare(`
     SELECT binding_id, status
     FROM bindings
-    WHERE tenant_id = ? AND channel = ? AND route_key = ? AND status IN ('active', 'pending')
+    WHERE tenant_id = ?
+      AND channel = ?
+      AND (
+        route_key = ?
+        OR EXISTS (SELECT 1 FROM json_each(previous_route_keys) WHERE value = ?)
+      )
+      AND status IN ('active', 'pending')
     ORDER BY updated_at_ms DESC
     LIMIT 1
+  `);
+
+  // Healing statement: rewrite a binding's route_key to the canonical form
+  // and push the prior (legacy) routeKey into `previous_route_keys`. Called
+  // once per binding, when an inbound arrives at the canonical chatJid for
+  // the first time and the canonical lookup missed but the legacy-form
+  // lookup hit.
+  const stmtMigrateBindingRouteKeyWithAlias = db.prepare(`
+    UPDATE bindings
+    SET route_key = ?,
+        previous_route_keys = json_insert(
+          previous_route_keys,
+          '$[#]',
+          ?
+        ),
+        updated_at_ms = ?
+    WHERE binding_id = ? AND tenant_id = ?
   `);
 
   const stmtListActiveDiscordBindings = db.prepare(`
@@ -443,6 +486,7 @@ export function createPreparedStatements(db: DatabaseSync) {
     stmtSelectActiveBindingByRouteKey,
     stmtSelectLiveBindingByRouteKey,
     stmtSelectActiveBindingByTenantAndRoute,
+    stmtMigrateBindingRouteKeyWithAlias,
     stmtListActiveDiscordBindings,
     stmtSelectTelegramOffset,
     stmtUpsertTelegramOffset,

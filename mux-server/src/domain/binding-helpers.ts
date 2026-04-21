@@ -321,7 +321,7 @@ export function createBindingHelpers(deps: {
   function resolveIMessageBindingForIncoming(
     routeKey: string,
   ): { tenantId: string; bindingId: string; routeKey: string } | null {
-    const row = deps.db.stmtSelectActiveBindingByRouteKey.get("imessage", routeKey) as
+    const row = deps.db.stmtSelectActiveBindingByRouteKey.get("imessage", routeKey, routeKey) as
       | ActiveBindingLookupRow
       | undefined;
     if (!row?.tenant_id || !row?.binding_id) {
@@ -414,9 +414,11 @@ export function createBindingHelpers(deps: {
   ): { tenantId: string; bindingId: string; routeKey: string } | null {
     const topicRouteKey = topicId ? buildTelegramRouteKey(chatId, topicId) : null;
     if (topicRouteKey) {
-      const topicRow = deps.db.stmtSelectActiveBindingByRouteKey.get("telegram", topicRouteKey) as
-        | ActiveBindingLookupRow
-        | undefined;
+      const topicRow = deps.db.stmtSelectActiveBindingByRouteKey.get(
+        "telegram",
+        topicRouteKey,
+        topicRouteKey,
+      ) as ActiveBindingLookupRow | undefined;
       if (topicRow?.tenant_id && topicRow?.binding_id) {
         return {
           tenantId: String(topicRow.tenant_id),
@@ -427,9 +429,11 @@ export function createBindingHelpers(deps: {
     }
 
     const chatRouteKey = buildTelegramRouteKey(chatId);
-    const chatRow = deps.db.stmtSelectActiveBindingByRouteKey.get("telegram", chatRouteKey) as
-      | ActiveBindingLookupRow
-      | undefined;
+    const chatRow = deps.db.stmtSelectActiveBindingByRouteKey.get(
+      "telegram",
+      chatRouteKey,
+      chatRouteKey,
+    ) as ActiveBindingLookupRow | undefined;
     if (!chatRow?.tenant_id || !chatRow?.binding_id) {
       return null;
     }
@@ -445,7 +449,7 @@ export function createBindingHelpers(deps: {
     accountId: string;
   }): { tenantId: string; bindingId: string; routeKey: string } | null {
     const routeKey = buildWhatsAppRouteKey(params.chatJid, params.accountId);
-    const row = deps.db.stmtSelectActiveBindingByRouteKey.get("whatsapp", routeKey) as
+    const row = deps.db.stmtSelectActiveBindingByRouteKey.get("whatsapp", routeKey, routeKey) as
       | ActiveBindingLookupRow
       | undefined;
     if (!row?.tenant_id || !row?.binding_id) {

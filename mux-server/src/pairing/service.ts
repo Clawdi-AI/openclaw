@@ -232,6 +232,7 @@ export function createPairingService(deps: {
         tenantId,
         "telegram",
         boundRouteKey,
+        boundRouteKey,
       ) as ExistingBindingRow | undefined;
 
       if (existing?.binding_id && existing?.status === "active") {
@@ -387,6 +388,7 @@ export function createPairingService(deps: {
       const existing = deps.db.stmtSelectActiveBindingByTenantAndRoute.get(
         tenantId,
         "discord",
+        boundRouteKey,
         boundRouteKey,
       ) as ExistingBindingRow | undefined;
       if (existing?.status === "active") {
@@ -581,6 +583,7 @@ export function createPairingService(deps: {
         tenantId,
         "whatsapp",
         routeKey,
+        routeKey,
       ) as ExistingBindingRow | undefined;
 
       if (existing?.binding_id && existing?.status === "active") {
@@ -731,6 +734,7 @@ export function createPairingService(deps: {
       const existing = deps.db.stmtSelectActiveBindingByTenantAndRoute.get(
         tenantId,
         "imessage",
+        routeKey,
         routeKey,
       ) as ExistingBindingRow | undefined;
 
