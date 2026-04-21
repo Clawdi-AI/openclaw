@@ -1,6 +1,12 @@
 import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import { closeHttpServer, getFreePort, readJsonBody, waitForCondition } from "./test-utils.js";
+import {
+  closeHttpServer,
+  getFreePort,
+  readJsonBody,
+  readRequestBuffer,
+  waitForCondition,
+} from "./test-utils.js";
 
 export type FakeDiscordRequest =
   | {
@@ -207,6 +213,26 @@ export class FakeDiscordApi {
       channel?.type === 11 && channel.parentId
         ? { id: params.channelId, parent_id: channel.parentId }
         : undefined;
+    const author = {
+      id: params.authorId,
+      bot: false,
+      username: params.username ?? "integration-user",
+      discriminator: "0000",
+      global_name: null,
+      avatar: null,
+    };
+    // Normalize mention entries to the same strict user-payload shape so
+    // discord.py's `_handle_mentions` → `store_user` chain doesn't silently
+    // drop the mentions list (which Hermes uses to decide whether to
+    // respond to non-DM messages).
+    const mentions = (params.mentions ?? []).map((m) => ({
+      id: m.id,
+      bot: m.bot ?? false,
+      username: m.username ?? "integration-user",
+      discriminator: "0000",
+      global_name: null,
+      avatar: null,
+    }));
     this.gatewayFrames.push({
       op: 0,
       t: "MESSAGE_CREATE",
@@ -217,14 +243,10 @@ export class FakeDiscordApi {
         guild_id: params.guildId,
         type: 0,
         content: params.content,
-        author: {
-          id: params.authorId,
-          bot: false,
-          ...(params.username ? { username: params.username } : {}),
-        },
+        author,
         ...(thread ? { thread } : {}),
         attachments: [],
-        mentions: params.mentions ?? [],
+        mentions,
         mention_roles: [],
         timestamp: params.timestamp ?? "2026-01-01T00:00:00.000Z",
       },
@@ -399,7 +421,35 @@ export class FakeDiscordApi {
 
     if (messagesMatch && method === "POST") {
       const channelId = messagesMatch[1] ?? "";
-      const body = await readJsonBody(req);
+      const reqContentType = String(req.headers["content-type"] ?? "").toLowerCase();
+      let body: Record<string, unknown>;
+      if (reqContentType.includes("multipart/form-data")) {
+        // discord.py's file-send path packs `payload_json` (JSON-stringified
+        // message body) + `files[N]` parts into multipart/form-data.
+        const raw = await readRequestBuffer(req);
+        const text = raw.toString("utf8");
+        const jsonMatch =
+          text.match(
+            /name="payload_json"[\r\n]+Content-Type:[^\r\n]+[\r\n]+[\r\n]+([\s\S]*?)[\r\n]+--/,
+          ) ?? text.match(/name="payload_json"[\r\n]+[\r\n]+([\s\S]*?)[\r\n]+--/);
+        const payloadJsonStr = jsonMatch?.[1]?.trim();
+        let payloadJson: Record<string, unknown> = {};
+        if (payloadJsonStr) {
+          try {
+            payloadJson = JSON.parse(payloadJsonStr) as Record<string, unknown>;
+          } catch {
+            // Leave payloadJson empty — tests can assert fallback shape.
+          }
+        }
+        const fileMatches = text.match(/name="files\[\d+\]"/g);
+        body = {
+          ...payloadJson,
+          __contentType: reqContentType,
+          __fileCount: fileMatches?.length ?? 0,
+        };
+      } else {
+        body = await readJsonBody(req);
+      }
       this.requests.push({
         kind: "sendMessage",
         channelId,
