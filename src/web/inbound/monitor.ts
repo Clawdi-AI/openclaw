@@ -369,6 +369,23 @@ export async function monitorWebInbox(options: {
       },
       "inbound message",
     );
+    // Canonical chatId for DMs: prefer the resolved E164 JID form
+    // (`<digits>@s.whatsapp.net`) so downstream consumers never see `@lid`
+    // peers. `inbound.from` is already E164 for DMs (resolved via
+    // `resolveJidToE164` → Baileys `lidMapping` when needed). Falling back
+    // to the raw `remoteJid` if resolution produced something unexpected
+    // keeps the pipeline moving without silent data loss. Groups preserve
+    // their `@g.us` JID — group JIDs have no LID form.
+    const canonicalChatId = (() => {
+      if (inbound.group) {
+        return inbound.remoteJid;
+      }
+      const e164 = inbound.from;
+      if (typeof e164 === "string" && /^\+\d+$/.test(e164)) {
+        return `${e164.slice(1)}@s.whatsapp.net`;
+      }
+      return inbound.remoteJid;
+    })();
     const inboundMessage: WebInboundMessage = {
       id: inbound.id,
       from: inbound.from,
@@ -379,7 +396,10 @@ export async function monitorWebInbox(options: {
       pushName: senderName,
       timestamp,
       chatType: inbound.group ? "group" : "direct",
-      chatId: inbound.remoteJid,
+      chatId: canonicalChatId,
+      // Expose the original remoteJid for mux-server's legacy-binding
+      // fallback lookup. Same value as chatId for non-LID peers.
+      remoteJidRaw: inbound.remoteJid,
       senderJid: inbound.participantJid,
       senderE164: inbound.senderE164 ?? undefined,
       senderName,

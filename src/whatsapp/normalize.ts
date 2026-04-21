@@ -1,7 +1,9 @@
 import { normalizeE164 } from "../utils.js";
 
 const WHATSAPP_USER_JID_RE = /^(\d+)(?::\d+)?@s\.whatsapp\.net$/i;
-const WHATSAPP_LID_RE = /^(\d+)@lid$/i;
+// Baileys emits LIDs both plain (`123@lid`) and with a device suffix
+// (`123:0@lid`), and occasionally the `@hosted.lid` variant. Accept all.
+const WHATSAPP_LID_RE = /^(\d+)(?::\d+)?@(?:lid|hosted\.lid)$/i;
 
 function stripWhatsAppTargetPrefixes(value: string): string {
   let candidate = value.trim();
@@ -60,6 +62,15 @@ export function normalizeWhatsAppTarget(value: string): string | null {
   if (isWhatsAppGroupJid(candidate)) {
     const localPart = candidate.slice(0, candidate.length - "@g.us".length);
     return `${localPart}@g.us`;
+  }
+  // LID targets (e.g. "123456@lid") don't carry a phone number — the
+  // digits before `@lid` are an opaque WhatsApp Linked ID. Preserve the
+  // LID verbatim so downstream routing uses it as-is. Historically this
+  // branch fell through to `normalizeE164(extractUserJidPhone(...))`,
+  // which re-painted the LID digits as a bogus E164 (e.g. `+258862...`)
+  // and broke both allowFrom checks and mux-server route lookups.
+  if (WHATSAPP_LID_RE.test(candidate)) {
+    return candidate;
   }
   // Handle user JIDs (e.g. "41796666864:0@s.whatsapp.net")
   if (isWhatsAppUserTarget(candidate)) {

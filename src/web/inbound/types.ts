@@ -17,7 +17,32 @@ export type WebInboundMessage = {
   pushName?: string;
   timestamp?: number;
   chatType: "direct" | "group";
+  /**
+   * Canonical chat identifier used by the rest of the pipeline.
+   *
+   * For DMs, this is the resolved canonical JID form `<e164-digits>@s.whatsapp.net`
+   * derived from `inbound.from` (which the bridge already resolves via
+   * `resolveJidToE164`, consulting the Baileys `lidMapping` when the WhatsApp
+   * side addressed the peer by LID). When resolution is unavailable (stale
+   * lidMapping, unknown peer) we fall back to the raw `remoteJid` so the
+   * downstream pipeline still carries *something* to route on.
+   *
+   * For groups, this is the `@g.us` group JID — groups never have a LID form.
+   *
+   * The raw unresolved JID is separately exposed as `remoteJidRaw` so
+   * consumers that still need the original addressing form (e.g. the
+   * mux-server's legacy-binding fallback lookup) can see it explicitly
+   * without mucking with `chatId`.
+   */
   chatId: string;
+  /**
+   * The raw `remoteJid` emitted by Baileys, before any LID→E164 resolution.
+   * Equals `chatId` for any peer WhatsApp already addresses by phone JID or
+   * group JID; for LID peers this is the `<lid>@lid` form. Consumers
+   * **should prefer `chatId`** — this field is for legacy-binding fallback
+   * paths only.
+   */
+  remoteJidRaw?: string;
   senderJid?: string;
   senderE164?: string;
   senderName?: string;

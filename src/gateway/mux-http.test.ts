@@ -1085,6 +1085,12 @@ describe("handleMuxInboundHttpRequest", () => {
       },
     },
     {
+      // Regression: a LID inbound target must pass through to originatingTo
+      // verbatim. The mux-server's binding is keyed by the same LID that
+      // shows up here; mangling it to sender E164 (as `ba609a572e` did)
+      // breaks the outbound route-key lookup end-to-end. See the mux-side
+      // heal logic that rewrites LID route_keys to canonical form — after
+      // that heal, this LID still resolves via the binding's alias entry.
       name: "whatsapp dm lid target",
       body: {
         channel: "whatsapp",
@@ -1099,7 +1105,7 @@ describe("handleMuxInboundHttpRequest", () => {
         sessionKey: "agent:main:main",
         surface: "mux",
         originatingChannel: "whatsapp",
-        originatingTo: "whatsapp:+15550001111",
+        originatingTo: "whatsapp:258862678593671@lid",
         messageThreadId: undefined,
       },
     },
