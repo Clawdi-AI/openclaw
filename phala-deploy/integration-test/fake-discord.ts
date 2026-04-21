@@ -141,16 +141,24 @@ export class FakeDiscordApi {
   }): void {
     const channelId = params.channelId ?? this.dmChannelsByUser.get(params.userId) ?? "3001";
     this.dmChannelsByUser.set(params.userId, channelId);
+    // Strict Discord wire clients (e.g. discord.py's User._update) require
+    // `username`, `discriminator`, and `avatar` on every user payload.
+    // Carbon / discord.js are loose about missing fields; filling them makes
+    // the fake conform to the Bot API user schema for any conforming client.
+    const author = {
+      id: params.userId,
+      bot: false,
+      username: params.username ?? "integration-user",
+      discriminator: "0000",
+      global_name: null,
+      avatar: null,
+    };
     const message: FakeDiscordInboundMessage = {
       id: params.messageId,
       channel_id: channelId,
       content: params.content,
       timestamp: params.timestamp ?? "2026-01-01T00:00:00.000Z",
-      author: {
-        id: params.userId,
-        bot: false,
-        ...(params.username ? { username: params.username } : {}),
-      },
+      author,
       attachments: [],
       mentions: [],
       mention_roles: [],
@@ -174,11 +182,7 @@ export class FakeDiscordApi {
         // client fetching `GET /channels/:id` and inspecting channel.type.
         type: 0,
         content: params.content,
-        author: {
-          id: params.userId,
-          bot: false,
-          ...(params.username ? { username: params.username } : {}),
-        },
+        author,
         attachments: [],
         mentions: [],
         mention_roles: [],
@@ -323,13 +327,13 @@ export class FakeDiscordApi {
     });
 
     if (method === "GET" && requestUrl.pathname === "/gateway/bot") {
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ url: this.url.replace(/^http/i, "ws") + "/gateway" }));
       return;
     }
 
     if (method === "GET" && requestUrl.pathname === "/users/@me") {
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ id: this.botUserId, username: "integration-bot", bot: true }));
       return;
     }
@@ -344,7 +348,7 @@ export class FakeDiscordApi {
         userId,
         body,
       });
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ id: channelId }));
       return;
     }
@@ -358,7 +362,7 @@ export class FakeDiscordApi {
         res.end();
         return;
       }
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
           id: channel.id,
@@ -388,7 +392,7 @@ export class FakeDiscordApi {
           pending.filter((message) => BigInt(message.id) > maxDelivered),
         );
       }
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(delivered));
       return;
     }
@@ -402,7 +406,7 @@ export class FakeDiscordApi {
         body,
       });
       const messageId = String(this.nextMessageId++);
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ id: messageId, channel_id: channelId }));
       return;
     }
