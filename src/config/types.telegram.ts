@@ -150,6 +150,14 @@ export type TelegramAccountConfig = {
   /** Network transport overrides for Telegram. */
   network?: TelegramNetworkConfig;
   proxy?: string;
+  /**
+   * Telegram Bot API base URL override for this account. Takes precedence
+   * over the `TELEGRAM_BOT_API_BASE_URL` env var and the default
+   * `https://api.telegram.org`. Useful for mixed setups where one
+   * account talks to real Telegram and another talks to a local proxy
+   * (e.g. msg-router's egress).
+   */
+  apiBaseUrl?: string;
   webhookUrl?: string;
   webhookSecret?: string;
   webhookPath?: string;

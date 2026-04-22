@@ -205,7 +205,11 @@ function buildTelegramClientOptionsCacheKey(params: {
   account: ResolvedTelegramAccount;
   timeoutSeconds?: number;
 }): string {
-  const apiRoot = resolveTelegramBotApiBaseUrl();
+  // Include the per-account apiBaseUrl in the cache key: two accounts
+  // with the same timeout/proxy/network but different apiBaseUrls must
+  // not share an ApiClientOptions entry (the cached one would ship
+  // messages to the wrong host).
+  const apiRoot = resolveTelegramBotApiBaseUrl(process.env, params.account.config);
   const proxyKey = params.account.config.proxy?.trim() ?? "";
   const autoSelectFamily = params.account.config.network?.autoSelectFamily;
   const autoSelectFamilyKey =
@@ -255,7 +259,7 @@ function resolveTelegramClientOptions(
   const fetchImpl = resolveTelegramFetch(proxyFetch, {
     network: account.config.network,
   });
-  const apiRoot = resolveTelegramBotApiBaseUrl();
+  const apiRoot = resolveTelegramBotApiBaseUrl(process.env, account.config);
   const clientOptions =
     fetchImpl || timeoutSeconds || apiRoot
       ? {
