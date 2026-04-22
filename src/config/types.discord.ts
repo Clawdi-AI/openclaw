@@ -225,6 +225,16 @@ export type DiscordAccountConfig = {
   token?: SecretInput;
   /** HTTP(S) proxy URL for Discord gateway WebSocket connections. */
   proxy?: string;
+  /**
+   * Discord REST API base URL override for this account. Takes precedence
+   * over the `DISCORD_BOT_API_BASE_URL` env var and the default
+   * `https://discord.com`. Useful for mixed setups where one account
+   * talks to real Discord and another talks to a local proxy (e.g.
+   * msg-router's egress). Also controls where the gateway plugin
+   * fetches `/api/v10/gateway/bot`, so a substitute host can redirect
+   * the WebSocket connection too.
+   */
+  apiBaseUrl?: string;
   /** Allow bot-authored messages to trigger replies (default: false). Set "mentions" to gate on mentions. */
   allowBots?: boolean | "mentions";
   /**

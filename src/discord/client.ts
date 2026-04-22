@@ -1,5 +1,6 @@
 import { RequestClient } from "@buape/carbon";
 import { loadConfig } from "../config/config.js";
+import type { DiscordAccountConfig } from "../config/types.js";
 import { createDiscordRetryRunner, type RetryRunner } from "../infra/retry-policy.js";
 import type { RetryConfig } from "../infra/retry.js";
 import { normalizeAccountId } from "../routing/session-key.js";
@@ -30,16 +31,15 @@ function resolveToken(params: { accountId: string; fallbackToken?: string }) {
   return fallback;
 }
 
-function resolveRest(token: string, rest?: RequestClient) {
+function resolveRest(token: string, account: DiscordAccountConfig, rest?: RequestClient) {
   if (rest) {
     return rest;
   }
   // Carbon's RequestClient accepts a `baseUrl` option that rewrites every
-  // outbound REST URL. We default to real Discord and let
-  // `DISCORD_BOT_API_BASE_URL` redirect to a local proxy (e.g. msg-router)
-  // for integration testing — the same pattern `TELEGRAM_BOT_API_BASE_URL`
-  // uses for grammY.
-  const baseUrl = resolveDiscordApiBaseUrl();
+  // outbound REST URL. Per-account `apiBaseUrl` wins over the global
+  // `DISCORD_BOT_API_BASE_URL` env so one process can mix one account
+  // on real Discord with another account on msg-router.
+  const baseUrl = resolveDiscordApiBaseUrl(process.env, account);
   return new RequestClient(token, { baseUrl });
 }
 
@@ -76,7 +76,7 @@ export function createDiscordRestClient(
       accountId: account.accountId,
       fallbackToken: account.token,
     });
-  const rest = resolveRest(token, opts.rest);
+  const rest = resolveRest(token, account.config, opts.rest);
   return { token, rest, account };
 }
 

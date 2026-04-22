@@ -10,12 +10,15 @@ import { resolveDiscordApiBaseUrl } from "../api-base-url.js";
 
 const DEFAULT_DISCORD_GATEWAY_URL = "wss://gateway.discord.gg/";
 
-/** Build the `/api/v10/gateway/bot` URL against the configured REST host.
- *  An integration harness that answers this endpoint with a substitute
- *  `url` field (the msg-router egress gateway, for instance) thereby
- *  redirects the WebSocket connection too. */
-function discordGatewayBotUrl(): string {
-  return `${resolveDiscordApiBaseUrl()}/api/v10/gateway/bot`;
+/** Build the `/api/v10/gateway/bot` URL against the configured REST host
+ *  for `account`. A per-account `apiBaseUrl` overrides the global env so
+ *  one process can run one account against real Discord and another
+ *  against a local proxy. An integration harness that answers this
+ *  endpoint with a substitute `url` field (the msg-router egress
+ *  gateway, for instance) thereby redirects the WebSocket connection
+ *  too. */
+function discordGatewayBotUrl(account: DiscordAccountConfig): string {
+  return `${resolveDiscordApiBaseUrl(process.env, account)}/api/v10/gateway/bot`;
 }
 
 type DiscordGatewayMetadataResponse = Pick<Response, "ok" | "status" | "text">;
@@ -84,12 +87,13 @@ function createGatewayMetadataError(params: {
 
 async function fetchDiscordGatewayInfo(params: {
   token: string;
+  account: DiscordAccountConfig;
   fetchImpl: DiscordGatewayFetch;
   fetchInit?: DiscordGatewayFetchInit;
 }): Promise<APIGatewayBotInfo> {
   let response: DiscordGatewayMetadataResponse;
   try {
-    response = await params.fetchImpl(discordGatewayBotUrl(), {
+    response = await params.fetchImpl(discordGatewayBotUrl(params.account), {
       ...params.fetchInit,
       headers: {
         ...params.fetchInit?.headers,
@@ -143,6 +147,7 @@ async function fetchDiscordGatewayInfo(params: {
 }
 
 function createGatewayPlugin(params: {
+  account: DiscordAccountConfig;
   options: {
     reconnect: { maxAttempts: number };
     intents: number;
@@ -161,6 +166,7 @@ function createGatewayPlugin(params: {
       if (!this.gatewayInfo) {
         this.gatewayInfo = await fetchDiscordGatewayInfo({
           token: client.options.token,
+          account: params.account,
           fetchImpl: params.fetchImpl,
           fetchInit: params.fetchInit,
         });
@@ -193,6 +199,7 @@ export function createDiscordGatewayPlugin(params: {
 
   if (!proxy) {
     return createGatewayPlugin({
+      account: params.discordConfig,
       options,
       fetchImpl: (input, init) => fetch(input, init as RequestInit),
     });
@@ -205,6 +212,7 @@ export function createDiscordGatewayPlugin(params: {
     params.runtime.log?.("discord: gateway proxy enabled");
 
     return createGatewayPlugin({
+      account: params.discordConfig,
       options,
       fetchImpl: (input, init) => undiciFetch(input, init),
       fetchInit: { dispatcher: fetchAgent },
@@ -213,6 +221,7 @@ export function createDiscordGatewayPlugin(params: {
   } catch (err) {
     params.runtime.error?.(danger(`discord: invalid gateway proxy: ${String(err)}`));
     return createGatewayPlugin({
+      account: params.discordConfig,
       options,
       fetchImpl: (input, init) => fetch(input, init as RequestInit),
     });
