@@ -30,12 +30,12 @@ import {
 } from "./test-utils.js";
 
 const muxDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "mux-server");
-const TELEGRAM_BOT_TOKEN = "dummy-token";
-const GATEWAY_TOKEN = "integration-gateway-token";
-const MUX_REGISTER_KEY = "integration-register-key";
-const TENANT_API_KEY = "integration-tenant-key";
-const CLAIM_CODE = "PAIR-TG-INTEGRATION-1";
-const INTEGRATION_ENV_KEYS = [
+export const TELEGRAM_BOT_TOKEN = "dummy-token";
+export const GATEWAY_TOKEN = "integration-gateway-token";
+export const MUX_REGISTER_KEY = "integration-register-key";
+export const TENANT_API_KEY = "integration-tenant-key";
+export const CLAIM_CODE = "PAIR-TG-INTEGRATION-1";
+export const INTEGRATION_ENV_KEYS = [
   "HOME",
   "USERPROFILE",
   "VITEST",
@@ -57,7 +57,7 @@ type StartedMuxServer = StartedNodeProcess & {
   port: number;
 };
 
-type HarnessPaths = {
+export type HarnessPaths = {
   tempDir: string;
   stateDir: string;
   workspaceDir: string;
@@ -80,7 +80,7 @@ type StartHarnessParams = {
   configTransform?: (cfg: OpenClawConfig) => OpenClawConfig;
 };
 
-function buildHarnessPaths(tempDir: string): HarnessPaths {
+export function buildHarnessPaths(tempDir: string): HarnessPaths {
   const stateDir = path.join(tempDir, ".openclaw");
   return {
     tempDir,
@@ -90,7 +90,7 @@ function buildHarnessPaths(tempDir: string): HarnessPaths {
   };
 }
 
-function buildHarnessEnv(
+export function buildHarnessEnv(
   paths: HarnessPaths,
   params?: {
     channel?: "telegram" | "discord" | "whatsapp";
@@ -123,7 +123,7 @@ function buildHarnessEnv(
   };
 }
 
-function buildHarnessConfig(params: {
+export function buildHarnessConfig(params: {
   channel: "telegram" | "discord" | "whatsapp";
   workspaceDir: string;
   openAiBaseUrl: string;
@@ -206,7 +206,7 @@ function buildHarnessConfig(params: {
   };
 }
 
-async function startMuxServer(params: {
+export async function startMuxServer(params: {
   channel: "telegram" | "discord" | "whatsapp";
   port: number;
   tempDir: string;
@@ -214,6 +214,13 @@ async function startMuxServer(params: {
   openclawId: string;
   pairingRouteKey: string;
   telegramBaseUrl?: string;
+  /**
+   * Override the Telegram bot token mux-server uses upstream. Defaults to the
+   * test-local `TELEGRAM_BOT_TOKEN` const. Nested-mode tests (msg-router in
+   * front of fake-TG) pass a mint-on-behalf token (`mpt_...`) here so the
+   * msg-router egress validates it.
+   */
+  telegramBotToken?: string;
   discordBaseUrl?: string;
   discordGatewayDmEnabled?: boolean;
   discordGatewayGuildEnabled?: boolean;
@@ -234,7 +241,7 @@ async function startMuxServer(params: {
       MUX_OUTBOUND_RESOLUTION_MODE: params.resolutionMode,
       ...(params.telegramBaseUrl
         ? {
-            TELEGRAM_BOT_TOKEN,
+            TELEGRAM_BOT_TOKEN: params.telegramBotToken ?? TELEGRAM_BOT_TOKEN,
             MUX_TELEGRAM_BOT_USERNAME: "integration_bot",
             MUX_TELEGRAM_API_BASE_URL: params.telegramBaseUrl,
             MUX_TELEGRAM_POLL_TIMEOUT_SEC: "1",
@@ -299,7 +306,7 @@ async function startMuxServer(params: {
   return server;
 }
 
-async function startGatewayProcess(params: {
+export async function startGatewayProcess(params: {
   port: number;
   env: Record<string, string>;
   skipHealthzCheck?: boolean;
@@ -342,7 +349,7 @@ async function startGatewayProcess(params: {
   return started;
 }
 
-async function claimMuxPairing(params: {
+export async function claimMuxPairing(params: {
   muxPort: number;
   claimedSessionKey: string;
 }): Promise<void> {
@@ -363,7 +370,7 @@ async function claimMuxPairing(params: {
   }
 }
 
-function resetIntegrationRuntimeState(): void {
+export function resetIntegrationRuntimeState(): void {
   __resetMuxRuntimeAuthCacheForTest();
   __resetMuxJwksCacheForTest();
   clearSessionStoreCacheForTest();
