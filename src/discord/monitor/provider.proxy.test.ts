@@ -211,6 +211,28 @@ describe("createDiscordGatewayPlugin", () => {
     }
   });
 
+  it("per-account apiBaseUrl wins over DISCORD_BOT_API_BASE_URL for /gateway/bot", async () => {
+    vi.stubEnv("DISCORD_BOT_API_BASE_URL", "http://127.0.0.1:9876");
+    try {
+      const runtime = createRuntime();
+      const plugin = createDiscordGatewayPlugin({
+        discordConfig: { apiBaseUrl: "http://127.0.0.1:5555" },
+        runtime,
+      });
+
+      await registerGatewayClientWithMetadata({ plugin, fetchMock: globalFetchMock });
+
+      expect(globalFetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:5555/api/v10/gateway/bot",
+        expect.objectContaining({
+          headers: { Authorization: "Bot token-123" },
+        }),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("maps plain-text Discord 503 responses to fetch failed", async () => {
     await expectGatewayRegisterFetchFailure({
       ok: false,
