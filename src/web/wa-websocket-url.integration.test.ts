@@ -9,7 +9,7 @@ import { WebSocketServer } from "ws";
 // Baileys-version lookup. Baileys handles fetch failures gracefully but adds
 // unpredictable latency in sandboxed environments.
 vi.mock("@whiskeysockets/baileys", async (importOriginal) => {
-  const actual = await importOriginal();
+  const actual = await importOriginal<typeof import("@whiskeysockets/baileys")>();
   return {
     ...actual,
     fetchLatestBaileysVersion: vi.fn(async () => ({
