@@ -775,6 +775,38 @@ const { runOutboundAction, runOutboundSend } = createOutboundService({
   imessageAttachmentMaxBytes: IMESSAGE_ATTACHMENT_MAX_BYTES_EXPORT,
 });
 
+/**
+ * Build the migration-export dump for a tenant: tenant metadata + active
+ * bindings, shaped for the flat mux → msg-router migration plan (see
+ * docs/plans/2026-04-20-flat-mux-tenant-migration.md). Emits the raw
+ * mux-server shape (channel / scope / routeKey); the importer on msg-router
+ * translates to msg-router's binding schema.
+ */
+function exportTenantMigration(tenantId: string) {
+  const tenant = stmts.stmtSelectTenantById.get(tenantId) as
+    | { id: string; name: string }
+    | undefined;
+  if (!tenant) {
+    return null;
+  }
+  const rows = stmts.stmtListActiveBindingsByTenant.all(tenantId) as Array<{
+    binding_id: string;
+    channel: string;
+    scope: string;
+    route_key: string;
+  }>;
+  return {
+    schemaVersion: 1 as const,
+    dumpedAtMs: Date.now(),
+    tenant: { id: String(tenant.id), name: String(tenant.name) },
+    bindings: rows.map((row) => ({
+      channel: String(row.channel),
+      scope: String(row.scope),
+      routeKey: String(row.route_key),
+    })),
+  };
+}
+
 const { handleRequest } = createHttpRouteHandler({
   config,
   getTelegramBotUsername: () => telegramBotUsername,
@@ -801,6 +833,7 @@ const { handleRequest } = createHttpRouteHandler({
   runOutboundAction,
   resolveTelegramFilePath,
   requireTelegramBotToken,
+  exportTenantMigration,
 });
 
 const { handleOutboundSendRequest } = createOutboundRequestHandler({

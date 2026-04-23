@@ -102,6 +102,18 @@ export function createHttpRouteHandler(deps: {
   }) => Promise<SendResult>;
   resolveTelegramFilePath: (fileId: string) => Promise<string | null>;
   requireTelegramBotToken: () => string;
+  /**
+   * Build an opaque dump of a tenant's migration-relevant state — tenant
+   * metadata + active bindings — for the flat mux → msg-router migration
+   * (see docs/plans/2026-04-20-flat-mux-tenant-migration.md). Returns
+   * `null` when the tenant doesn't exist or is inactive.
+   */
+  exportTenantMigration: (tenantId: string) => {
+    schemaVersion: 1;
+    dumpedAtMs: number;
+    tenant: { id: string; name: string };
+    bindings: Array<{ channel: string; scope: string; routeKey: string }>;
+  } | null;
 }): {
   handleRequest: (params: {
     req: IncomingMessage;
@@ -289,6 +301,31 @@ export function createHttpRouteHandler(deps: {
         ttlSec,
       });
       deps.sendJson(res, result.statusCode, result.payload);
+      return { handled: true };
+    }
+
+    if (req.method === "GET" && pathname === "/v1/admin/migrate/export-tenant") {
+      if (!deps.config.muxAdminToken) {
+        deps.sendJson(res, 404, { ok: false, error: "not found" });
+        return { handled: true };
+      }
+      if (!deps.isAdminAuthorized(req)) {
+        deps.metrics.recordAuthFailure("admin");
+        deps.log({ type: "auth_unauthorized", surface: "admin" });
+        deps.sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return { handled: true };
+      }
+      const tenantId = readNonEmptyString(requestUrl.searchParams.get("tenantId"));
+      if (!tenantId) {
+        deps.sendJson(res, 400, { ok: false, error: "tenantId required" });
+        return { handled: true };
+      }
+      const dump = deps.exportTenantMigration(tenantId);
+      if (!dump) {
+        deps.sendJson(res, 404, { ok: false, error: "tenant not found" });
+        return { handled: true };
+      }
+      deps.sendJson(res, 200, { ok: true, dump });
       return { handled: true };
     }
 
