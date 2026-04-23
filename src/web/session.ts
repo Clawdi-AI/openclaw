@@ -20,6 +20,7 @@ import {
   resolveWebCredsBackupPath,
   resolveWebCredsPath,
 } from "./auth-store.js";
+import { resolveWaWebSocketUrl } from "./wa-websocket-url.js";
 
 export {
   getWebAuthAgeMs,
@@ -105,6 +106,12 @@ export async function createWaSocket(
   maybeRestoreCredsFromBackup(authDir);
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
+  // When `WA_WEBSOCKET_URL` is set, point Baileys at that URL instead of
+  // `wss://web.whatsapp.com/ws/chat`. Used by nested mux-server deployments
+  // (see docs/MIGRATION-FROM-MUX.md) and direct msg-router deployments to
+  // route WA through msg-router's Noise WS face. Undefined → Baileys uses
+  // its real-WA default.
+  const waWebSocketUrl = resolveWaWebSocketUrl();
   const sock = makeWASocket({
     auth: {
       creds: state.creds,
@@ -116,6 +123,7 @@ export async function createWaSocket(
     browser: ["openclaw", "cli", VERSION],
     syncFullHistory: false,
     markOnlineOnConnect: false,
+    ...(waWebSocketUrl ? { waWebSocketUrl } : {}),
   });
 
   sock.ev.on("creds.update", () => enqueueSaveCreds(authDir, saveCreds, sessionLogger));
