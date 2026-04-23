@@ -789,7 +789,7 @@ function exportTenantMigration(tenantId: string) {
   if (!tenant) {
     return null;
   }
-  const rows = stmts.stmtListActiveBindingsByTenant.all(tenantId) as Array<{
+  const rows = stmts.stmtListBindingsForMigrationExport.all(tenantId) as Array<{
     binding_id: string;
     channel: string;
     scope: string;
@@ -805,6 +805,35 @@ function exportTenantMigration(tenantId: string) {
       routeKey: String(row.route_key),
     })),
   };
+}
+
+/**
+ * Freeze a tenant's active bindings for migration. While `status='migrating'`
+ * the inbound-routing statement skips them (it filters `status='active'`),
+ * so events for those chats drop at mux-server. Idempotent.
+ */
+function freezeTenantForMigration(tenantId: string) {
+  const now = Date.now();
+  const result = stmts.stmtFreezeBindingsByTenant.run(now, tenantId);
+  return { frozen: Number(result.changes ?? 0) };
+}
+
+/** Rollback path for a failed migration: reactivate frozen bindings. */
+function unfreezeTenantFromMigration(tenantId: string) {
+  const now = Date.now();
+  const result = stmts.stmtUnfreezeBindingsByTenant.run(now, tenantId);
+  return { unfrozen: Number(result.changes ?? 0) };
+}
+
+/**
+ * Commit a migration on mux-server's side: transition frozen bindings to
+ * `migrated` (permanent). Only touches bindings already in `migrating`, so
+ * a skipped-freeze operator error doesn't clobber live traffic.
+ */
+function finalizeTenantMigration(tenantId: string) {
+  const now = Date.now();
+  const result = stmts.stmtFinalizeMigratingBindingsByTenant.run(now, tenantId);
+  return { finalized: Number(result.changes ?? 0) };
 }
 
 const { handleRequest } = createHttpRouteHandler({
@@ -834,6 +863,9 @@ const { handleRequest } = createHttpRouteHandler({
   resolveTelegramFilePath,
   requireTelegramBotToken,
   exportTenantMigration,
+  freezeTenantForMigration,
+  unfreezeTenantFromMigration,
+  finalizeTenantMigration,
 });
 
 const { handleOutboundSendRequest } = createOutboundRequestHandler({

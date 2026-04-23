@@ -219,10 +219,44 @@ export function createPreparedStatements(db: DatabaseSync) {
     ORDER BY created_at_ms DESC
   `);
 
+  // Export statement for the flat migration: includes frozen
+  // ('migrating') bindings so an operator who already called freeze-tenant
+  // can still produce a dump. Excludes 'migrated' (already-imported) and
+  // 'inactive'/'pending' (not live).
+  const stmtListBindingsForMigrationExport = db.prepare(`
+    SELECT binding_id, channel, scope, route_key
+    FROM bindings
+    WHERE tenant_id = ? AND status IN ('active', 'migrating')
+    ORDER BY created_at_ms DESC
+  `);
+
   const stmtUnbindActiveBinding = db.prepare(`
     UPDATE bindings
     SET status = 'inactive', updated_at_ms = ?
     WHERE binding_id = ? AND tenant_id = ? AND status = 'active'
+  `);
+
+  // Flat mux → msg-router migration transitions. See
+  // docs/plans/2026-04-20-flat-mux-tenant-migration.md. Inbound routing
+  // filters on `status='active'`; moving a binding out of 'active' stops
+  // delivery without freeing the route_key (see the unique-while-live
+  // index — 'migrating' and 'migrated' don't participate).
+  const stmtFreezeBindingsByTenant = db.prepare(`
+    UPDATE bindings
+    SET status = 'migrating', updated_at_ms = ?
+    WHERE tenant_id = ? AND status = 'active'
+  `);
+
+  const stmtUnfreezeBindingsByTenant = db.prepare(`
+    UPDATE bindings
+    SET status = 'active', updated_at_ms = ?
+    WHERE tenant_id = ? AND status = 'migrating'
+  `);
+
+  const stmtFinalizeMigratingBindingsByTenant = db.prepare(`
+    UPDATE bindings
+    SET status = 'migrated', updated_at_ms = ?
+    WHERE tenant_id = ? AND status = 'migrating'
   `);
 
   const stmtDeactivateLiveBinding = db.prepare(`
@@ -475,7 +509,11 @@ export function createPreparedStatements(db: DatabaseSync) {
     stmtInsertPendingBinding,
     stmtActivatePendingBinding,
     stmtListActiveBindingsByTenant,
+    stmtListBindingsForMigrationExport,
     stmtUnbindActiveBinding,
+    stmtFreezeBindingsByTenant,
+    stmtUnfreezeBindingsByTenant,
+    stmtFinalizeMigratingBindingsByTenant,
     stmtDeactivateLiveBinding,
     stmtSetBindingPending,
     stmtDeleteSessionRoutesByBinding,

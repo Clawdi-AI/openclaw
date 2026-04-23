@@ -114,6 +114,29 @@ export function createHttpRouteHandler(deps: {
     tenant: { id: string; name: string };
     bindings: Array<{ channel: string; scope: string; routeKey: string }>;
   } | null;
+  /**
+   * Freeze a tenant's active bindings: transitions their status from
+   * `active` to `migrating`. While frozen, inbound routing (which filters
+   * on `status='active'`) drops events for these chats — nothing gets
+   * delivered to the tenant's openclaw instance. Idempotent: freezing
+   * already-frozen bindings is a no-op. Returns the number of bindings
+   * that changed state.
+   */
+  freezeTenantForMigration: (tenantId: string) => { frozen: number };
+  /**
+   * Reverse of freeze: transitions bindings from `migrating` back to
+   * `active`. Used for rollback when a migration attempt fails mid-flight.
+   * Idempotent. Returns the number of bindings that changed state.
+   */
+  unfreezeTenantFromMigration: (tenantId: string) => { unfrozen: number };
+  /**
+   * Finalize a migration: transitions `migrating` bindings to `migrated`
+   * (permanent). Only touches frozen bindings — if the operator skipped
+   * `freeze-tenant`, this is a no-op rather than clobbering active
+   * bindings. Idempotent. Returns the number of bindings that changed
+   * state.
+   */
+  finalizeTenantMigration: (tenantId: string) => { finalized: number };
 }): {
   handleRequest: (params: {
     req: IncomingMessage;
@@ -326,6 +349,40 @@ export function createHttpRouteHandler(deps: {
         return { handled: true };
       }
       deps.sendJson(res, 200, { ok: true, dump });
+      return { handled: true };
+    }
+
+    if (
+      req.method === "POST" &&
+      (pathname === "/v1/admin/migrate/freeze-tenant" ||
+        pathname === "/v1/admin/migrate/unfreeze-tenant" ||
+        pathname === "/v1/admin/migrate/finalize-tenant")
+    ) {
+      if (!deps.config.muxAdminToken) {
+        deps.sendJson(res, 404, { ok: false, error: "not found" });
+        return { handled: true };
+      }
+      if (!deps.isAdminAuthorized(req)) {
+        deps.metrics.recordAuthFailure("admin");
+        deps.log({ type: "auth_unauthorized", surface: "admin" });
+        deps.sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return { handled: true };
+      }
+      const tenantId = readNonEmptyString(requestUrl.searchParams.get("tenantId"));
+      if (!tenantId) {
+        deps.sendJson(res, 400, { ok: false, error: "tenantId required" });
+        return { handled: true };
+      }
+      if (pathname === "/v1/admin/migrate/freeze-tenant") {
+        const result = deps.freezeTenantForMigration(tenantId);
+        deps.sendJson(res, 200, { ok: true, ...result });
+      } else if (pathname === "/v1/admin/migrate/unfreeze-tenant") {
+        const result = deps.unfreezeTenantFromMigration(tenantId);
+        deps.sendJson(res, 200, { ok: true, ...result });
+      } else {
+        const result = deps.finalizeTenantMigration(tenantId);
+        deps.sendJson(res, 200, { ok: true, ...result });
+      }
       return { handled: true };
     }
 
