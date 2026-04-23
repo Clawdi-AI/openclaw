@@ -217,8 +217,8 @@ export async function startMuxServer(params: {
   /**
    * Override the Telegram bot token mux-server uses upstream. Defaults to the
    * test-local `TELEGRAM_BOT_TOKEN` const. Nested-mode tests (msg-router in
-   * front of fake-TG) pass a mint-on-behalf token (`mpt_...`) here so the
-   * msg-router egress validates it.
+   * front of fake-TG) pass an msg-router mint-on-behalf TG-shaped token
+   * (`<numeric_id>:<secret>`) here so the msg-router egress validates it.
    */
   telegramBotToken?: string;
   discordBaseUrl?: string;
