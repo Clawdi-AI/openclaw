@@ -232,6 +232,19 @@ export async function startMuxServer(params: {
   discordGatewayDmEnabled?: boolean;
   discordGatewayGuildEnabled?: boolean;
   whatsappControlUrl?: string;
+  /**
+   * WA config for nested-msg-router mode: loads openclaw's real Baileys
+   * runtime instead of `fake-whatsapp-runtime.ts`, points Baileys at the
+   * supplied Noise WS URL, and uses the supplied auth dir (which must
+   * already have a valid msg-router-minted `creds.json`).
+   *
+   * Mutually exclusive with `whatsappControlUrl` — only one WA path is
+   * active at a time.
+   */
+  whatsappRealRuntime?: {
+    waWebSocketUrl: string;
+    authDir: string;
+  };
   resolutionMode: "session-first" | "target-first";
 }): Promise<StartedMuxServer> {
   const started = startNodeTsxProcess({
@@ -276,6 +289,15 @@ export async function startMuxServer(params: {
             MUX_FAKE_WHATSAPP_CONTROL_URL: params.whatsappControlUrl,
             MUX_FAKE_WHATSAPP_POLL_INTERVAL_MS: "50",
             MUX_WHATSAPP_AUTH_DIR: path.join(params.tempDir, "fake-whatsapp-auth"),
+          }
+        : {}),
+      ...(params.whatsappRealRuntime
+        ? {
+            // Leave MUX_WEB_RUNTIME_MODULE_PATH unset so mux-server's
+            // runtime-modules loader falls through to openclaw's real WA
+            // runtime (which calls Baileys' makeWASocket).
+            MUX_WHATSAPP_AUTH_DIR: params.whatsappRealRuntime.authDir,
+            WA_WEBSOCKET_URL: params.whatsappRealRuntime.waWebSocketUrl,
           }
         : {}),
       MUX_TENANTS_JSON: JSON.stringify([
