@@ -222,6 +222,13 @@ export async function startMuxServer(params: {
    */
   telegramBotToken?: string;
   discordBaseUrl?: string;
+  /**
+   * Override the Discord bot token mux-server uses upstream. Defaults to
+   * `"dummy-discord-token"`. Nested-mode tests pass an msg-router-minted
+   * opaque base64url token here so msg-router's egress-rest + egress-ws
+   * `resolveToken()` lookup succeeds.
+   */
+  discordBotToken?: string;
   discordGatewayDmEnabled?: boolean;
   discordGatewayGuildEnabled?: boolean;
   whatsappControlUrl?: string;
@@ -232,7 +239,9 @@ export async function startMuxServer(params: {
     entrypoint: "src/server.ts",
     env: {
       NODE_ENV: "test",
-      ...(params.discordBaseUrl ? { DISCORD_BOT_TOKEN: "dummy-discord-token" } : {}),
+      ...(params.discordBaseUrl
+        ? { DISCORD_BOT_TOKEN: params.discordBotToken ?? "dummy-discord-token" }
+        : {}),
       MUX_ADMIN_TOKEN: "integration-admin-token",
       MUX_REGISTER_KEY,
       MUX_PORT: String(params.port),
