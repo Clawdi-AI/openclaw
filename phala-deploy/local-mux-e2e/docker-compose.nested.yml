@@ -1,0 +1,61 @@
+# Nested-mux topology overlay: msg-router sits between Telegram/Discord
+# servers and mux-server. mux-server's TG/Discord upstream is reconfigured
+# to talk to msg-router instead of api.telegram.org / discord.com.
+#
+# Use with `up-nested.sh` (which provisions msg-router and mints a
+# mux-super tenant + bot token before starting mux-server). Plain
+# `docker compose -f docker-compose.yml -f docker-compose.nested.yml up`
+# will NOT work — mux-server needs a token that only exists after
+# msg-router is provisioned.
+#
+# Stage A of the migration rehearsal — see msg-router repo,
+# docs/MIGRATE-MUX-TENANT.md.
+
+name: openclaw-mux-local
+
+services:
+  msg-router:
+    # Same pattern as mux-server below — bind-mount the source tree and
+    # run via tsx, no docker build. host install of msg-router (with its
+    # corepack/yarn-shaped baileys submodule) populates node_modules,
+    # which we then mount in. Avoids fighting pnpm's git-hosted package
+    # prepare step inside the container.
+    # node:24 to match host node version (better-sqlite3 native binding
+    # was built against host node 24).
+    image: node:24-bookworm-slim
+    working_dir: /app
+    container_name: msg-router-local-e2e
+    ports:
+      - "127.0.0.1:${HOST_MSG_ROUTER_PORT:-18890}:18890"
+    command: ["node", "--import", "tsx", "src/index.ts"]
+    environment:
+      NODE_ENV: production
+      PORT: "18890"
+      ADMIN_TOKEN: ${MSG_ROUTER_ADMIN_TOKEN:-local-msg-router-admin-token}
+      DB_PATH: /data/msg-router.sqlite
+      TG_BASE_URL: ${TG_UPSTREAM_BASE_URL:-https://api.telegram.org}
+      DISCORD_BASE_URL: ${DISCORD_UPSTREAM_BASE_URL:-https://discord.com}
+    volumes:
+      - ${MSG_ROUTER_REPO:-../../../claw/msg-router}:/app:ro
+      - msg_router_data:/data
+    restart: unless-stopped
+
+  mux-server:
+    depends_on:
+      msg-router:
+        condition: service_started
+      openclaw:
+        condition: service_started
+    environment:
+      # Override TG upstream to point at msg-router instead of api.telegram.org.
+      # The TELEGRAM_BOT_TOKEN here is NOT the real Telegram bot token —
+      # it's the mux-super tenant's bot token that msg-router mints during
+      # `up-nested.sh` provisioning.
+      MUX_TELEGRAM_API_BASE_URL: http://msg-router:18890
+      TELEGRAM_BOT_TOKEN: ${MUX_SUPER_TG_BOT_TOKEN:-}
+      # Same idea for Discord. Provisioned by up-nested.sh.
+      MUX_DISCORD_API_BASE_URL: http://msg-router:18890
+      DISCORD_BOT_TOKEN: ${MUX_SUPER_DISCORD_BOT_TOKEN:-}
+
+volumes:
+  msg_router_data:
