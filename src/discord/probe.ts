@@ -56,13 +56,15 @@ async function fetchDiscordApplicationMeResponse(
   token: string,
   timeoutMs: number,
   fetcher: typeof fetch,
+  baseUrl?: string,
 ): Promise<Response | undefined> {
   const normalized = normalizeDiscordToken(token, "channels.discord.token");
   if (!normalized) {
     return undefined;
   }
+  const apiBase = baseUrl ? `${baseUrl}/api/v10` : discordApiBase();
   return await fetchWithTimeout(
-    `${discordApiBase()}/oauth2/applications/@me`,
+    `${apiBase}/oauth2/applications/@me`,
     { headers: { Authorization: `Bot ${normalized}` } },
     timeoutMs,
     getResolvedFetch(fetcher),
@@ -208,13 +210,14 @@ export async function fetchDiscordApplicationId(
   token: string,
   timeoutMs: number,
   fetcher: typeof fetch = fetch,
+  baseUrl?: string,
 ): Promise<string | undefined> {
   const normalized = normalizeDiscordToken(token, "channels.discord.token");
   if (!normalized) {
     return undefined;
   }
   try {
-    const res = await fetchDiscordApplicationMeResponse(token, timeoutMs, fetcher);
+    const res = await fetchDiscordApplicationMeResponse(token, timeoutMs, fetcher, baseUrl);
     if (!res) {
       return undefined;
     }
