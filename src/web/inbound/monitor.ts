@@ -26,6 +26,7 @@ export async function monitorWebInbox(options: {
   verbose: boolean;
   accountId: string;
   authDir: string;
+  wsUrl?: string;
   onMessage: (msg: WebInboundMessage) => Promise<void>;
   /**
    * Optional access-control resolver override.
@@ -58,6 +59,7 @@ export async function monitorWebInbox(options: {
   const inboundConsoleLog = createSubsystemLogger("gateway/channels/whatsapp").child("inbound");
   const sock = await createWaSocket(false, options.verbose, {
     authDir: options.authDir,
+    wsUrl: options.wsUrl,
   });
   await waitForWaConnection(sock);
   const connectedAtMs = Date.now();

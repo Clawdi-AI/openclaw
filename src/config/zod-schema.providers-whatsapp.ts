@@ -111,6 +111,10 @@ export const WhatsAppAccountSchema = WhatsAppSharedSchema.extend({
   enabled: z.boolean().optional(),
   /** Override auth directory for this WhatsApp account (Baileys multi-file auth state). */
   authDir: z.string().optional(),
+  /** Override the Baileys WebSocket URL for this account. Points Baileys at
+   *  msg-router's Noise WS face instead of `wss://web.whatsapp.com/ws/chat`.
+   *  Same role as `apiBaseUrl` on TG/Discord accounts. */
+  wsUrl: z.string().optional(),
   mediaMaxMb: z.number().int().positive().optional(),
 }).strict();
 
