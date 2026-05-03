@@ -535,7 +535,12 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     phase: "fetch-application-id:start",
     startAt: startupStartedAt,
   });
-  const applicationId = await fetchDiscordApplicationId(token, 4000, discordRestFetch);
+  const applicationId = await fetchDiscordApplicationId(
+    token,
+    4000,
+    discordRestFetch,
+    resolveDiscordApiBaseUrl(process.env, rawDiscordCfg),
+  );
   if (!applicationId) {
     throw new Error("Failed to resolve Discord application id");
   }
