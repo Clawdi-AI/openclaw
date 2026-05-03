@@ -91,7 +91,7 @@ async function safeSaveCreds(
 export async function createWaSocket(
   printQr: boolean,
   verbose: boolean,
-  opts: { authDir?: string; onQr?: (qr: string) => void } = {},
+  opts: { authDir?: string; onQr?: (qr: string) => void; wsUrl?: string } = {},
 ): Promise<ReturnType<typeof makeWASocket>> {
   const baseLogger = getChildLogger(
     { module: "baileys" },
@@ -111,7 +111,7 @@ export async function createWaSocket(
   // (see docs/MIGRATION-FROM-MUX.md) and direct msg-router deployments to
   // route WA through msg-router's Noise WS face. Undefined → Baileys uses
   // its real-WA default.
-  const waWebSocketUrl = resolveWaWebSocketUrl();
+  const waWebSocketUrl = resolveWaWebSocketUrl(process.env, { wsUrl: opts.wsUrl });
   const sock = makeWASocket({
     auth: {
       creds: state.creds,
