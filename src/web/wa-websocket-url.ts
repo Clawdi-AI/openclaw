@@ -1,8 +1,11 @@
 /**
  * Resolve the WhatsApp Noise WebSocket URL Baileys should connect to.
  *
- * Default (env unset, no per-account override): Baileys' own default
- * (`wss://web.whatsapp.com/ws/chat`).
+ * Default (env unset): Baileys' own default (`wss://web.whatsapp.com/ws/chat`).
+ * Override via `WA_WEBSOCKET_URL` env to point Baileys at an msg-router
+ * Noise WS face — the mechanism by which a nested mux-server deployment
+ * (see `docs/MIGRATION-FROM-MUX.md`) or a direct openclaw deployment can
+ * route WhatsApp traffic through msg-router rather than real WA.
  *
  * Precedence:
  *   1. `account.wsUrl` (per-account config override).
@@ -19,6 +22,9 @@ function normalizeWaWebSocketUrl(value: string | null | undefined): string | nul
   if (!trimmed) {
     return null;
   }
+  // Strip trailing slashes to avoid double-slash URLs when Baileys appends
+  // paths internally. Preserve a leading `ws://` / `wss://`; anything else
+  // is passed through unchanged so callers can use URL objects too.
   return trimmed.replace(/\/+$/, "") || null;
 }
 
