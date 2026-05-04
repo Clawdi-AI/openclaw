@@ -755,15 +755,18 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       {
         // Carbon uses `baseUrl` on the Client for its own interaction/deploy
         // URL construction and `requestOptions.baseUrl` on the REST client
-        // it builds internally; set both so DISCORD_BOT_API_BASE_URL
-        // redirects every outbound REST call (default: real Discord).
-        baseUrl: resolveDiscordApiBaseUrl(),
+        // it builds internally. Pass the per-account config so
+        // `channels.discord.accounts.<id>.apiBaseUrl` is honored — without
+        // it, both fall back to https://discord.com and the agent ends up
+        // talking to real Discord with a synthetic msg-router-minted token
+        // (=> 401 on every REST call).
+        baseUrl: resolveDiscordApiBaseUrl(process.env, rawDiscordCfg),
         requestOptions: {
           // Carbon's request paths look like `/applications/.../commands`
           // without an `/api/vN` prefix, so our override must include the
           // full `/api/v10` suffix. That matches both real Discord and
           // msg-router's emulator (which canonicalizes with the prefix).
-          baseUrl: `${resolveDiscordApiBaseUrl()}/api/v10`,
+          baseUrl: `${resolveDiscordApiBaseUrl(process.env, rawDiscordCfg)}/api/v10`,
         },
         deploySecret: "a",
         clientId: applicationId,
