@@ -122,7 +122,7 @@ export async function createWaSocket(
     printQRInTerminal: false,
     browser: ["openclaw", "cli", VERSION],
     syncFullHistory: false,
-    markOnlineOnConnect: false,
+    markOnlineOnConnect: true,
     ...(waWebSocketUrl ? { waWebSocketUrl } : {}),
   });
 
