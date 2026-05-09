@@ -5,6 +5,7 @@ import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/config.js";
 import { resolveConfigPath, resolveStateDir } from "../config/paths.js";
 import { isInterpreterLikeAllowlistPattern } from "../infra/command-analysis/inline-eval.js";
+import { isTruthyEnvValue } from "../infra/env.js";
 import { type ExecApprovalsFile, loadExecApprovals } from "../infra/exec-approvals.js";
 import {
   listInterpreterLikeSafeBins,
@@ -205,6 +206,9 @@ export async function collectFilesystemFindings(params: {
   execIcacls?: ExecFn;
 }): Promise<SecurityAuditFinding[]> {
   const findings: SecurityAuditFinding[] = [];
+  const ignoreClawdiManagedSafeWarnings = isTruthyEnvValue(
+    params.env?.CLAWDI_AUDIT_IGNORE_WARNING_SAFE,
+  );
 
   const stateDirPerms = await inspectPathPermissions(params.stateDir, {
     env: params.env,
@@ -212,7 +216,7 @@ export async function collectFilesystemFindings(params: {
     exec: params.execIcacls,
   });
   if (stateDirPerms.ok) {
-    if (stateDirPerms.isSymlink) {
+    if (stateDirPerms.isSymlink && !ignoreClawdiManagedSafeWarnings) {
       findings.push({
         checkId: "fs.state_dir.symlink",
         severity: "warn",

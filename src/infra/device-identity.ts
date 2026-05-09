@@ -26,6 +26,8 @@ function ensureDir(filePath: string) {
 }
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+const ED25519_PKCS8_SEED_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+const DEVICE_IDENTITY_MASTER_KEY_INFO = "openclaw-device-identity-v1";
 
 function base64UrlEncode(buf: Buffer): string {
   return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
@@ -62,9 +64,63 @@ function generateIdentity(): DeviceIdentity {
   return { deviceId, publicKeyPem, privateKeyPem };
 }
 
+function deriveIdentityFromMasterKey(masterKey: string): DeviceIdentity {
+  // Keep Phala-style deployments stable across first boot and accidental
+  // device.json loss when MASTER_KEY is operator-managed and persistent.
+  const seed = Buffer.from(
+    crypto.hkdfSync("sha256", masterKey, "", DEVICE_IDENTITY_MASTER_KEY_INFO, 32),
+  );
+  const pkcs8 = Buffer.concat([ED25519_PKCS8_SEED_PREFIX, seed]);
+  const privateKey = crypto.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
+  const publicKey = crypto.createPublicKey(privateKey);
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const deviceId = fingerprintPublicKey(publicKeyPem);
+  return { deviceId, publicKeyPem, privateKeyPem };
+}
+
 export function loadOrCreateDeviceIdentity(
   filePath: string = resolveDefaultIdentityPath(),
 ): DeviceIdentity {
+  const masterKey = typeof process.env.MASTER_KEY === "string" ? process.env.MASTER_KEY.trim() : "";
+
+  // When MASTER_KEY is set, the identity must always match the derivation.
+  // A stale device.json (e.g. randomly generated before the MASTER_KEY fix)
+  // would mismatch the pre-seeded paired.json and break RPC auth on CVMs.
+  if (masterKey) {
+    const expected = deriveIdentityFromMasterKey(masterKey);
+    try {
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, "utf8");
+        const parsed = JSON.parse(raw) as StoredIdentity;
+        if (
+          parsed?.version === 1 &&
+          parsed.deviceId === expected.deviceId &&
+          parsed.publicKeyPem === expected.publicKeyPem
+        ) {
+          return expected;
+        }
+      }
+    } catch {
+      // fall through to write
+    }
+    ensureDir(filePath);
+    const stored: StoredIdentity = {
+      version: 1,
+      deviceId: expected.deviceId,
+      publicKeyPem: expected.publicKeyPem,
+      privateKeyPem: expected.privateKeyPem,
+      createdAtMs: Date.now(),
+    };
+    fs.writeFileSync(filePath, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+    try {
+      fs.chmodSync(filePath, 0o600);
+    } catch {
+      // best-effort
+    }
+    return expected;
+  }
+
   try {
     if (fs.existsSync(filePath)) {
       const raw = fs.readFileSync(filePath, "utf8");

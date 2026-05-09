@@ -82,7 +82,12 @@ const baseTelegramCfg: TelegramAccountConfig = {
   groupPolicy: "allowlist",
 } as unknown as TelegramAccountConfig;
 
-const emptyAllow = { entries: [], hasWildcard: false, hasEntries: false, invalidEntries: [] };
+const emptyAllow = {
+  entries: [],
+  hasWildcard: false,
+  hasEntries: false,
+  invalidEntries: [],
+};
 const senderAllow = {
   entries: ["111"],
   hasWildcard: false,

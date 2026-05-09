@@ -798,6 +798,10 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
         applicationId: {
           type: "string",
         },
+        apiBaseUrl: {
+          type: "string",
+          format: "uri",
+        },
         proxy: {
           type: "string",
         },
@@ -2248,6 +2252,10 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
               },
               applicationId: {
                 type: "string",
+              },
+              apiBaseUrl: {
+                type: "string",
+                format: "uri",
               },
               proxy: {
                 type: "string",
@@ -17450,6 +17458,10 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
               },
               authDir: {
                 type: "string",
+              },
+              wsUrl: {
+                type: "string",
+                format: "uri",
               },
               mediaMaxMb: {
                 type: "integer",

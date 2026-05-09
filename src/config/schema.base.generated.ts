@@ -577,6 +577,24 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             title: "Update Check on Start",
             description: "Check for npm updates when the gateway starts (default: true).",
           },
+          selfUpdate: {
+            type: "object",
+            properties: {
+              enabled: {
+                type: "boolean",
+                title: "Self Update Enabled",
+                description:
+                  "Allow OpenClaw to update itself in-place through the CLI updater, gateway update.run, or auto-update flows (default: true). Disable this for externally managed deployments that must be updated by image rollout or another operator workflow.",
+              },
+              reason: {
+                type: "string",
+                title: "Self Update Disabled Reason",
+                description:
+                  "Optional explanation shown when self-update is blocked. Use this to point operators at the correct external upgrade workflow for managed deployments.",
+              },
+            },
+            additionalProperties: false,
+          },
           auto: {
             type: "object",
             properties: {
@@ -24616,6 +24634,16 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       help: "Check for npm updates when the gateway starts (default: true).",
       tags: ["automation"],
     },
+    "update.selfUpdate.enabled": {
+      label: "Self Update Enabled",
+      help: "Allow OpenClaw to update itself in-place through the CLI updater, gateway update.run, or auto-update flows (default: true). Disable this for externally managed deployments that must be updated by image rollout or another operator workflow.",
+      tags: ["advanced"],
+    },
+    "update.selfUpdate.reason": {
+      label: "Self Update Disabled Reason",
+      help: "Optional explanation shown when self-update is blocked. Use this to point operators at the correct external upgrade workflow for managed deployments.",
+      tags: ["advanced"],
+    },
     "update.auto.enabled": {
       label: "Auto Update Enabled",
       help: "Enable background auto-update for package installs (default: false).",
@@ -25998,6 +26026,11 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     "tools.web.search.brave.mode": {
       label: "Brave Search Mode",
       help: 'Brave Search mode: "web" (URL results) or "llm-context" (pre-extracted page content for LLM grounding).',
+      tags: ["tools"],
+    },
+    "tools.web.search.brave.baseUrl": {
+      label: "Brave Search Base URL",
+      help: 'Optional Brave Search base URL override (default: "https://api.search.brave.com"). Used for both Brave web and llm-context endpoints.',
       tags: ["tools"],
     },
     "tools.web.fetch.enabled": {
