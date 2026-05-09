@@ -104,6 +104,12 @@ done
 
 cd "$REPO_ROOT"
 
+# OpenGrep reads the compiled rulepack through Python. Some CI runner images
+# default to an ASCII locale, which crashes on the Unicode punctuation present
+# in upstream rule messages.
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
 if (( CHANGED_ONLY && PATHS_PASSED )); then
   echo "error: --changed cannot be combined with explicit path overrides" >&2
   exit 64
