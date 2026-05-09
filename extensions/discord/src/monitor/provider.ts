@@ -323,6 +323,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       token,
       4000,
       discordRestFetch,
+      discordCfg,
     ));
   if (!applicationId) {
     throw new Error("Failed to resolve Discord application id");

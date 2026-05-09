@@ -89,14 +89,36 @@ export function isDirectPerplexityBaseUrl(baseUrl: string): boolean {
   }
 }
 
+function normalizeTransportSelector(
+  value: unknown,
+): "auto" | "search-api" | "chat-completions" | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "auto" || normalized === "search-api" || normalized === "chat-completions") {
+    return normalized;
+  }
+  return undefined;
+}
+
 function resolvePerplexityRuntimeTransport(
   params: PerplexityRuntimeTransportContext,
 ): PerplexityTransport | undefined {
   const perplexity = params.searchConfig?.perplexity;
   const scoped =
     perplexity && typeof perplexity === "object" && !Array.isArray(perplexity)
-      ? (perplexity as { baseUrl?: string; model?: string })
+      ? (perplexity as { baseUrl?: string; model?: string; transport?: unknown })
       : undefined;
+  // Explicit transport selection takes precedence over the auto heuristic so
+  // tool schema hints stay in sync with runtime routing.
+  const explicit = normalizeTransportSelector(scoped?.transport);
+  if (explicit === "search-api") {
+    return "search_api";
+  }
+  if (explicit === "chat-completions") {
+    return "chat_completions";
+  }
   const configuredBaseUrl = normalizeOptionalString(scoped?.baseUrl) ?? "";
   const configuredModel = normalizeOptionalString(scoped?.model) ?? "";
   const baseUrl = (() => {

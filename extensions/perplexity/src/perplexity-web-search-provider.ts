@@ -81,6 +81,21 @@ function createPerplexityParameters(transport?: string): Record<string, unknown>
   };
 }
 
+function readExplicitTransportSelector(
+  searchConfig?: Record<string, unknown>,
+): "auto" | "search-api" | "chat-completions" | undefined {
+  const perplexity = isRecord(searchConfig?.perplexity) ? searchConfig.perplexity : undefined;
+  const raw = perplexity?.transport;
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "auto" || normalized === "search-api" || normalized === "chat-completions") {
+    return normalized;
+  }
+  return undefined;
+}
+
 function hasPerplexityLegacyOverride(searchConfig?: Record<string, unknown>): boolean {
   const perplexity = isRecord(searchConfig?.perplexity) ? searchConfig.perplexity : undefined;
   return (
@@ -89,13 +104,33 @@ function hasPerplexityLegacyOverride(searchConfig?: Record<string, unknown>): bo
   );
 }
 
+function resolveSchemaTransport(
+  searchConfig?: Record<string, unknown>,
+  runtimeTransport?: string,
+): string | undefined {
+  if (runtimeTransport) {
+    return runtimeTransport;
+  }
+  // Explicit transport selector aligns the tool schema with the chosen runtime
+  // transport before the runtime metadata pass has run.
+  const explicit = readExplicitTransportSelector(searchConfig);
+  if (explicit === "search-api") {
+    return "search_api";
+  }
+  if (explicit === "chat-completions") {
+    return "chat_completions";
+  }
+  if (explicit === "auto") {
+    return undefined;
+  }
+  return hasPerplexityLegacyOverride(searchConfig) ? "chat_completions" : undefined;
+}
+
 function createPerplexityToolDefinition(
   searchConfig?: Record<string, unknown>,
   runtimeTransport?: string,
 ): WebSearchProviderToolDefinition {
-  const schemaTransport =
-    runtimeTransport ??
-    (hasPerplexityLegacyOverride(searchConfig) ? "chat_completions" : undefined);
+  const schemaTransport = resolveSchemaTransport(searchConfig, runtimeTransport);
 
   return {
     description:

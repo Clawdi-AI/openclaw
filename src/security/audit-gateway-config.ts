@@ -3,6 +3,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { hasConfiguredSecretInput } from "../config/types.secrets.js";
 import { resolveGatewayAuth } from "../gateway/auth-resolve.js";
 import { resolveGatewayAuthTokenSourceConflict } from "../gateway/auth-token-source-conflict.js";
+import { isTruthyEnvValue } from "../infra/env.js";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
@@ -28,6 +29,7 @@ export function collectGatewayConfigFindings(
   options: CollectGatewayConfigFindingsOptions = {},
 ): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
+  const ignoreClawdiManagedSafeWarnings = isTruthyEnvValue(env.CLAWDI_AUDIT_IGNORE_WARNING_SAFE);
 
   const bind = typeof cfg.gateway?.bind === "string" ? cfg.gateway.bind : "loopback";
   const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
@@ -258,7 +260,10 @@ export function collectGatewayConfigFindings(
     });
   }
 
-  if (cfg.gateway?.controlUi?.dangerouslyDisableDeviceAuth === true) {
+  if (
+    cfg.gateway?.controlUi?.dangerouslyDisableDeviceAuth === true &&
+    !ignoreClawdiManagedSafeWarnings
+  ) {
     findings.push({
       checkId: "gateway.control_ui.device_auth_disabled",
       severity: "critical",
@@ -271,7 +276,11 @@ export function collectGatewayConfigFindings(
 
   const enabledDangerousFlags = (
     options.collectDangerousConfigFlags ?? collectCoreInsecureOrDangerousFlags
-  )(cfg);
+  )(cfg).filter((flag) =>
+    ignoreClawdiManagedSafeWarnings
+      ? flag !== "gateway.controlUi.dangerouslyDisableDeviceAuth=true"
+      : true,
+  );
   if (enabledDangerousFlags.length > 0) {
     findings.push({
       checkId: "config.insecure_or_dangerous_flags",

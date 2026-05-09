@@ -149,6 +149,20 @@ const WhatsAppAccountObjectSchema = z
     enabled: z.boolean().optional(),
     /** Override auth directory for this WhatsApp account (Baileys multi-file auth state). */
     authDir: z.string().optional(),
+    /**
+     * Per-account override for the Baileys WebSocket URL. Points
+     * Baileys at a Baileys-compatible proxy (typically msg-router's
+     * `/whatsapp` Noise face) instead of the real
+     * `wss://web.whatsapp.com/ws/chat`.
+     *
+     * Why per-account: lets the same agent host a platform-routed
+     * default account through msg-router AND a customer-supplied
+     * direct-WhatsApp account at the same time. Mirrors Telegram's
+     * per-account `apiRoot` and Discord's per-account `apiBaseUrl`.
+     * The `WA_WEBSOCKET_URL` env var still works as a process-wide
+     * fallback for accounts that don't set this.
+     */
+    wsUrl: z.string().url().optional(),
     mediaMaxMb: z.number().int().positive().optional(),
   })
   .strict();

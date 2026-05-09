@@ -9,6 +9,7 @@ import {
   resolveDiscordAccount,
   type ResolvedDiscordAccount,
 } from "./accounts.js";
+import { resolveDiscordApiBaseUrl } from "./api-base-url.js";
 import { RequestClient } from "./internal/discord.js";
 import { resolveDiscordProxyFetchForAccount } from "./proxy-fetch.js";
 import { createDiscordRequestClient } from "./proxy-request-client.js";
@@ -81,10 +82,22 @@ function resolveRest(
     return rest;
   }
   const resolvedProxyFetch = proxyFetch ?? resolveDiscordProxyFetchForAccount(account, cfg);
-  return createDiscordRequestClient(
-    token,
-    resolvedProxyFetch ? { fetch: resolvedProxyFetch } : undefined,
-  );
+  // Carbon's RequestClient accepts a `baseUrl` option that rewrites every
+  // outbound REST URL. Default to real Discord; respect a per-account
+  // `apiBaseUrl` first (lets shared + custom Discord bots coexist on
+  // one agent — see `extensions/discord/src/api-base-url.ts`), and fall
+  // back to `DISCORD_BOT_API_BASE_URL` for legacy integration harnesses
+  // that point the whole process at one host.
+  // RequestClient's default baseUrl already includes the `/api` prefix
+  // and appends `/v{apiVersion}`. Mirror that default shape here so an
+  // override targets the same path layout.
+  const baseUrl = `${resolveDiscordApiBaseUrl({ account: account.config })}/api`;
+  const overrideBaseUrl = baseUrl !== "https://discord.com/api" ? { baseUrl } : undefined;
+  const fetchOption = resolvedProxyFetch ? { fetch: resolvedProxyFetch } : undefined;
+  if (!overrideBaseUrl && !fetchOption) {
+    return createDiscordRequestClient(token);
+  }
+  return createDiscordRequestClient(token, { ...overrideBaseUrl, ...fetchOption });
 }
 
 function resolveAccountWithoutToken(params: {
