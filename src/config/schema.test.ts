@@ -134,6 +134,7 @@ describe("config schema", () => {
         }
       | undefined;
     expect(serversNode?.additionalProperties?.properties?.headers).toBeTruthy();
+    expect(serversNode?.additionalProperties?.properties?.auth).toBeTruthy();
     expect(serversNode?.additionalProperties?.properties?.transport).toBeTruthy();
   });
 
