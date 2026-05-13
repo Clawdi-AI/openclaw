@@ -1,4 +1,13 @@
+import type { SecretInput } from "./types.secrets.js";
+
 export type McpCodexToolApprovalMode = "auto" | "prompt" | "approve";
+
+export type McpServerAuthConfig = {
+  /** HTTP transport auth helper. Currently supports Bearer tokens. */
+  type?: "bearer";
+  /** Token used to build `Authorization: Bearer <token>`. */
+  token: SecretInput;
+};
 
 export type McpServerCodexConfig = {
   /** OpenClaw agent ids that should receive this server in Codex app-server threads. */
@@ -24,8 +33,10 @@ export type McpServerConfig = {
   url?: string;
   /** HTTP transport type for remote MCP servers. */
   transport?: "sse" | "streamable-http";
+  /** HTTP transport auth helper. */
+  auth?: McpServerAuthConfig;
   /** HTTP transport: extra HTTP headers sent with every request. */
-  headers?: Record<string, string | number | boolean>;
+  headers?: Record<string, SecretInput | number | boolean>;
   /** Optional connection timeout in milliseconds. */
   connectionTimeoutMs?: number;
   /** Codex-specific projection controls for Codex app-server/runtime config. */
