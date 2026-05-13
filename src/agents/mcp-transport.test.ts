@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveMcpTransport } from "./mcp-transport.js";
+import { __testing, resolveMcpTransport } from "./mcp-transport.js";
 
 type StreamableTransportOptions = {
   requestInit?: RequestInit;
@@ -78,7 +78,7 @@ describe("resolveMcpTransport", () => {
       .mockResolvedValueOnce(redirectResponse("https://redirect.example/next"))
       .mockResolvedValueOnce(new Response("ok"));
 
-    resolveMcpTransport("probe", {
+    await resolveMcpTransport("probe", {
       url: "https://mcp.example.com/mcp",
       transport: "streamable-http",
       headers: {
@@ -120,7 +120,7 @@ describe("resolveMcpTransport", () => {
       .mockResolvedValueOnce(redirectResponse("https://redirect.example/mcp", 307))
       .mockResolvedValueOnce(new Response("ok"));
 
-    resolveMcpTransport("probe", {
+    await resolveMcpTransport("probe", {
       url: "https://mcp.example.com/mcp",
       transport: "streamable-http",
       headers: {
@@ -155,7 +155,7 @@ describe("resolveMcpTransport", () => {
       .mockResolvedValueOnce(redirectResponse("https://mcp.example.com/mcp", 303))
       .mockResolvedValueOnce(new Response("ok"));
 
-    resolveMcpTransport("probe", {
+    await resolveMcpTransport("probe", {
       url: "https://mcp.example.com/mcp",
       transport: "streamable-http",
     });
@@ -182,7 +182,7 @@ describe("resolveMcpTransport", () => {
   it("rejects streamable HTTP redirect loops", async () => {
     runtimeFetchMock.mockResolvedValueOnce(redirectResponse("https://mcp.example.com/mcp"));
 
-    resolveMcpTransport("probe", {
+    await resolveMcpTransport("probe", {
       url: "https://mcp.example.com/mcp",
       transport: "streamable-http",
     });
@@ -201,7 +201,7 @@ describe("resolveMcpTransport", () => {
       );
     }
 
-    resolveMcpTransport("probe", {
+    await resolveMcpTransport("probe", {
       url: "https://mcp.example.com/mcp",
       transport: "streamable-http",
     });
@@ -217,7 +217,7 @@ describe("resolveMcpTransport", () => {
     const response = redirectWithoutLocationResponse();
     runtimeFetchMock.mockResolvedValueOnce(response);
 
-    resolveMcpTransport("probe", {
+    await resolveMcpTransport("probe", {
       url: "https://mcp.example.com/mcp",
       transport: "streamable-http",
     });
@@ -225,5 +225,55 @@ describe("resolveMcpTransport", () => {
     await expect(latestStreamableFetch()("https://mcp.example.com/mcp")).resolves.toBe(response);
 
     expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves MCP bearer auth and headers from SecretRefs", async () => {
+    const resolved = await __testing.resolveMcpServerRuntimeConfig(
+      "clawdi-mcp",
+      {
+        url: "https://api.example.com/composio/mcp",
+        transport: "streamable-http",
+        auth: {
+          type: "bearer",
+          token: {
+            source: "env",
+            provider: "clawdi",
+            id: "CLAWDI_PROXY_TOKEN",
+          },
+        },
+        headers: {
+          "X-Clawdi-Trace": {
+            source: "env",
+            provider: "clawdi",
+            id: "CLAWDI_TRACE_TOKEN",
+          },
+          "X-Retry": 1,
+        },
+      },
+      {
+        cfg: {
+          secrets: {
+            providers: {
+              clawdi: {
+                source: "env",
+                allowlist: ["CLAWDI_PROXY_TOKEN", "CLAWDI_TRACE_TOKEN"],
+              },
+            },
+          },
+        },
+        env: {
+          CLAWDI_PROXY_TOKEN: "proxy-token",
+          CLAWDI_TRACE_TOKEN: "trace-token",
+        },
+      },
+    );
+
+    expect(resolved).toMatchObject({
+      headers: {
+        Authorization: "Bearer proxy-token",
+        "X-Clawdi-Trace": "trace-token",
+        "X-Retry": "1",
+      },
+    });
   });
 });
