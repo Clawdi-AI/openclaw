@@ -349,11 +349,15 @@ const McpServerSchema = z
     workingDirectory: z.string().optional(),
     url: HttpUrlSchema.optional(),
     transport: z.union([z.literal("sse"), z.literal("streamable-http")]).optional(),
+    auth: z
+      .object({
+        type: z.literal("bearer").optional(),
+        token: SecretInputSchema.register(sensitive),
+      })
+      .strict()
+      .optional(),
     headers: z
-      .record(
-        z.string(),
-        z.union([z.string().register(sensitive), z.number(), z.boolean()]).register(sensitive),
-      )
+      .record(z.string(), z.union([SecretInputSchema, z.number(), z.boolean()]).register(sensitive))
       .optional(),
     codex: z
       .object({
