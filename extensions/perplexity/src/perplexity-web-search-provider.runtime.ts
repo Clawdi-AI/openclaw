@@ -26,6 +26,7 @@ import { normalizeOptionalString, uniqueStrings } from "openclaw/plugin-sdk/stri
 import {
   DEFAULT_PERPLEXITY_BASE_URL,
   inferPerplexityBaseUrlFromApiKey,
+  isClawdiPerplexityProxyBaseUrl,
   isDirectPerplexityBaseUrl,
   PERPLEXITY_DIRECT_BASE_URL,
   type PerplexityTransport,
@@ -194,6 +195,14 @@ function resolvePerplexityTransport(perplexity?: PerplexityConfig): {
   const hasLegacyOverride = Boolean(
     normalizeOptionalString(perplexity?.baseUrl) || normalizeOptionalString(perplexity?.model),
   );
+  if (isClawdiPerplexityProxyBaseUrl(baseUrl)) {
+    return {
+      ...auth,
+      baseUrl,
+      model,
+      transport: "search_api",
+    };
+  }
   return {
     ...auth,
     baseUrl,

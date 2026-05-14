@@ -699,6 +699,21 @@ describe("firecrawl tools", () => {
       mode: "strict",
     });
     await expect(
+      firecrawlClientTesting.resolveEndpoint("https://api.clawdi.ai/proxy/firecrawl", "/v2/scrape"),
+    ).resolves.toEqual({
+      url: "https://api.clawdi.ai/proxy/firecrawl/v2/scrape",
+      mode: "strict",
+    });
+    await expect(
+      firecrawlClientTesting.resolveEndpoint(
+        "https://api.clawdi.ai/proxy/firecrawl/",
+        "/v2/search",
+      ),
+    ).resolves.toEqual({
+      url: "https://api.clawdi.ai/proxy/firecrawl/v2/search",
+      mode: "strict",
+    });
+    await expect(
       firecrawlClientTesting.resolveEndpoint("http://127.0.0.1:8787", "/v2/scrape"),
     ).resolves.toEqual({
       url: "http://127.0.0.1:8787/v2/scrape",
@@ -718,6 +733,9 @@ describe("firecrawl tools", () => {
     ).rejects.toThrow("Firecrawl HTTP baseUrl must target a private or internal");
     await expect(
       firecrawlClientTesting.resolveEndpoint("https://attacker.example", "/v2/search"),
+    ).rejects.toThrow("Firecrawl custom baseUrl must target a private or internal");
+    await expect(
+      firecrawlClientTesting.resolveEndpoint("https://api.clawdi.ai/proxy/other", "/v2/search"),
     ).rejects.toThrow("Firecrawl custom baseUrl must target a private or internal");
     await expect(
       firecrawlClientTesting.resolveEndpoint("ftp://127.0.0.1:8787", "/v2/scrape"),
