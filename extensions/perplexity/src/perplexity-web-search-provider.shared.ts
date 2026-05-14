@@ -93,6 +93,20 @@ export function isDirectPerplexityBaseUrl(baseUrl: string): boolean {
   }
 }
 
+export function isClawdiPerplexityProxyBaseUrl(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl.trim());
+    const pathname = (url.pathname || "/").replace(/\/+$/u, "") || "/";
+    return (
+      url.protocol === "https:" &&
+      normalizeLowercaseStringOrEmpty(url.hostname) === "api.clawdi.ai" &&
+      pathname === "/proxy/perplexity"
+    );
+  } catch {
+    return false;
+  }
+}
+
 function normalizeTransportSelector(
   value: unknown,
 ): "auto" | "search-api" | "chat-completions" | undefined {
@@ -144,6 +158,9 @@ function resolvePerplexityRuntimeTransport(
     }
     return DEFAULT_PERPLEXITY_BASE_URL;
   })();
+  if (isClawdiPerplexityProxyBaseUrl(baseUrl)) {
+    return "search_api";
+  }
   return configuredBaseUrl || configuredModel || !isDirectPerplexityBaseUrl(baseUrl)
     ? "chat_completions"
     : "search_api";
