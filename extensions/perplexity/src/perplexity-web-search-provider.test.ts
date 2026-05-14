@@ -74,6 +74,33 @@ describe("perplexity web search provider", () => {
     ).toBe("https://example.com");
   });
 
+  it("routes Clawdi managed Perplexity proxy through the Search API transport", () => {
+    expect(
+      __testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        baseUrl: "https://api.clawdi.ai/proxy/perplexity",
+      }),
+    ).toMatchObject({
+      baseUrl: "https://api.clawdi.ai/proxy/perplexity",
+      transport: "search_api",
+    });
+    expect(
+      __testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        baseUrl: "https://api.clawdi.ai/proxy/perplexity/",
+      }),
+    ).toMatchObject({
+      baseUrl: "https://api.clawdi.ai/proxy/perplexity/",
+      transport: "search_api",
+    });
+    expect(
+      __testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        baseUrl: "https://api.clawdi.ai/proxy/other",
+      }).transport,
+    ).toBe("chat_completions");
+  });
+
   it("resolves OpenRouter env auth and transport", () => {
     withEnv(
       { [perplexityApiKeyEnv]: undefined, [openRouterApiKeyEnv]: openRouterPerplexityApiKey },

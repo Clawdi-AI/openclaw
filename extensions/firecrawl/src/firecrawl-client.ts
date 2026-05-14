@@ -41,6 +41,7 @@ const SCRAPE_CACHE = new Map<
 const DEFAULT_SEARCH_COUNT = 5;
 const DEFAULT_SCRAPE_MAX_CHARS = 50_000;
 const ALLOWED_FIRECRAWL_HOSTS = new Set(["api.firecrawl.dev"]);
+const ALLOWED_MANAGED_FIRECRAWL_PROXIES = new Map([["api.clawdi.ai", "/proxy/firecrawl"]]);
 const FIRECRAWL_SELF_HOSTED_PRIVATE_ERROR =
   "Firecrawl custom baseUrl must target a private or internal self-hosted endpoint.";
 const FIRECRAWL_HTTP_PRIVATE_ERROR =
@@ -117,6 +118,18 @@ function isOfficialFirecrawlEndpoint(url: URL): boolean {
   return url.protocol === "https:" && ALLOWED_FIRECRAWL_HOSTS.has(url.hostname);
 }
 
+function resolveManagedFirecrawlProxyBasePath(url: URL): string | undefined {
+  if (url.protocol !== "https:") {
+    return undefined;
+  }
+  const expectedPath = ALLOWED_MANAGED_FIRECRAWL_PROXIES.get(url.hostname);
+  if (!expectedPath) {
+    return undefined;
+  }
+  const pathname = (url.pathname || "/").replace(/\/+$/, "") || "/";
+  return pathname === expectedPath ? expectedPath : undefined;
+}
+
 async function firecrawlEndpointTargetsPrivateNetwork(
   url: URL,
   lookupFn?: LookupFn,
@@ -152,6 +165,9 @@ async function validateFirecrawlBaseUrl(
   if (isOfficialFirecrawlEndpoint(url)) {
     return "strict";
   }
+  if (resolveManagedFirecrawlProxyBasePath(url)) {
+    return "strict";
+  }
 
   const isPrivateTarget = await firecrawlEndpointTargetsPrivateNetwork(url, lookupFn);
   if (isPrivateTarget) {
@@ -170,11 +186,12 @@ async function resolveEndpoint(
 ): Promise<FirecrawlResolvedEndpoint> {
   const url = new URL(baseUrl.trim() || DEFAULT_FIRECRAWL_BASE_URL);
   const mode = await validateFirecrawlBaseUrl(url.toString(), lookupFn);
+  const managedProxyBasePath = resolveManagedFirecrawlProxyBasePath(url);
   url.username = "";
   url.password = "";
   url.search = "";
   url.hash = "";
-  url.pathname = pathname;
+  url.pathname = managedProxyBasePath ? `${managedProxyBasePath}${pathname}` : pathname;
   return { url: url.toString(), mode };
 }
 
