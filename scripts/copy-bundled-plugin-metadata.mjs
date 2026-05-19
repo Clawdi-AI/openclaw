@@ -85,6 +85,15 @@ function rewritePackageEntry(entry) {
     return undefined;
   }
   const normalized = entry.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+  const rewritten = normalized.replace(/\.[^.]+$/u, ".js");
+  return `./${rewritten}`;
+}
+
+function rewriteChannelStatePackageEntry(entry) {
+  if (typeof entry !== "string" || entry.trim().length === 0) {
+    return undefined;
+  }
+  const normalized = entry.trim().replaceAll("\\", "/").replace(/^\.\//, "");
   const extension = path.posix.extname(normalized);
   const rewritten = extension ? `${normalized.slice(0, -extension.length)}.js` : `${normalized}.js`;
   return `./${rewritten}`;
@@ -111,7 +120,7 @@ function rewritePackageChannelStateProbe(stateMetadata) {
   if (!isPackageLocalRelativeSpecifier(state.specifier)) {
     return stateMetadata;
   }
-  const specifier = rewritePackageEntry(state.specifier);
+  const specifier = rewriteChannelStatePackageEntry(state.specifier);
   if (!specifier || specifier === state.specifier) {
     return stateMetadata;
   }
