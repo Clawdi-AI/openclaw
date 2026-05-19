@@ -592,7 +592,7 @@ When Mattermost native commands are enabled:
 
 OpenClaw spawns `imsg rpc` (JSON-RPC over stdio). No daemon or port required. This is the preferred path for new OpenClaw iMessage setups when the host can grant Messages database and Automation permissions.
 
-BlueBubbles support was removed. `channels.bluebubbles` is not a supported runtime config surface on current OpenClaw. Migrate old configs to `channels.imessage`; use [BlueBubbles removal and the imsg iMessage path](/announcements/bluebubbles-imessage) for the short version and [Coming from BlueBubbles](/channels/imessage-from-bluebubbles) for the full translation table.
+This branch also keeps the BlueBubbles channel available through `channels.bluebubbles`; see [BlueBubbles](/channels/bluebubbles). The bundled `imessage` plugin remains the imsg-based alternative; use [BlueBubbles and the imsg iMessage path](/announcements/bluebubbles-imessage) for the short comparison and [Coming from BlueBubbles](/channels/imessage-from-bluebubbles) for the full translation table.
 
 If the Gateway is not running on the signed-in Messages Mac, keep `channels.imessage.enabled=true` and set `channels.imessage.cliPath` to an SSH wrapper that runs `imsg "$@"` on that Mac. The default local `imsg` path is macOS-only.
 

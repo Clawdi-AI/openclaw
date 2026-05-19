@@ -61,13 +61,6 @@ const rules = [
     message: thirdPartyExtensionMessage,
   },
   {
-    label: "r: bluebubbles",
-    close: true,
-    commentTriggers: ["bluebubbles", "blue bubbles"],
-    message:
-      "BlueBubbles is deprecated and no longer ships as a bundled OpenClaw channel. Use iMessage via `imsg` instead: https://docs.openclaw.ai/channels/imessage. If this needs to stay BlueBubbles-backed, publish it as a third-party plugin on ClawHub instead of adding it back to core.",
-  },
-  {
     label: "r: moltbook",
     close: true,
     lock: true,
@@ -113,7 +106,7 @@ export const managedLabelSpecs = {
   },
   "r: bluebubbles": {
     color: "D93F0B",
-    description: "Auto-close: BlueBubbles is deprecated; use iMessage via imsg or ClawHub.",
+    description: "BlueBubbles channel requests and follow-up.",
   },
   "r: moltbook": {
     color: "B60205",
