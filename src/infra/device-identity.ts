@@ -31,6 +31,7 @@ function resolveDefaultIdentityPath(): string {
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const ED25519_PKCS8_PRIVATE_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+const DEVICE_IDENTITY_MASTER_KEY_INFO = "openclaw-device-identity-v1";
 
 function base64UrlEncode(buf: Buffer): string {
   return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
@@ -96,6 +97,19 @@ function keyPairMatches(publicKeyPem: string, privateKeyPem: string): boolean {
 
 function generateIdentity(): DeviceIdentity {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const deviceId = fingerprintPublicKey(publicKeyPem);
+  return { deviceId, publicKeyPem, privateKeyPem };
+}
+
+function deriveIdentityFromMasterKey(masterKey: string): DeviceIdentity {
+  const seed = Buffer.from(
+    crypto.hkdfSync("sha256", masterKey, "", DEVICE_IDENTITY_MASTER_KEY_INFO, 32),
+  );
+  const pkcs8 = Buffer.concat([ED25519_PKCS8_PRIVATE_PREFIX, seed]);
+  const privateKey = crypto.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
+  const publicKey = crypto.createPublicKey(privateKey);
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
   const deviceId = fingerprintPublicKey(publicKeyPem);
@@ -219,6 +233,38 @@ function identityFileExists(filePath: string): boolean {
 export function loadOrCreateDeviceIdentity(
   filePath: string = resolveDefaultIdentityPath(),
 ): DeviceIdentity {
+  const masterKey = typeof process.env.MASTER_KEY === "string" ? process.env.MASTER_KEY.trim() : "";
+
+  // When MASTER_KEY is set, the identity must always match the derivation.
+  // A stale device.json (e.g. randomly generated before the MASTER_KEY fix)
+  // would mismatch the pre-seeded paired.json and break RPC auth on CVMs.
+  if (masterKey) {
+    const expected = deriveIdentityFromMasterKey(masterKey);
+    const expectedStored: StoredIdentity = {
+      version: 1,
+      deviceId: expected.deviceId,
+      publicKeyPem: expected.publicKeyPem,
+      privateKeyPem: expected.privateKeyPem,
+      createdAtMs: Date.now(),
+    };
+    try {
+      const store = privateFileStoreSync(path.dirname(filePath));
+      const parsed = store.readJsonIfExists(path.basename(filePath));
+      const normalized = normalizeStoredIdentity(parsed);
+      if (
+        normalized?.kind === "identity" &&
+        normalized.identity.deviceId === expected.deviceId &&
+        normalized.identity.publicKeyPem === expected.publicKeyPem
+      ) {
+        return expected;
+      }
+      store.writeJson(path.basename(filePath), expectedStored, { trailingNewline: true });
+      return expected;
+    } catch {
+      return expected;
+    }
+  }
+
   try {
     const store = privateFileStoreSync(path.dirname(filePath));
     const parsed = store.readJsonIfExists(path.basename(filePath));
