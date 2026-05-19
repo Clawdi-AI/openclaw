@@ -5,6 +5,7 @@ import { danger } from "openclaw/plugin-sdk/runtime-env";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { resolveDiscordApiBaseUrl } from "../api-base-url.js";
 import {
   Client,
   ReadyListener,
@@ -98,6 +99,10 @@ export async function createDiscordMonitorClient(params: {
       DiscordEventQueueOptions,
       "listenerTimeout" | "maxQueueSize" | "maxConcurrency"
     >;
+    /** Per-account REST/Gateway base URL override (mirrors Telegram's
+     *  `apiRoot`). Threaded into the resolver so shared+custom Discord
+     *  bots on one agent route to different backends. */
+    apiBaseUrl?: string;
   };
   runtime: RuntimeEnv;
   createClient: CreateClientFn;
@@ -130,9 +135,16 @@ export async function createDiscordMonitorClient(params: {
     discordConfig: params.discordConfig,
     getAutoPresenceController: () => autoPresenceController,
   });
+  // Carbon's `Client.baseUrl` is used for interaction-URL construction.
+  // Carbon's internal `RequestClient` (REST) reads its baseUrl from
+  // `options.requestOptions.baseUrl` instead. Set both so per-account
+  // `apiBaseUrl` (or the legacy `DISCORD_BOT_API_BASE_URL` env var
+  // fallback) redirects every outbound URL — mirroring Telegram's
+  // per-account `apiRoot`.
+  const discordBaseUrl = resolveDiscordApiBaseUrl({ account: params.discordConfig });
   const client = params.createClient(
     {
-      baseUrl: "http://localhost",
+      baseUrl: discordBaseUrl,
       deploySecret: "a",
       clientId: params.applicationId,
       publicKey: "a",
@@ -144,6 +156,7 @@ export async function createDiscordMonitorClient(params: {
         "command-deploy-cache.json",
       ),
       requestOptions: {
+        baseUrl: `${discordBaseUrl}/api`,
         timeout: DISCORD_REST_TIMEOUT_MS,
         runtimeProfile: "persistent",
         maxQueueSize: 1000,
