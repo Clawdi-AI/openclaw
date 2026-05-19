@@ -1,3 +1,8 @@
+"channel: bluebubbles":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/bluebubbles/**"
+          - "docs/channels/bluebubbles.md"
 "plugin: azure-speech":
   - changed-files:
       - any-glob-to-any-file:

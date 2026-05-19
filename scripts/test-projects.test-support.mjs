@@ -8,6 +8,7 @@ import {
   resolveCommandsLightIncludePattern,
 } from "../test/vitest/vitest.commands-light-paths.mjs";
 import { isAcpxExtensionRoot } from "../test/vitest/vitest.extension-acpx-paths.mjs";
+import { isBlueBubblesExtensionRoot } from "../test/vitest/vitest.extension-bluebubbles-paths.mjs";
 import { isBrowserExtensionRoot } from "../test/vitest/vitest.extension-browser-paths.mjs";
 import { resolveSplitChannelExtensionShard } from "../test/vitest/vitest.extension-channel-split-paths.mjs";
 import { isDiffsExtensionRoot } from "../test/vitest/vitest.extension-diffs-paths.mjs";
@@ -72,6 +73,7 @@ const CRON_VITEST_CONFIG = "test/vitest/vitest.cron.config.ts";
 const DAEMON_VITEST_CONFIG = "test/vitest/vitest.daemon.config.ts";
 const E2E_VITEST_CONFIG = "test/vitest/vitest.e2e.config.ts";
 const EXTENSION_ACPX_VITEST_CONFIG = "test/vitest/vitest.extension-acpx.config.ts";
+const EXTENSION_BLUEBUBBLES_VITEST_CONFIG = "test/vitest/vitest.extension-bluebubbles.config.ts";
 const EXTENSION_BROWSER_VITEST_CONFIG = "test/vitest/vitest.extension-browser.config.ts";
 const EXTENSION_CHANNELS_VITEST_CONFIG = "test/vitest/vitest.extension-channels.config.ts";
 const EXTENSION_DIFFS_VITEST_CONFIG = "test/vitest/vitest.extension-diffs.config.ts";
@@ -177,6 +179,7 @@ const FULL_SUITE_CONFIG_WEIGHT = new Map([
   [EXTENSION_LINE_VITEST_CONFIG, 12],
   [EXTENSION_SIGNAL_VITEST_CONFIG, 11],
   [EXTENSION_ACPX_VITEST_CONFIG, 10],
+  [EXTENSION_BLUEBUBBLES_VITEST_CONFIG, 9],
   [EXTENSION_DIFFS_VITEST_CONFIG, 8],
   [EXTENSION_MEMORY_VITEST_CONFIG, 6],
   [EXTENSION_MSTEAMS_VITEST_CONFIG, 4],
@@ -252,6 +255,7 @@ const VITEST_CONFIG_BY_KIND = {
   extension: EXTENSIONS_VITEST_CONFIG,
   extensionFull: FULL_EXTENSIONS_VITEST_CONFIG,
   extensionAcpx: EXTENSION_ACPX_VITEST_CONFIG,
+  extensionBlueBubbles: EXTENSION_BLUEBUBBLES_VITEST_CONFIG,
   extensionBrowser: EXTENSION_BROWSER_VITEST_CONFIG,
   extensionChannel: EXTENSION_CHANNELS_VITEST_CONFIG,
   extensionDiffs: EXTENSION_DIFFS_VITEST_CONFIG,
@@ -1312,6 +1316,9 @@ function classifyTarget(arg, cwd) {
     if (isAcpxExtensionRoot(extensionRoot)) {
       return "extensionAcpx";
     }
+    if (isBlueBubblesExtensionRoot(extensionRoot)) {
+      return "extensionBlueBubbles";
+    }
     if (isDiffsExtensionRoot(extensionRoot)) {
       return "extensionDiffs";
     }
@@ -1629,6 +1636,7 @@ export function buildVitestRunPlans(
     "wizard",
     "e2e",
     "extensionAcpx",
+    "extensionBlueBubbles",
     "extensionDiffs",
     "extensionBrowser",
     "extensionDiscord",

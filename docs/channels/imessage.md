@@ -13,7 +13,7 @@ For OpenClaw iMessage deployments, use `imsg` on a signed-in macOS Messages host
 </Note>
 
 <Warning>
-BlueBubbles support was removed. Migrate `channels.bluebubbles` configs to `channels.imessage`; OpenClaw supports iMessage through `imsg` only. Start with [BlueBubbles removal and the imsg iMessage path](/announcements/bluebubbles-imessage) for the short announcement, or [Coming from BlueBubbles](/channels/imessage-from-bluebubbles) for the full migration table.
+This branch keeps BlueBubbles available through `channels.bluebubbles`; use [BlueBubbles](/channels/bluebubbles) if you want the BlueBubbles server path. Use this page for the imsg-based `channels.imessage` path, and start with [BlueBubbles and the imsg iMessage path](/announcements/bluebubbles-imessage) or [Coming from BlueBubbles](/channels/imessage-from-bluebubbles) when comparing or migrating.
 </Warning>
 
 Status: native external CLI integration. Gateway spawns `imsg rpc` and communicates over JSON-RPC on stdio (no separate daemon/port). Advanced actions require `imsg launch` and a successful private API probe.
@@ -805,7 +805,7 @@ openclaw channels status --probe --channel imessage
 ## Related
 
 - [Channels Overview](/channels) — all supported channels
-- [BlueBubbles removal and the imsg iMessage path](/announcements/bluebubbles-imessage) — announcement and migration summary
+- [BlueBubbles and the imsg iMessage path](/announcements/bluebubbles-imessage) — announcement and migration summary
 - [Coming from BlueBubbles](/channels/imessage-from-bluebubbles) — config translation table and step-by-step cutover
 - [Pairing](/channels/pairing) — DM authentication and pairing flow
 - [Groups](/channels/groups) — group chat behavior and mention gating
