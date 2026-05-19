@@ -406,6 +406,73 @@ function installPackageLocalBundledDependencies(params) {
   };
 }
 
+function getRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function packageEntryKeyFromSpecifier(specifier) {
+  const normalized = normalizePackPath(specifier);
+  if (!normalized || normalized.startsWith("../") || path.isAbsolute(normalized)) {
+    return "";
+  }
+  return normalized.replace(/\.[^.]+$/u, "");
+}
+
+function resolvePackageRuntimeSpecifier(plan, specifier) {
+  if (typeof specifier !== "string" || !specifier.trim()) {
+    return undefined;
+  }
+  const entryKey = packageEntryKeyFromSpecifier(specifier);
+  if (!entryKey || !Object.hasOwn(plan.entry, entryKey)) {
+    return undefined;
+  }
+  return `./dist/${entryKey}.js`;
+}
+
+function rewritePackageLocalChannelStateSpecifier(plan, stateMetadata) {
+  const state = getRecord(stateMetadata);
+  if (!state || typeof state.specifier !== "string") {
+    return stateMetadata;
+  }
+  const runtimeSpecifier = resolvePackageRuntimeSpecifier(plan, state.specifier);
+  if (!runtimeSpecifier || runtimeSpecifier === state.specifier) {
+    return stateMetadata;
+  }
+  return {
+    ...state,
+    specifier: runtimeSpecifier,
+  };
+}
+
+function rewritePackageLocalChannelStateMetadata(plan) {
+  const openclaw = getRecord(plan.packageJson.openclaw);
+  const channel = getRecord(openclaw?.channel);
+  if (!channel) {
+    return {};
+  }
+  const configuredState = rewritePackageLocalChannelStateSpecifier(plan, channel.configuredState);
+  const persistedAuthState = rewritePackageLocalChannelStateSpecifier(
+    plan,
+    channel.persistedAuthState,
+  );
+  if (
+    configuredState === channel.configuredState &&
+    persistedAuthState === channel.persistedAuthState
+  ) {
+    return {};
+  }
+  const nextChannel = { ...channel };
+  if (configuredState !== channel.configuredState) {
+    nextChannel.configuredState = configuredState;
+  }
+  if (persistedAuthState !== channel.persistedAuthState) {
+    nextChannel.persistedAuthState = persistedAuthState;
+  }
+  return {
+    channel: nextChannel,
+  };
+}
+
 export function resolveAugmentedPluginNpmPackageJson(params) {
   const repoRoot = path.resolve(params.repoRoot ?? ".");
   const packageDir = resolvePackageDir(repoRoot, params.packageDir);
@@ -441,6 +508,7 @@ export function resolveAugmentedPluginNpmPackageJson(params) {
     peerDependenciesMeta: plan.packagePeerMetadata.peerDependenciesMeta,
     openclaw: {
       ...plan.packageJson.openclaw,
+      ...rewritePackageLocalChannelStateMetadata(plan),
       runtimeExtensions: plan.runtimeExtensions,
       ...(plan.runtimeSetupEntry ? { runtimeSetupEntry: plan.runtimeSetupEntry } : {}),
     },
