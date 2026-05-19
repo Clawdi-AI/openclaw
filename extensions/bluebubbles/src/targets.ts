@@ -403,6 +403,7 @@ export function isAllowedBlueBubblesSender(params: {
     chatId: params.chatId,
     chatGuid: params.chatGuid,
     chatIdentifier: params.chatIdentifier,
+    allowConversationTargets: true,
     normalizeSender: normalizeBlueBubblesHandle,
     parseAllowTarget: parseBlueBubblesAllowTarget,
   });
