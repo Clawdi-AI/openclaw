@@ -4,9 +4,12 @@ import {
   retryAsync,
   type RetryConfig,
 } from "openclaw/plugin-sdk/retry-runtime";
+import { resolveDiscordApiBaseUrl } from "./api-base-url.js";
 import { isDiscordHtmlResponseBody, summarizeDiscordResponseBody } from "./error-body.js";
 
-const DISCORD_API_BASE = "https://discord.com/api/v10";
+function discordApiBase(account?: { apiBaseUrl?: string | null } | null): string {
+  return `${resolveDiscordApiBaseUrl({ account })}/api/v10`;
+}
 const DISCORD_API_RETRY_DEFAULTS = {
   attempts: 3,
   minDelayMs: 500,
@@ -124,6 +127,10 @@ function getDiscordApiRetryAfterMs(
 type DiscordFetchOptions = {
   retry?: RetryConfig;
   label?: string;
+  /** Per-account base URL override; lets shared+custom Discord bots
+   *  on one agent route to different backends. Falls back to env var
+   *  + real Discord. See `extensions/discord/src/api-base-url.ts`. */
+  account?: { apiBaseUrl?: string | null } | null;
 };
 
 type DiscordApiRequestOptions = DiscordFetchOptions & {
@@ -175,7 +182,7 @@ export async function requestDiscord<T>(
       const headers = new Headers(options?.headers);
       headers.set("Authorization", `Bot ${token}`);
       const body = normalizeDiscordRequestBody(options?.body, headers);
-      const res = await fetchImpl(`${DISCORD_API_BASE}${path}`, {
+      const res = await fetchImpl(`${discordApiBase(options?.account)}${path}`, {
         method: options?.method ?? (body === undefined ? "GET" : "POST"),
         headers,
         body,
