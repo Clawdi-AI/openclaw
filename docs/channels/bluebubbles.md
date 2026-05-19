@@ -8,10 +8,10 @@ title: "BlueBubbles"
 sidebarTitle: "BlueBubbles"
 ---
 
-Status: bundled plugin that talks to the BlueBubbles macOS server over HTTP. **Recommended for iMessage integration** due to its richer API and easier setup compared to the legacy imsg channel.
+Status: official plugin retained by this branch that talks to the BlueBubbles macOS server over HTTP. **Recommended for existing BlueBubbles deployments** due to its rich API and server-backed setup.
 
 <Note>
-Current OpenClaw releases bundle BlueBubbles, so normal packaged builds do not need a separate `openclaw plugins install` step.
+If your packaged build does not include BlueBubbles directly, install it from the official channel catalog with `openclaw plugins install @openclaw/bluebubbles`.
 </Note>
 
 ## Overview

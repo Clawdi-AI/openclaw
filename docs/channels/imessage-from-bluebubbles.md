@@ -9,10 +9,10 @@ title: "Coming from BlueBubbles"
 
 The bundled `imessage` plugin now reaches the same private API surface as BlueBubbles (`react`, `edit`, `unsend`, `reply`, `sendWithEffect`, group management, attachments) by driving [`steipete/imsg`](https://github.com/steipete/imsg) over JSON-RPC. If you already run a Mac with `imsg` installed, you can drop the BlueBubbles server and let the plugin talk to Messages.app directly.
 
-BlueBubbles support was removed. OpenClaw supports iMessage through `imsg` only. This guide is for migrating old `channels.bluebubbles` configs to `channels.imessage`; there is no other supported migration path.
+Official upstream OpenClaw removed BlueBubbles support and now supports iMessage through `imsg` only. This branch keeps BlueBubbles available; this guide is only for deployments that intentionally migrate `channels.bluebubbles` configs to `channels.imessage`.
 
 <Note>
-For the short announcement and operator summary, see [BlueBubbles removal and the imsg iMessage path](/announcements/bluebubbles-imessage).
+For the short announcement and operator summary, see [BlueBubbles and the imsg iMessage path](/announcements/bluebubbles-imessage).
 </Note>
 
 ## Migration checklist
@@ -25,7 +25,7 @@ Use this checklist when you already know your old BlueBubbles config and want th
 4. If the Gateway is not running on the Messages Mac, set `channels.imessage.cliPath` to an SSH wrapper and set `remoteHost` for remote attachment fetches.
 5. With the Gateway stopped, enable `channels.imessage`, then run `openclaw channels status --probe --channel imessage`.
 6. Test one DM, one allowed group, attachments if enabled, and every private API action you expect the agent to use.
-7. Delete the BlueBubbles server and old `channels.bluebubbles` config after the iMessage path is verified.
+7. Keep BlueBubbles running until the iMessage path is verified; only disable the BlueBubbles server and old `channels.bluebubbles` config when you intentionally finish the cutover.
 
 ## When this migration makes sense
 
@@ -217,7 +217,7 @@ If the gateway logs `imessage: dropping group message from chat_id=<id>` or the 
 
 6. **Verify the action surface** — from a paired DM, ask the agent to react, edit, unsend, reply, send a photo, and (in a group) rename the group / add or remove a participant. Each action should land natively in Messages.app. If any throws "iMessage `<action>` requires the imsg private API bridge", run `imsg launch` again and refresh `channels status --probe`.
 
-7. **Remove the BlueBubbles server and config** once iMessage DMs, groups, and actions are verified. OpenClaw will not use `channels.bluebubbles`.
+7. **Disable the BlueBubbles server and config** only after iMessage DMs, groups, and actions are verified and you have intentionally moved traffic off `channels.bluebubbles`.
 
 ## Action parity at a glance
 
@@ -242,18 +242,18 @@ iMessage catchup is now available as an opt-in feature on the bundled plugin. On
 
 - **Pairing approvals** carry over by handle. You do not need to re-approve known senders — `channels.imessage.allowFrom` recognizes the same `+15555550123` / `user@example.com` strings BlueBubbles used.
 - **Sessions** stay scoped per agent + chat. DMs collapse into the agent main session under default `session.dmScope=main`; group sessions stay isolated per `chat_id`. The session keys differ (`agent:<id>:imessage:group:<chat_id>` vs the BlueBubbles equivalent) — old conversation history under BlueBubbles session keys does not carry into iMessage sessions.
-- **ACP bindings** referencing `match.channel: "bluebubbles"` need to be updated to `"imessage"`. The `match.peer.id` shapes (`chat_id:`, `chat_guid:`, `chat_identifier:`, bare handle) are identical.
+- **ACP bindings** referencing `match.channel: "bluebubbles"` only need to be updated to `"imessage"` for conversations you intentionally move. The `match.peer.id` shapes (`chat_id:`, `chat_guid:`, `chat_identifier:`, bare handle) are identical.
 
 ## No rollback channel
 
-There is no supported BlueBubbles runtime to switch back to. If iMessage verification fails, set `channels.imessage.enabled: false`, restart the Gateway, fix the `imsg` blocker, and retry the cutover.
+If iMessage verification fails, keep or restore `channels.bluebubbles` as the active path, set `channels.imessage.enabled: false`, restart the Gateway, fix the `imsg` blocker, and retry the cutover later.
 
 The reply cache lives at `~/.openclaw/state/imessage/reply-cache.jsonl` (mode `0600`, parent dir `0700`). It is safe to delete if you want a clean slate.
 
 ## Related
 
-- [BlueBubbles removal and the imsg iMessage path](/announcements/bluebubbles-imessage) — short announcement and operator summary.
+- [BlueBubbles and the imsg iMessage path](/announcements/bluebubbles-imessage) — short announcement and operator summary.
 - [iMessage](/channels/imessage) — full iMessage channel reference, including `imsg launch` setup and capability detection.
-- `/channels/bluebubbles` — legacy URL that redirects to this migration guide.
+- [BlueBubbles](/channels/bluebubbles) — retained BlueBubbles channel guide.
 - [Pairing](/channels/pairing) — DM authentication and pairing flow.
 - [Channel Routing](/channels/channel-routing) — how the gateway picks a channel for outbound replies.
