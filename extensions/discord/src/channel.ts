@@ -104,6 +104,7 @@ const discordMessageAdapter = createChannelMessageAdapterFromOutbound({
 function startDiscordStartupProbe(params: {
   accountId: string;
   token: string;
+  accountConfig: ResolvedDiscordAccount["config"];
   abortSignal: AbortSignal;
   setStatus: (patch: { accountId: string; bot?: unknown; application?: unknown }) => void;
   log?: {
@@ -118,6 +119,7 @@ function startDiscordStartupProbe(params: {
         await loadDiscordProbeRuntime()
       ).probeDiscord(params.token, 2500, {
         includeApplication: true,
+        account: params.accountConfig,
       });
       if (params.abortSignal.aborted) {
         return;
@@ -499,6 +501,7 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount, DiscordProbe> 
         probeAccount: async ({ account, timeoutMs }) =>
           (await loadDiscordProbeRuntime()).probeDiscord(account.token, timeoutMs, {
             includeApplication: true,
+            account: account.config,
           }),
         formatCapabilitiesProbe: ({ probe }) => {
           const discordProbe = probe as DiscordProbe | undefined;
@@ -679,6 +682,7 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount, DiscordProbe> 
           startDiscordStartupProbe({
             accountId: account.accountId,
             token,
+            accountConfig: account.config,
             abortSignal: ctx.abortSignal,
             setStatus: ctx.setStatus,
             log: ctx.log,
