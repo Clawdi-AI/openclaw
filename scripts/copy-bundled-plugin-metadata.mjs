@@ -37,11 +37,7 @@ export function rewritePackageExtensions(entries) {
 
   return entries
     .filter((entry) => typeof entry === "string" && entry.trim().length > 0)
-    .map((entry) => {
-      const normalized = entry.replace(/^\.\//, "");
-      const rewritten = normalized.replace(/\.[^.]+$/u, ".js");
-      return `./${rewritten}`;
-    });
+    .map(rewritePackageEntry);
 }
 
 function collectTopLevelPublicSurfaceEntries(pluginDir) {
@@ -88,9 +84,61 @@ function rewritePackageEntry(entry) {
   if (typeof entry !== "string" || entry.trim().length === 0) {
     return undefined;
   }
-  const normalized = entry.replace(/^\.\//, "");
-  const rewritten = normalized.replace(/\.[^.]+$/u, ".js");
+  const normalized = entry.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+  const extension = path.posix.extname(normalized);
+  const rewritten = extension ? `${normalized.slice(0, -extension.length)}.js` : `${normalized}.js`;
   return `./${rewritten}`;
+}
+
+function getRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function isPackageLocalRelativeSpecifier(value) {
+  const normalized = value.trim().replaceAll("\\", "/");
+  if (!normalized.startsWith("./")) {
+    return false;
+  }
+  const relative = normalized.replace(/^\.\//u, "");
+  return relative.length > 0 && !relative.startsWith("../") && !relative.includes("/../");
+}
+
+function rewritePackageChannelStateProbe(stateMetadata) {
+  const state = getRecord(stateMetadata);
+  if (!state || typeof state.specifier !== "string") {
+    return stateMetadata;
+  }
+  if (!isPackageLocalRelativeSpecifier(state.specifier)) {
+    return stateMetadata;
+  }
+  const specifier = rewritePackageEntry(state.specifier);
+  if (!specifier || specifier === state.specifier) {
+    return stateMetadata;
+  }
+  return {
+    ...state,
+    specifier,
+  };
+}
+
+function rewritePackageChannelMetadata(channelMetadata) {
+  const channel = getRecord(channelMetadata);
+  if (!channel) {
+    return channelMetadata;
+  }
+  const configuredState = rewritePackageChannelStateProbe(channel.configuredState);
+  const persistedAuthState = rewritePackageChannelStateProbe(channel.persistedAuthState);
+  if (
+    configuredState === channel.configuredState &&
+    persistedAuthState === channel.persistedAuthState
+  ) {
+    return channelMetadata;
+  }
+  return {
+    ...channel,
+    ...(configuredState !== channel.configuredState ? { configuredState } : {}),
+    ...(persistedAuthState !== channel.persistedAuthState ? { persistedAuthState } : {}),
+  };
 }
 
 function ensurePathInsideRoot(rootDir, rawPath) {
@@ -313,12 +361,17 @@ export function copyBundledPluginMetadata(params = {}) {
       removeFileIfExists(distPackageJsonPath);
       continue;
     }
-    if (packageJson.openclaw && "extensions" in packageJson.openclaw) {
+    if (packageJson.openclaw) {
       packageJson.openclaw = {
         ...packageJson.openclaw,
-        extensions: rewritePackageExtensions(packageJson.openclaw.extensions),
+        ...("extensions" in packageJson.openclaw
+          ? { extensions: rewritePackageExtensions(packageJson.openclaw.extensions) }
+          : {}),
         ...(typeof packageJson.openclaw.setupEntry === "string"
           ? { setupEntry: rewritePackageEntry(packageJson.openclaw.setupEntry) }
+          : {}),
+        ...("channel" in packageJson.openclaw
+          ? { channel: rewritePackageChannelMetadata(packageJson.openclaw.channel) }
           : {}),
       };
     }
