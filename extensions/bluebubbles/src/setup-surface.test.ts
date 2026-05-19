@@ -802,4 +802,21 @@ describe("isAllowedBlueBubblesSender", () => {
     });
     expect(allowed).toBe(true);
   });
+
+  it("allows explicit conversation targets", () => {
+    expect(
+      isAllowedBlueBubblesSender({
+        allowFrom: ["chat_guid:iMessage;+;chat123456"],
+        sender: "+15551234567",
+        chatGuid: "iMessage;+;chat123456",
+      }),
+    ).toBe(true);
+    expect(
+      isAllowedBlueBubblesSender({
+        allowFrom: ["chat_id:42"],
+        sender: "+15551234567",
+        chatId: 42,
+      }),
+    ).toBe(true);
+  });
 });
