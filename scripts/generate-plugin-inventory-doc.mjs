@@ -79,6 +79,7 @@ function humanizeId(value) {
     ["api", "API"],
     ["aws", "AWS"],
     ["azure", "Azure"],
+    ["bluebubbles", "BlueBubbles"],
     ["byteplus", "BytePlus"],
     ["codex", "Codex"],
     ["cli", "CLI"],
