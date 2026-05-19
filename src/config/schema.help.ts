@@ -57,6 +57,10 @@ export const FIELD_HELP: Record<string, string> = {
     "Update-channel and startup-check behavior for keeping OpenClaw runtime versions current. Use conservative channels in production and more experimental channels only in controlled environments.",
   "update.channel": 'Update channel for git + npm installs ("stable", "beta", or "dev").',
   "update.checkOnStart": "Check for npm updates when the gateway starts (default: true).",
+  "update.selfUpdate.enabled":
+    "Allow OpenClaw to update itself in-place through the CLI updater, gateway update.run, or auto-update flows (default: true). Disable this for externally managed deployments that must be updated by image rollout or another operator workflow.",
+  "update.selfUpdate.reason":
+    "Optional explanation shown when self-update is blocked. Use this to point operators at the correct external upgrade workflow for managed deployments.",
   "update.auto.enabled": "Enable background auto-update for package installs (default: false).",
   "update.auto.stableDelayHours":
     "Minimum delay before stable-channel auto-apply starts (default: 6).",
@@ -907,6 +911,8 @@ export const FIELD_HELP: Record<string, string> = {
     "Approximate timezone sent to native Codex web search.",
   "tools.web.search.brave.mode":
     'Brave Search mode: "web" (URL results) or "llm-context" (pre-extracted page content for LLM grounding).',
+  "tools.web.search.brave.baseUrl":
+    'Optional Brave Search base URL override (default: "https://api.search.brave.com"). Used for both Brave web and llm-context endpoints.',
   "tools.web.fetch.enabled": "Enable the web_fetch tool (lightweight HTTP fetch).",
   "tools.web.fetch.maxChars": "Max characters returned by web_fetch (truncated).",
   "tools.web.fetch.maxCharsCap":

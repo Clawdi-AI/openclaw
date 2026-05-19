@@ -2,10 +2,13 @@ import type { BaseProbeResult } from "openclaw/plugin-sdk/channel-contract";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { resolveFetch } from "openclaw/plugin-sdk/fetch-runtime";
 import { fetchWithTimeout } from "openclaw/plugin-sdk/text-utility-runtime";
+import { resolveDiscordApiBaseUrl } from "./api-base-url.js";
 import { DiscordApiError, fetchDiscord } from "./api.js";
 import { normalizeDiscordToken } from "./token.js";
 
-const DISCORD_API_BASE = "https://discord.com/api/v10";
+function discordApiBase(account?: { apiBaseUrl?: string | null } | null): string {
+  return `${resolveDiscordApiBaseUrl({ account })}/api/v10`;
+}
 
 export type DiscordProbe = BaseProbeResult & {
   status?: number | null;
@@ -39,6 +42,7 @@ async function fetchDiscordApplicationMe(
   token: string,
   timeoutMs: number,
   fetcher: typeof fetch,
+  account?: { apiBaseUrl?: string | null } | null,
 ): Promise<{ id?: string; flags?: number } | undefined> {
   try {
     const normalized = normalizeDiscordToken(token, "channels.discord.token");
@@ -49,7 +53,7 @@ async function fetchDiscordApplicationMe(
       "/oauth2/applications/@me",
       normalized,
       createDiscordTimeoutFetch(fetcher, timeoutMs),
-      { retry: { attempts: 1 } },
+      { retry: { attempts: 1 }, account },
     );
   } catch {
     return undefined;
@@ -96,8 +100,9 @@ export async function fetchDiscordApplicationSummary(
   token: string,
   timeoutMs: number,
   fetcher: typeof fetch = fetch,
+  account?: { apiBaseUrl?: string | null } | null,
 ): Promise<DiscordApplicationSummary | undefined> {
-  const json = await fetchDiscordApplicationMe(token, timeoutMs, fetcher);
+  const json = await fetchDiscordApplicationMe(token, timeoutMs, fetcher, account);
   if (!json) {
     return undefined;
   }
@@ -122,11 +127,16 @@ function getResolvedFetch(fetcher: typeof fetch): typeof fetch {
 export async function probeDiscord(
   token: string,
   timeoutMs: number,
-  opts?: { fetcher?: typeof fetch; includeApplication?: boolean },
+  opts?: {
+    fetcher?: typeof fetch;
+    includeApplication?: boolean;
+    account?: { apiBaseUrl?: string | null } | null;
+  },
 ): Promise<DiscordProbe> {
   const started = Date.now();
   const fetcher = opts?.fetcher ?? fetch;
   const includeApplication = opts?.includeApplication === true;
+  const account = opts?.account ?? null;
   const normalized = normalizeDiscordToken(token, "channels.discord.token");
   const result: DiscordProbe = {
     ok: false,
@@ -143,7 +153,7 @@ export async function probeDiscord(
   }
   try {
     const res = await fetchWithTimeout(
-      `${DISCORD_API_BASE}/users/@me`,
+      `${discordApiBase(account)}/users/@me`,
       { headers: { Authorization: `Bot ${normalized}` } },
       timeoutMs,
       getResolvedFetch(fetcher),
@@ -161,7 +171,8 @@ export async function probeDiscord(
     };
     if (includeApplication) {
       result.application =
-        (await fetchDiscordApplicationSummary(normalized, timeoutMs, fetcher)) ?? undefined;
+        (await fetchDiscordApplicationSummary(normalized, timeoutMs, fetcher, account)) ??
+        undefined;
     }
     return { ...result, elapsedMs: Date.now() - started };
   } catch (err) {
@@ -206,6 +217,7 @@ export async function fetchDiscordApplicationId(
   token: string,
   timeoutMs: number,
   fetcher: typeof fetch = fetch,
+  account?: { apiBaseUrl?: string | null } | null,
 ): Promise<string | undefined> {
   const normalized = normalizeDiscordToken(token, "channels.discord.token");
   if (!normalized) {
@@ -220,6 +232,7 @@ export async function fetchDiscordApplicationId(
       "/oauth2/applications/@me",
       normalized,
       createDiscordTimeoutFetch(fetcher, timeoutMs),
+      { account },
     );
     if (json?.id) {
       return json.id;

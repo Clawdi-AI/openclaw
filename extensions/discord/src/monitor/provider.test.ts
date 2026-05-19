@@ -1083,6 +1083,35 @@ describe("monitorDiscordProvider", () => {
     expect(getConstructedClientOptions().clientId).toBe("123");
   });
 
+  it("passes per-account apiBaseUrl into REST application id lookup", async () => {
+    const fetchApplicationId = vi.fn(async () => "network-app");
+    providerTesting.setFetchDiscordApplicationId(fetchApplicationId);
+    resolveDiscordAccountMock.mockReturnValue({
+      accountId: "default",
+      token: "opaque-token",
+      config: {
+        apiBaseUrl: "https://msg-router.example",
+        commands: { native: true, nativeSkills: false },
+        voice: { enabled: false },
+        agentComponents: { enabled: false },
+        execApprovals: { enabled: false },
+      },
+    });
+
+    await monitorDiscordProvider({
+      config: baseConfig(),
+      runtime: baseRuntime(),
+    });
+
+    expect(fetchApplicationId).toHaveBeenCalledWith(
+      "opaque-token",
+      4000,
+      expect.any(Function),
+      expect.objectContaining({ apiBaseUrl: "https://msg-router.example" }),
+    );
+    expect(getConstructedClientOptions().clientId).toBe("network-app");
+  });
+
   it("uses configured application id before token parsing or REST lookup", async () => {
     const fetchApplicationId = vi.fn(async () => "network-app");
     providerTesting.setFetchDiscordApplicationId(fetchApplicationId);

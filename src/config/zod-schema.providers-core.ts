@@ -625,6 +625,23 @@ export const DiscordAccountSchema = z
     configWrites: z.boolean().optional(),
     token: SecretInputSchema.optional().register(sensitive),
     applicationId: DiscordIdSchema.optional(),
+    /**
+     * Per-account override for the Discord REST + Gateway base URL.
+     *
+     * Defaults to real Discord (`https://discord.com`). Set this to
+     * point a single account at a Discord-compatible proxy (msg-router's
+     * egress, integration test stub).
+     *
+     * Why per-account: lets the same agent run a platform-routed
+     * default account through msg-router AND a customer-supplied
+     * custom account against real Discord at the same time. Mirrors
+     * how Telegram's per-account `apiRoot` works. The
+     * `DISCORD_BOT_API_BASE_URL` env var still works as a process-wide
+     * fallback, but applying it process-wide collapses both accounts
+     * onto the same backend, so the per-account field is the right
+     * tool when shared + custom bots coexist.
+     */
+    apiBaseUrl: z.string().url().optional(),
     proxy: z.string().optional(),
     gatewayInfoTimeoutMs: z.number().int().positive().max(120_000).optional(),
     gatewayReadyTimeoutMs: z.number().int().positive().max(120_000).optional(),
