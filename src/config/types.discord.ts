@@ -324,6 +324,20 @@ export type DiscordAccountConfig = {
   token?: SecretInput;
   /** Optional Discord application/client ID. Set this when REST application lookup is blocked. */
   applicationId?: string;
+  /**
+   * Per-account override for the Discord REST + Gateway base URL.
+   *
+   * Defaults to real Discord (`https://discord.com`). Set this to point a
+   * single account at a Discord-compatible proxy (msg-router's egress,
+   * integration test stub).
+   *
+   * Lets one agent run a platform-routed default account through
+   * msg-router AND a customer-supplied custom account against real
+   * Discord at the same time. Mirrors Telegram's per-account `apiRoot`.
+   * The `DISCORD_BOT_API_BASE_URL` env var still works as a process-
+   * wide fallback for accounts that don't set this.
+   */
+  apiBaseUrl?: string;
   /** HTTP(S) proxy URL for Discord gateway WebSocket connections. */
   proxy?: string;
   /** Timeout for Discord /gateway/bot metadata lookup before falling back to the default gateway URL. Default: 30000. */

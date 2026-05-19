@@ -106,6 +106,7 @@ function createGatewayPlugin(params: {
   gatewayInfoTimeoutMs: number;
   fetchImpl: DiscordGatewayFetch;
   fetchInit?: DiscordGatewayFetchInit;
+  discordConfig?: DiscordAccountConfig;
   wsAgent?: DiscordGatewayWebSocketAgent;
   runtime?: RuntimeEnv;
   testing?: GatewayPluginTestingOptions;
@@ -137,6 +138,7 @@ function createGatewayPlugin(params: {
           fetchImpl: params.fetchImpl,
           fetchInit: params.fetchInit,
           timeoutMs: params.gatewayInfoTimeoutMs,
+          account: params.discordConfig,
         })
           .then((info) => ({
             info,
@@ -232,6 +234,7 @@ function createGatewayPlugin(params: {
 
 function createDiscordGatewayMetadataFetch(
   debugCaptureEnabled: boolean,
+  account?: { apiBaseUrl?: string | null } | null,
   proxyUrl?: string,
 ): DiscordGatewayFetch {
   return (input, init) =>
@@ -245,6 +248,7 @@ function createDiscordGatewayMetadataFetch(
             },
           }),
       ...(proxyUrl ? { proxyUrl } : {}),
+      account,
     });
 }
 
@@ -272,7 +276,10 @@ export function createDiscordGatewayPlugin(params: {
     configuredTimeoutMs: params.discordConfig?.gatewayInfoTimeoutMs,
     env: process.env,
   });
-  let fetchImpl = createDiscordGatewayMetadataFetch(debugProxySettings.enabled);
+  let fetchImpl = createDiscordGatewayMetadataFetch(
+    debugProxySettings.enabled,
+    params.discordConfig,
+  );
   let wsAgent: DiscordGatewayWebSocketAgent = new HttpsAgent({
     lookup: discordDnsLookup,
   });
@@ -283,12 +290,19 @@ export function createDiscordGatewayPlugin(params: {
       const HttpsProxyAgentCtor =
         params.testing?.HttpsProxyAgentCtor ?? httpsProxyAgent.HttpsProxyAgent;
       wsAgent = new HttpsProxyAgentCtor<string>(proxy);
-      fetchImpl = createDiscordGatewayMetadataFetch(debugProxySettings.enabled, proxy);
+      fetchImpl = createDiscordGatewayMetadataFetch(
+        debugProxySettings.enabled,
+        params.discordConfig,
+        proxy,
+      );
       params.runtime.log?.("discord: gateway proxy enabled");
     } catch (err) {
       params.runtime.error?.(danger(`discord: invalid gateway proxy: ${String(err)}`));
       fetchImpl = (input, init) =>
-        fetchDiscordGatewayMetadataGuarded(input, init, { capture: false });
+        fetchDiscordGatewayMetadataGuarded(input, init, {
+          capture: false,
+          account: params.discordConfig,
+        });
     }
   }
 
@@ -301,6 +315,7 @@ export function createDiscordGatewayPlugin(params: {
     },
     gatewayInfoTimeoutMs,
     fetchImpl,
+    discordConfig: params.discordConfig,
     runtime: params.runtime,
     testing: params.testing,
     ...(wsAgent ? { wsAgent } : {}),

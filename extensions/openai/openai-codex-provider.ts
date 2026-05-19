@@ -127,18 +127,28 @@ function normalizeCodexTransportFields(params: {
   api?: ProviderRuntimeModel["api"];
   baseUrl?: string;
 } {
-  const useCodexTransport =
+  // Phala parity: the openai-codex provider always defaults to the
+  // `openai-codex-responses` API regardless of `baseUrl`. Custom proxies that
+  // mirror Codex Responses semantics (e.g. tenant-hosted gateways) work
+  // without explicit config. Tenants who genuinely need a different transport
+  // can opt out by setting `provider.api` explicitly in config; that explicit
+  // value is respected here as the escape hatch.
+  //
+  // The hostname pattern logic below (well-known OpenAI/ChatGPT/Copilot URLs)
+  // is retained — but only as a fallback to canonicalize `baseUrl` when the
+  // resolved API is `openai-codex-responses`. It is informational, not the
+  // gating decision for which API to use.
+  const explicitApi = params.api ? params.api : undefined;
+  const api: ProviderRuntimeModel["api"] = explicitApi ?? "openai-codex-responses";
+  const isWellKnownCodexBaseUrl =
     !params.baseUrl ||
     isOpenAIApiBaseUrl(params.baseUrl) ||
     isOpenAICodexBaseUrl(params.baseUrl) ||
     isLegacyCodexCompatBaseUrl(params.baseUrl);
-  const api =
-    useCodexTransport &&
-    (!params.api || params.api === "openai-responses" || params.api === "openai-completions")
-      ? "openai-codex-responses"
-      : (params.api ?? undefined);
   const baseUrl =
-    api === "openai-codex-responses" && useCodexTransport ? OPENAI_CODEX_BASE_URL : params.baseUrl;
+    api === "openai-codex-responses" && isWellKnownCodexBaseUrl
+      ? OPENAI_CODEX_BASE_URL
+      : params.baseUrl;
   return { api, baseUrl };
 }
 
