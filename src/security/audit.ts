@@ -10,6 +10,7 @@ import type { CliBackendConfig } from "../config/types.agent-defaults.js";
 import type { GatewayAuthConfig } from "../config/types.gateway.js";
 import type { SecurityAuditSuppression } from "../config/types.openclaw.js";
 import { isInterpreterLikeAllowlistPattern } from "../infra/command-analysis/inline-eval.js";
+import { isTruthyEnvValue } from "../infra/env.js";
 import {
   type ExecApprovalsFile,
   loadExecApprovals,
@@ -295,6 +296,9 @@ export async function collectFilesystemFindings(params: {
   execIcacls?: ExecFn;
 }): Promise<SecurityAuditFinding[]> {
   const findings: SecurityAuditFinding[] = [];
+  const ignoreClawdiManagedSafeWarnings = isTruthyEnvValue(
+    params.env?.CLAWDI_AUDIT_IGNORE_WARNING_SAFE,
+  );
 
   const stateDirPerms = await inspectPathPermissions(params.stateDir, {
     env: params.env,
@@ -302,7 +306,7 @@ export async function collectFilesystemFindings(params: {
     exec: params.execIcacls,
   });
   if (stateDirPerms.ok) {
-    if (stateDirPerms.isSymlink) {
+    if (stateDirPerms.isSymlink && !ignoreClawdiManagedSafeWarnings) {
       findings.push({
         checkId: "fs.state_dir.symlink",
         severity: "warn",

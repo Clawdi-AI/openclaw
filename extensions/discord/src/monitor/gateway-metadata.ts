@@ -5,11 +5,21 @@ import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import { Type } from "typebox";
 import { Check, Errors } from "typebox/value";
+import { resolveDiscordApiBaseUrl, resolveDiscordApiHostname } from "../api-base-url.js";
 import { isDiscordRateLimitResponseBody, summarizeDiscordResponseBody } from "../error-body.js";
 import { withAbortTimeout } from "./timeouts.js";
 
-const DISCORD_GATEWAY_BOT_URL = "https://discord.com/api/v10/gateway/bot";
-const DISCORD_API_HOST = "discord.com";
+/** Build the `/api/v10/gateway/bot` URL against the configured REST host.
+ *  An integration harness that answers this endpoint with a substitute
+ *  `url` field (the msg-router egress gateway, for instance) thereby
+ *  redirects the WebSocket connection too. Per-account override comes
+ *  from `accounts.<id>.apiBaseUrl`; falls back to `DISCORD_BOT_API_BASE_URL`
+ *  env var; defaults to real Discord. */
+function discordGatewayBotUrl(account?: { apiBaseUrl?: string | null } | null): string {
+  return `${resolveDiscordApiBaseUrl({ account })}/api/v10/gateway/bot`;
+}
+
+const DEFAULT_DISCORD_API_HOST = "discord.com";
 const DEFAULT_DISCORD_GATEWAY_URL = "wss://gateway.discord.gg/";
 const DEFAULT_DISCORD_GATEWAY_INFO_TIMEOUT_MS = 30_000;
 const MAX_DISCORD_GATEWAY_INFO_TIMEOUT_MS = 120_000;
@@ -27,6 +37,7 @@ export type DiscordGatewayFetch = (
 export type DiscordGatewayMetadataFetchOptions = {
   capture?: false | { flowId: string; meta: Record<string, unknown> };
   proxyUrl?: string;
+  account?: { apiBaseUrl?: string | null } | null;
 };
 
 type DiscordGatewayMetadataError = Error & { transient?: boolean };
@@ -166,10 +177,11 @@ export async function fetchDiscordGatewayInfo(params: {
   token: string;
   fetchImpl: DiscordGatewayFetch;
   fetchInit?: DiscordGatewayFetchInit;
+  account?: { apiBaseUrl?: string | null } | null;
 }): Promise<APIGatewayBotInfo> {
   let response: DiscordGatewayMetadataResponse;
   try {
-    response = await params.fetchImpl(DISCORD_GATEWAY_BOT_URL, {
+    response = await params.fetchImpl(discordGatewayBotUrl(params.account), {
       ...params.fetchInit,
       headers: {
         ...params.fetchInit?.headers,
@@ -220,6 +232,7 @@ export async function fetchDiscordGatewayInfoWithTimeout(params: {
   fetchImpl: DiscordGatewayFetch;
   fetchInit?: DiscordGatewayFetchInit;
   timeoutMs?: number;
+  account?: { apiBaseUrl?: string | null } | null;
 }): Promise<APIGatewayBotInfo> {
   const timeoutMs = Math.max(1, params.timeoutMs ?? DEFAULT_DISCORD_GATEWAY_INFO_TIMEOUT_MS);
   return await withAbortTimeout({
@@ -234,6 +247,7 @@ export async function fetchDiscordGatewayInfoWithTimeout(params: {
       await fetchDiscordGatewayInfo({
         token: params.token,
         fetchImpl: params.fetchImpl,
+        account: params.account,
         fetchInit: {
           ...params.fetchInit,
           signal,
@@ -274,10 +288,30 @@ export async function fetchDiscordGatewayMetadataGuarded(
   init?: DiscordGatewayFetchInit,
   options?: DiscordGatewayMetadataFetchOptions,
 ): Promise<Response> {
+  // Default allowlist is real Discord; if a per-account `apiBaseUrl`
+  // (or `DISCORD_BOT_API_BASE_URL` env var fallback) points at a
+  // custom host, allow that host too so the gateway metadata fetch can
+  // reach the redirected REST surface.
+  //
+  // Trust model: both `apiBaseUrl` and the env var are operator-set —
+  // they live in `openclaw.json` (written by the operator or by trusted
+  // provisioning code like clawdi's m031/m032) and in the process env.
+  // Private hostnames are intentionally permitted: the canonical use
+  // case for `apiBaseUrl` is pointing at msg-router which runs on
+  // private/internal infra. Untrusted user input never reaches this
+  // resolver; if that changes, the override host must be filtered
+  // before being added to `allowedHostnames` (the SSRF guard at
+  // src/infra/net/ssrf.ts skips private-IP checks for any allowlisted
+  // hostname).
+  const overrideHost = resolveDiscordApiHostname({ account: options?.account });
+  const allowedHostnames =
+    overrideHost && overrideHost !== DEFAULT_DISCORD_API_HOST
+      ? [DEFAULT_DISCORD_API_HOST, overrideHost]
+      : [DEFAULT_DISCORD_API_HOST];
   const guarded = await fetchWithSsrFGuard({
     url: resolveFetchInputUrl(input),
     init: init as RequestInit,
-    policy: { allowedHostnames: [DISCORD_API_HOST] },
+    policy: { allowedHostnames },
     capture: false,
     auditContext: "discord.gateway.metadata",
     ...(options?.proxyUrl

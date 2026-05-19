@@ -45,6 +45,13 @@ export type ResolvedWhatsAppAccount = {
   direct?: WhatsAppAccountConfig["direct"];
   debounceMs?: number;
   replyToMode?: ReplyToMode;
+  /**
+   * Optional Baileys WebSocket URL override. Points the WA Noise socket
+   * at a Baileys-compatible proxy (typically msg-router's `/whatsapp`
+   * Noise face) instead of the real `wss://web.whatsapp.com/ws/chat`.
+   * Mirrors Telegram's `apiRoot` / Discord's `apiBaseUrl`.
+   */
+  wsUrl?: string;
 };
 
 export const DEFAULT_WHATSAPP_MEDIA_MAX_MB = 50;
@@ -152,6 +159,7 @@ export function resolveWhatsAppAccount(params: {
     direct: merged.direct,
     debounceMs: merged.debounceMs,
     replyToMode: merged.replyToMode,
+    wsUrl: normalizeOptionalString((merged as { wsUrl?: unknown }).wsUrl),
   };
 }
 

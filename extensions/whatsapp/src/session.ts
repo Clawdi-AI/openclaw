@@ -40,6 +40,7 @@ import {
   DEFAULT_WHATSAPP_SOCKET_TIMING,
   type WhatsAppSocketTimingOptions,
 } from "./socket-timing.js";
+import { resolveWaWebSocketUrl } from "./wa-websocket-url.js";
 export { formatError, getStatusCode } from "./session-errors.js";
 
 export {
@@ -138,6 +139,14 @@ export async function createWaSocket(
   opts: {
     authDir?: string;
     onQr?: (qr: string) => void;
+    /**
+     * Override Baileys' WebSocket URL. When set, Baileys connects to
+     * this URL instead of `wss://web.whatsapp.com/ws/chat`. Used by
+     * msg-router-managed deployments (e.g. m031-migrated tenants) to
+     * route WA traffic through msg-router's `/whatsapp` Noise face.
+     * Resolved by `resolveWaWebSocketUrl` (account.wsUrl > env var).
+     */
+    wsUrl?: string;
   } & WhatsAppSocketTimingOptions = {},
 ): Promise<ReturnType<typeof makeWASocket>> {
   const baseLogger = getChildLogger(
@@ -173,6 +182,22 @@ export async function createWaSocket(
     defaultQueryTimeoutMs:
       opts.defaultQueryTimeoutMs ?? DEFAULT_WHATSAPP_SOCKET_TIMING.defaultQueryTimeoutMs,
   };
+  // Resolve the WebSocket URL. Precedence:
+  //   1. Per-account `opts.wsUrl` (from `channels.whatsapp.accounts.<id>
+  //      .wsUrl` in openclaw.json — written by m031/m032 to point at
+  //      msg-router's `/whatsapp` Noise face).
+  //   2. `WA_WEBSOCKET_URL` process env (legacy / debug override).
+  //   3. Undefined → Baileys uses its default `wss://web.whatsapp.com/ws/chat`.
+  const waWebSocketUrl = resolveWaWebSocketUrl({
+    accountWsUrl: opts.wsUrl,
+    env: process.env,
+  });
+  if (waWebSocketUrl) {
+    sessionLogger.info(
+      { waWebSocketUrl, source: opts.wsUrl ? "account" : "env" },
+      "WhatsApp Baileys connecting via custom WebSocket URL (msg-router or proxy)",
+    );
+  }
   const sock = makeWASocket({
     auth: {
       creds: state.creds,
@@ -189,6 +214,9 @@ export async function createWaSocket(
     // Baileys types still model `fetchAgent` as a Node agent even though the
     // runtime path accepts an undici dispatcher for upload fetches.
     fetchAgent: fetchAgent as Agent | undefined,
+    // Conditionally include — passing `undefined` would override Baileys'
+    // own default and break the standard real-WhatsApp connection path.
+    ...(waWebSocketUrl ? { waWebSocketUrl } : {}),
   });
 
   sock.ev.on("creds.update", () => enqueueSaveCreds(authDir, saveCreds, sessionLogger));

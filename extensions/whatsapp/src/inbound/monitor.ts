@@ -23,7 +23,7 @@ import type { OpenClawConfig } from "../runtime-api.js";
 import { createWaSocket, formatError, getStatusCode, waitForWaConnection } from "../session.js";
 import { resolveWhatsAppSocketTiming } from "../socket-timing.js";
 import { resolveJidToE164 } from "../text-runtime.js";
-import { checkInboundAccessControl } from "./access-control.js";
+import { checkInboundAccessControl, type InboundAccessControlResult } from "./access-control.js";
 import {
   claimRecentInboundMessageDelivery,
   commitRecentInboundMessage,
@@ -152,7 +152,39 @@ type MonitorWebInboxOptions = {
   verbose: boolean;
   accountId: string;
   authDir: string;
+  /**
+   * Override the Baileys WebSocket URL. When set (typically via
+   * `channels.whatsapp.accounts.<id>.wsUrl` in openclaw.json),
+   * Baileys connects to this URL instead of the real
+   * `wss://web.whatsapp.com/ws/chat`. Used by msg-router-managed
+   * deployments to point Baileys at msg-router's `/whatsapp` Noise
+   * face.
+   */
+  wsUrl?: string;
   onMessage: (msg: WebInboundMessage) => Promise<void>;
+  /**
+   * Optional access-control resolver override.
+   * Defaults to checkInboundAccessControl. Useful for hosted/managed
+   * deployments (e.g. msg-router) that own pairing/routing externally
+   * and want to bypass per-account allowlist checks.
+   */
+  resolveAccessControl?: (params: {
+    cfg: OpenClawConfig;
+    accountId: string;
+    from: string;
+    selfE164: string | null;
+    senderE164: string | null;
+    group: boolean;
+    pushName?: string;
+    isFromMe: boolean;
+    messageTimestampMs?: number;
+    connectedAtMs?: number;
+    verbose?: boolean;
+    sock: {
+      sendMessage: (jid: string, content: { text: string }) => Promise<unknown>;
+    };
+    remoteJid: string;
+  }) => Promise<InboundAccessControlResult>;
   mediaMaxMb?: number;
   /** Keep the global presence unavailable so self-chat sessions do not mute phone pushes. */
   selfChatMode?: boolean;
@@ -619,7 +651,8 @@ export async function attachWebInboxToSocket(
       : undefined;
 
     const accessCfg = options.loadConfig?.() ?? options.cfg;
-    const access = await checkInboundAccessControl({
+    const resolveAccessControl = options.resolveAccessControl ?? checkInboundAccessControl;
+    const access = await resolveAccessControl({
       cfg: accessCfg,
       accountId: options.accountId,
       from,
@@ -1268,6 +1301,7 @@ export async function attachWebInboxToSocket(
 export async function monitorWebInbox(options: MonitorWebInboxOptions) {
   const sock = await createWaSocket(false, options.verbose, {
     authDir: options.authDir,
+    wsUrl: options.wsUrl,
     ...resolveWhatsAppSocketTiming(options.cfg),
   });
   await waitForWaConnection(sock);

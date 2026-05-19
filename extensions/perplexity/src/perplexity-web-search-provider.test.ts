@@ -148,4 +148,61 @@ describe("perplexity web search provider", () => {
       testing.readPerplexityJsonResponse(new Response("{ nope"), "Perplexity"),
     ).rejects.toThrow("Perplexity: malformed JSON response");
   });
+
+  it("forces search_api transport with the configured baseUrl when transport='search-api'", () => {
+    // Phala-parity: a custom Perplexity-compatible baseUrl should still hit /search.
+    expect(
+      __testing.resolvePerplexityTransport({
+        apiKey: openRouterPerplexityApiKey,
+        baseUrl: "https://search.example.com/v1",
+        transport: "search-api",
+      }),
+    ).toMatchObject({
+      baseUrl: "https://search.example.com/v1",
+      transport: "search_api",
+    });
+
+    // Defaults to api.perplexity.ai when no baseUrl is configured.
+    expect(
+      __testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        transport: "search-api",
+      }),
+    ).toMatchObject({
+      baseUrl: "https://api.perplexity.ai",
+      transport: "search_api",
+    });
+  });
+
+  it("forces chat_completions transport on a direct Perplexity base when transport='chat-completions'", () => {
+    expect(
+      __testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        transport: "chat-completions",
+      }),
+    ).toMatchObject({
+      baseUrl: "https://api.perplexity.ai",
+      transport: "chat_completions",
+    });
+  });
+
+  it("preserves the auto heuristic when transport='auto' is explicit", () => {
+    // Smoke-check: explicit auto must match the unset-default path so existing
+    // upstream behavior stays untouched.
+    expect(
+      __testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        transport: "auto",
+      }),
+    ).toMatchObject({
+      baseUrl: "https://api.perplexity.ai",
+      transport: "search_api",
+    });
+    expect(
+      __testing.resolvePerplexityTransport({
+        baseUrl: "https://api.perplexity.ai",
+        transport: "auto",
+      }).transport,
+    ).toBe("chat_completions");
+  });
 });
