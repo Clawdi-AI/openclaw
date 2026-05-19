@@ -65,4 +65,45 @@ describe("bundled plugin metadata copy", () => {
       "./auth-presence.js",
     );
   });
+
+  it("preserves existing extensionless package entry behavior outside channel state probes", () => {
+    const repoDir = makeTempRepoRoot(tempDirs, "openclaw-copy-bundled-plugin-entry-");
+    const packageDir = join(repoDir, "extensions", "plain");
+    mkdirSync(packageDir, { recursive: true });
+    writeJsonFile(join(repoDir, "package.json"), { name: "openclaw", version: "2026.5.18" });
+    writeJsonFile(join(packageDir, "openclaw.plugin.json"), {
+      id: "plain",
+      channels: ["plain"],
+    });
+    writeJsonFile(join(packageDir, "package.json"), {
+      name: "@openclaw/plain",
+      version: "2026.5.18",
+      type: "module",
+      openclaw: {
+        extensions: ["./index"],
+        setupEntry: "./setup-entry",
+        channel: {
+          id: "plain",
+          configuredState: {
+            specifier: "./configured-state",
+            exportName: "hasPlainConfiguredState",
+          },
+        },
+      },
+    });
+    writeFileText(join(packageDir, "index.ts"), "export {};\n");
+    writeFileText(join(packageDir, "setup-entry.ts"), "export {};\n");
+    writeFileText(join(packageDir, "configured-state.ts"), "export {};\n");
+
+    copyBundledPluginMetadata({ cwd: repoDir });
+
+    const bundledPackageJson = JSON.parse(
+      readFileSync(join(repoDir, "dist", "extensions", "plain", "package.json"), "utf8"),
+    );
+    expect(bundledPackageJson.openclaw.extensions).toEqual(["./index"]);
+    expect(bundledPackageJson.openclaw.setupEntry).toBe("./setup-entry");
+    expect(bundledPackageJson.openclaw.channel.configuredState.specifier).toBe(
+      "./configured-state.js",
+    );
+  });
 });
