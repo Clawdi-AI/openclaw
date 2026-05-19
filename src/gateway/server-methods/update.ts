@@ -184,6 +184,7 @@ export const updateHandlers: GatewayRequestHandlers = {
           cwd: root,
           argv1: process.argv[1],
           channel: configChannel ?? undefined,
+          selfUpdatePolicy: config.update?.selfUpdate,
         });
       }
     } catch {

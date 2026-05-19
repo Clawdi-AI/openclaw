@@ -262,6 +262,12 @@ export async function waitForWhatsAppLoginResult(params: {
 export class WhatsAppConnectionController {
   readonly accountId: string;
   readonly authDir: string;
+  /** Optional Baileys WebSocket URL override. When set, all sockets
+   *  this controller creates connect to this URL instead of the real
+   *  `wss://web.whatsapp.com/ws/chat`. Sourced from
+   *  `channels.whatsapp.accounts.<id>.wsUrl` and used by msg-router-
+   *  managed deployments. */
+  readonly wsUrl?: string;
   readonly socketRef: { current: WASocket | null };
 
   private readonly reconnectPolicy: ReconnectPolicy;
@@ -286,6 +292,8 @@ export class WhatsAppConnectionController {
   constructor(params: {
     accountId: string;
     authDir: string;
+    /** Per-account Baileys WS URL override (msg-router routing). */
+    wsUrl?: string;
     verbose: boolean;
     keepAlive: boolean;
     heartbeatSeconds: number;
@@ -300,6 +308,7 @@ export class WhatsAppConnectionController {
   }) {
     this.accountId = params.accountId;
     this.authDir = params.authDir;
+    this.wsUrl = params.wsUrl;
     this.verbose = params.verbose;
     this.keepAlive = params.keepAlive;
     this.heartbeatSeconds = params.heartbeatSeconds;
@@ -412,6 +421,7 @@ export class WhatsAppConnectionController {
     try {
       sock = await createWaSocket(false, this.verbose, {
         authDir: this.authDir,
+        wsUrl: this.wsUrl,
         ...this.socketTiming,
       });
       await waitForWaConnection(sock);

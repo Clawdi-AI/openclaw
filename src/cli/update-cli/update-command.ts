@@ -45,6 +45,11 @@ import { runGlobalPackageUpdateSteps } from "../../infra/package-update-steps.js
 import { getSelfAndAncestorPidsSync } from "../../infra/restart-stale-pids.js";
 import { nodeVersionSatisfiesEngine } from "../../infra/runtime-guard.js";
 import {
+  isSelfUpdateDisabled,
+  resolveSelfUpdateDisabledReason,
+  type SelfUpdatePolicy,
+} from "../../infra/self-update-policy.js";
+import {
   channelToNpmTag,
   DEFAULT_GIT_CHANNEL,
   DEFAULT_PACKAGE_CHANNEL,
@@ -1249,7 +1254,19 @@ async function runPackageInstallUpdate(params: {
   managedServiceEnv?: NodeJS.ProcessEnv;
   invocationCwd?: string;
   honorPackageRoot?: boolean;
+  selfUpdatePolicy?: SelfUpdatePolicy;
 }): Promise<UpdateRunResult> {
+  if (isSelfUpdateDisabled(params.selfUpdatePolicy)) {
+    return {
+      status: "skipped",
+      mode: "unknown",
+      root: params.root,
+      reason: resolveSelfUpdateDisabledReason(params.selfUpdatePolicy),
+      steps: [],
+      durationMs: Date.now() - params.startedAt,
+    };
+  }
+
   const manager = await resolveGlobalManager({
     root: params.root,
     installKind: params.installKind,
@@ -1357,7 +1374,19 @@ async function runGitUpdate(params: {
   opts: UpdateCommandOptions;
   stop: () => void;
   devTargetRef?: string;
+  selfUpdatePolicy?: SelfUpdatePolicy;
 }): Promise<UpdateRunResult> {
+  if (params.switchToGit && isSelfUpdateDisabled(params.selfUpdatePolicy)) {
+    return {
+      status: "skipped",
+      mode: "unknown",
+      root: params.root,
+      reason: resolveSelfUpdateDisabledReason(params.selfUpdatePolicy),
+      steps: [],
+      durationMs: Date.now() - params.startedAt,
+    };
+  }
+
   const updateRoot = params.switchToGit ? resolveGitInstallDir() : params.root;
   const effectiveTimeout = params.timeoutMs ?? DEFAULT_UPDATE_STEP_TIMEOUT_MS;
   const installEnv = await createGlobalInstallEnv();
@@ -1395,6 +1424,7 @@ async function runGitUpdate(params: {
     tag: params.tag,
     devTargetRef: params.devTargetRef,
     deferConfiguredPluginInstallRepair: true,
+    selfUpdatePolicy: params.selfUpdatePolicy,
   });
   const steps = [...(cloneStep ? [cloneStep] : []), ...updateResult.steps];
 
@@ -3115,6 +3145,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
             managedServiceEnv: prePackageServiceStop?.serviceEnv,
             invocationCwd,
             honorPackageRoot: managedServiceRootRedirect !== null,
+            selfUpdatePolicy: configSnapshot.valid
+              ? configSnapshot.config.update?.selfUpdate
+              : undefined,
           })
         : await runGitUpdate({
             root,
@@ -3129,6 +3162,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
             opts,
             stop,
             devTargetRef,
+            selfUpdatePolicy: configSnapshot.valid
+              ? configSnapshot.config.update?.selfUpdate
+              : undefined,
           });
   } catch (err) {
     stop();

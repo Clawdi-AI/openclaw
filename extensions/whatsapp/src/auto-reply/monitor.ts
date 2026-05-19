@@ -258,6 +258,7 @@ export async function monitorWebChannel(
   const controller = new WhatsAppConnectionController({
     accountId: account.accountId,
     authDir: account.authDir,
+    wsUrl: account.wsUrl,
     verbose,
     keepAlive,
     heartbeatSeconds,
