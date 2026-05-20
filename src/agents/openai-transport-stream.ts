@@ -1934,33 +1934,8 @@ function isOpenAICodexResponsesModel(model: Model<Api>): boolean {
   );
 }
 
-function isNativeOpenAICodexResponsesBaseUrl(baseUrl?: string): boolean {
-  const trimmed = typeof baseUrl === "string" ? baseUrl.trim() : "";
-  if (!trimmed) {
-    return false;
-  }
-  try {
-    const url = new URL(trimmed);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return false;
-    }
-    if (url.hostname.toLowerCase() !== "chatgpt.com") {
-      return false;
-    }
-    const pathname = url.pathname.replace(/\/+$/u, "").toLowerCase();
-    return [
-      "/backend-api",
-      "/backend-api/v1",
-      "/backend-api/codex",
-      "/backend-api/codex/v1",
-    ].includes(pathname);
-  } catch {
-    return false;
-  }
-}
-
 function usesNativeOpenAICodexResponsesBackend(model: Model<Api>): boolean {
-  return isOpenAICodexResponsesModel(model) && isNativeOpenAICodexResponsesBaseUrl(model.baseUrl);
+  return isOpenAICodexResponsesModel(model);
 }
 
 const OPENAI_CODEX_RESPONSES_UNSUPPORTED_PARAMS = [
