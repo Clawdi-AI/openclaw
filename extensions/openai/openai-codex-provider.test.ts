@@ -795,8 +795,8 @@ describe("openai codex provider", () => {
     } as never);
 
     // Explicit api is respected; baseUrl is left alone because we no longer
-    // coerce the API based on hostname.
-    expect(model).toMatchObject({
+    // coerce the API based on hostname. A no-op normalization returns undefined.
+    expect(model ?? inputModel).toMatchObject({
       api: "openai-completions",
       baseUrl: "https://api.openai.com/v1",
     });
@@ -805,24 +805,26 @@ describe("openai codex provider", () => {
   it("respects explicit openai-completions api for GitHub Copilot Codex base URLs", () => {
     const provider = buildOpenAICodexProviderPlugin();
 
+    const inputModel = {
+      id: "gpt-5.4",
+      name: "gpt-5.4",
+      provider: "openai-codex",
+      api: "openai-completions" as const,
+      baseUrl: "https://api.githubcopilot.com",
+      reasoning: true,
+      input: ["text", "image"] as const,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 1_050_000,
+      contextTokens: 272_000,
+      maxTokens: 128_000,
+    };
+
     const model = provider.normalizeResolvedModel?.({
       provider: "openai-codex",
-      model: {
-        id: "gpt-5.4",
-        name: "gpt-5.4",
-        provider: "openai-codex",
-        api: "openai-completions",
-        baseUrl: "https://api.githubcopilot.com",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1_050_000,
-        contextTokens: 272_000,
-        maxTokens: 128_000,
-      },
+      model: inputModel,
     } as never);
 
-    expect(model).toMatchObject({
+    expect(model ?? inputModel).toMatchObject({
       api: "openai-completions",
       baseUrl: "https://api.githubcopilot.com",
     });
