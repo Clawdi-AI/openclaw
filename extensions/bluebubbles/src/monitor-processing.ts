@@ -1764,7 +1764,7 @@ async function processMessageAfterDedupe(
         },
       },
     });
-    await core.channel.turn.run({
+    await core.channel.inbound.run({
       channel: "bluebubbles",
       accountId: account.accountId,
       raw: ctxPayload,
