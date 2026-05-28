@@ -88,6 +88,19 @@ describe("describeEmbeddedAgentStreamStrategy", () => {
     ).toBe("pi-native-codex-responses");
   });
 
+  it("describes custom Codex-compatible providers as boundary-aware PI transport", () => {
+    expect(
+      describeEmbeddedAgentStreamStrategy({
+        currentStreamFn: undefined,
+        model: {
+          api: "openai-codex-responses",
+          provider: "clawdi-codex",
+          id: "gpt-5.5",
+        } as never,
+      }),
+    ).toBe("boundary-aware:openai-codex-responses");
+  });
+
   it("keeps custom session streams labeled as custom", () => {
     expect(
       describeEmbeddedAgentStreamStrategy({
