@@ -138,6 +138,13 @@ describe("codex plugin", () => {
       requestedRuntime: "auto",
     });
     expect(unsupported.supported).toBe(false);
+    expect(
+      harness.supports({
+        provider: "clawdi-codex",
+        modelId: "gpt-5.5",
+        requestedRuntime: "auto",
+      }).supported,
+    ).toBe(false);
   });
 
   it("enables the native hook relay for public Codex app-server attempts", async () => {

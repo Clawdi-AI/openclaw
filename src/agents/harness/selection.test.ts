@@ -351,6 +351,34 @@ describe("runAgentHarnessAttempt", () => {
     expect(piRunAttempt).toHaveBeenCalledTimes(1);
   });
 
+  it("honors custom Clawdi Codex PI provider config without selecting Codex harness", async () => {
+    registerSuccessfulCodexHarness();
+
+    expect(
+      resolveAgentHarnessPolicy({
+        config: providerRuntimeConfig("clawdi-codex", "pi"),
+        provider: "clawdi-codex",
+        modelId: "gpt-5.5",
+      }),
+    ).toEqual({
+      runtime: "pi",
+      runtimeSource: "provider",
+    });
+
+    const result = await runAgentHarnessAttempt({
+      ...createAttemptParams(providerRuntimeConfig("clawdi-codex", "pi")),
+      provider: "clawdi-codex",
+      modelId: "gpt-5.5",
+      model: {
+        api: "openai-codex-responses",
+        provider: "clawdi-codex",
+        id: "gpt-5.5",
+      } as Model<Api>,
+    });
+    expect(result.sessionIdUsed).toBe("pi");
+    expect(piRunAttempt).toHaveBeenCalledTimes(1);
+  });
+
   it("honors provider wildcard PI runtime policy for OpenAI agent model runs", async () => {
     registerSuccessfulCodexHarness();
 
