@@ -772,65 +772,7 @@ describe("openai codex provider", () => {
     });
   });
 
-  it("respects explicit openai-completions api on resolved models (opt-out escape hatch)", () => {
-    const provider = buildOpenAICodexProviderPlugin();
-
-    const inputModel = {
-      id: "gpt-5.4",
-      name: "gpt-5.4",
-      provider: "openai-codex",
-      api: "openai-completions" as const,
-      baseUrl: "https://api.openai.com/v1",
-      reasoning: true,
-      input: ["text", "image"] as const,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 1_050_000,
-      contextTokens: 272_000,
-      maxTokens: 128_000,
-    };
-
-    const model = provider.normalizeResolvedModel?.({
-      provider: "openai-codex",
-      model: inputModel,
-    } as never);
-
-    // Explicit api is respected; baseUrl is left alone because we no longer
-    // coerce the API based on hostname. A no-op normalization returns undefined.
-    expect(model ?? inputModel).toMatchObject({
-      api: "openai-completions",
-      baseUrl: "https://api.openai.com/v1",
-    });
-  });
-
-  it("respects explicit openai-completions api for GitHub Copilot Codex base URLs", () => {
-    const provider = buildOpenAICodexProviderPlugin();
-
-    const inputModel = {
-      id: "gpt-5.4",
-      name: "gpt-5.4",
-      provider: "openai-codex",
-      api: "openai-completions" as const,
-      baseUrl: "https://api.githubcopilot.com",
-      reasoning: true,
-      input: ["text", "image"] as const,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 1_050_000,
-      contextTokens: 272_000,
-      maxTokens: 128_000,
-    };
-
-    const model = provider.normalizeResolvedModel?.({
-      provider: "openai-codex",
-      model: inputModel,
-    } as never);
-
-    expect(model ?? inputModel).toMatchObject({
-      api: "openai-completions",
-      baseUrl: "https://api.githubcopilot.com",
-    });
-  });
-
-  it("defaults missing api metadata to openai-codex-responses on arbitrary proxy URLs (phala parity)", () => {
+  it("normalizes legacy completions metadata to the codex transport", () => {
     const provider = buildOpenAICodexProviderPlugin();
 
     const model = provider.normalizeResolvedModel?.({
@@ -839,7 +781,8 @@ describe("openai codex provider", () => {
         id: "gpt-5.4",
         name: "gpt-5.4",
         provider: "openai-codex",
-        baseUrl: "https://proxy.example.com/v1",
+        api: "openai-completions",
+        baseUrl: "https://api.openai.com/v1",
         reasoning: true,
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -849,12 +792,35 @@ describe("openai codex provider", () => {
       },
     } as never);
 
-    // Phala parity: arbitrary proxy URL with no explicit api defaults to
-    // openai-codex-responses regardless of hostname. baseUrl stays untouched
-    // because it is not a well-known OpenAI/Codex/Copilot URL.
-    expect(model).toMatchObject({
+    expectModelFields(model, {
       api: "openai-codex-responses",
-      baseUrl: "https://proxy.example.com/v1",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+    });
+  });
+
+  it("normalizes legacy GitHub Copilot Codex metadata to the codex transport", () => {
+    const provider = buildOpenAICodexProviderPlugin();
+
+    const model = provider.normalizeResolvedModel?.({
+      provider: "openai-codex",
+      model: {
+        id: "gpt-5.4",
+        name: "gpt-5.4",
+        provider: "openai-codex",
+        api: "openai-completions",
+        baseUrl: "https://api.githubcopilot.com",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1_050_000,
+        contextTokens: 272_000,
+        maxTokens: 128_000,
+      },
+    } as never);
+
+    expectModelFields(model, {
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
     });
   });
 
@@ -960,7 +926,7 @@ describe("openai codex provider", () => {
     });
   });
 
-  it("respects explicit openai-completions transport metadata for OpenAI URLs (opt-out escape hatch)", () => {
+  it("normalizes transport metadata for legacy completions codex routes", () => {
     const provider = buildOpenAICodexProviderPlugin();
 
     expect(
@@ -969,10 +935,13 @@ describe("openai codex provider", () => {
         api: "openai-completions",
         baseUrl: "https://api.openai.com/v1",
       } as never),
-    ).toBeUndefined();
+    ).toEqual({
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+    });
   });
 
-  it("respects explicit openai-completions transport metadata for GitHub Copilot URLs", () => {
+  it("normalizes transport metadata for legacy GitHub Copilot Codex routes", () => {
     const provider = buildOpenAICodexProviderPlugin();
 
     expect(
@@ -981,10 +950,13 @@ describe("openai codex provider", () => {
         api: "openai-completions",
         baseUrl: "https://api.githubcopilot.com/v1",
       } as never),
-    ).toBeUndefined();
+    ).toEqual({
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+    });
   });
 
-  it("leaves custom proxy completions transport metadata unchanged when api is explicit", () => {
+  it("leaves custom proxy completions transport metadata unchanged", () => {
     const provider = buildOpenAICodexProviderPlugin();
 
     expect(
@@ -994,35 +966,5 @@ describe("openai codex provider", () => {
         baseUrl: "https://proxy.example.com/v1",
       } as never),
     ).toBeUndefined();
-  });
-
-  it("defaults missing transport api to openai-codex-responses on arbitrary proxy URLs (phala parity)", () => {
-    const provider = buildOpenAICodexProviderPlugin();
-
-    expect(
-      provider.normalizeTransport?.({
-        provider: "openai-codex",
-        baseUrl: "http://proxy.local:30400",
-      } as never),
-    ).toEqual({
-      api: "openai-codex-responses",
-      // Arbitrary proxy URL is not a well-known OpenAI/Codex/Copilot host;
-      // baseUrl is informational only and is preserved as-is.
-      baseUrl: "http://proxy.local:30400",
-    });
-  });
-
-  it("defaults missing transport api to openai-codex-responses on well-known OpenAI URLs", () => {
-    const provider = buildOpenAICodexProviderPlugin();
-
-    expect(
-      provider.normalizeTransport?.({
-        provider: "openai-codex",
-        baseUrl: "https://api.openai.com/v1",
-      } as never),
-    ).toEqual({
-      api: "openai-codex-responses",
-      baseUrl: "https://chatgpt.com/backend-api/codex",
-    });
   });
 });
