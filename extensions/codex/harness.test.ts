@@ -31,6 +31,14 @@ describe("Codex agent harness supports()", () => {
     expect(!result.supported ? (result.reason ?? "") : "").toContain("codex");
   });
 
+  it("does not claim Clawdi-managed custom Codex providers", () => {
+    const result = harness.supports({
+      provider: "clawdi-codex",
+      requestedRuntime: "codex",
+    });
+    expect(result.supported).toBe(false);
+  });
+
   it("normalizes provider casing", () => {
     expect(harness.supports({ provider: "OpenAI-Codex", requestedRuntime: "codex" })).toEqual({
       supported: true,
