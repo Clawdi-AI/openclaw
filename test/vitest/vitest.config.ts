@@ -57,6 +57,7 @@ export const rootVitestProjects = [
   "test/vitest/vitest.channels.config.ts",
   "test/vitest/vitest.extension-active-memory.config.ts",
   "test/vitest/vitest.extension-acpx.config.ts",
+  "test/vitest/vitest.extension-bluebubbles.config.ts",
   "test/vitest/vitest.extension-diffs.config.ts",
   "test/vitest/vitest.extension-codex.config.ts",
   "test/vitest/vitest.extension-discord.config.ts",
