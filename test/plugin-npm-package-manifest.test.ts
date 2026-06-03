@@ -520,6 +520,67 @@ describe("plugin npm package manifest staging", () => {
     );
   });
 
+  it("rewrites channel package-state probes to package-local runtime files", () => {
+    const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-channel-state-");
+    const packageDir = writePublishablePluginPackage(repoDir);
+    writeJsonFile(join(packageDir, "package.json"), {
+      name: "@openclaw/diffs",
+      version: "2026.5.3",
+      type: "module",
+      openclaw: {
+        extensions: ["./index.ts"],
+        setupEntry: "./setup-entry.ts",
+        channel: {
+          id: "diffs",
+          configuredState: {
+            specifier: "./configured-state",
+            exportName: "hasDiffsConfig",
+          },
+          persistedAuthState: {
+            specifier: "./auth-presence",
+            exportName: "hasDiffsAuth",
+          },
+        },
+        compat: {
+          pluginApi: ">=2026.4.30",
+        },
+        release: {
+          publishToNpm: true,
+        },
+      },
+    });
+    writeFileText(join(packageDir, "auth-presence.ts"), "export function hasDiffsAuth() {}\n");
+    writeFileText(join(packageDir, "configured-state.ts"), "export function hasDiffsConfig() {}\n");
+    writeFileText(join(packageDir, "dist", "auth-presence.js"), "export {};\n");
+    writeFileText(join(packageDir, "dist", "configured-state.js"), "export {};\n");
+    writeFileText(join(packageDir, "dist", "index.js"), "export {};\n");
+    writeFileText(join(packageDir, "dist", "setup-entry.js"), "export {};\n");
+
+    const resolved = resolveAugmentedPluginNpmPackageJson({
+      repoRoot: repoDir,
+      packageDir,
+    });
+    expect(resolved.changed).toBe(true);
+    expect(resolved.packageJson?.openclaw.channel.configuredState.specifier).toBe(
+      "./dist/configured-state.js",
+    );
+    expect(resolved.packageJson?.openclaw.channel.persistedAuthState.specifier).toBe(
+      "./dist/auth-presence.js",
+    );
+
+    const originalText = readFileSync(join(packageDir, "package.json"), "utf8");
+    withAugmentedPluginNpmManifestForPackage({ repoRoot: repoDir, packageDir }, () => {
+      const stagedPackageJson = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+      expect(stagedPackageJson.openclaw.channel.configuredState.specifier).toBe(
+        "./dist/configured-state.js",
+      );
+      expect(stagedPackageJson.openclaw.channel.persistedAuthState.specifier).toBe(
+        "./dist/auth-presence.js",
+      );
+    });
+    expect(readFileSync(join(packageDir, "package.json"), "utf8")).toBe(originalText);
+  });
+
   it("refuses to pack publishable plugins before package-local runtime files exist", () => {
     const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-runtime-missing-");
     const packageDir = writePublishablePluginPackage(repoDir);
