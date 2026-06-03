@@ -71,6 +71,33 @@ describe("perplexity web search provider", () => {
     ).toBe("https://example.com");
   });
 
+  it("routes Clawdi managed Perplexity proxy through the Search API transport", () => {
+    expect(
+      testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        baseUrl: "https://api.clawdi.ai/proxy/perplexity",
+      }),
+    ).toMatchObject({
+      baseUrl: "https://api.clawdi.ai/proxy/perplexity",
+      transport: "search_api",
+    });
+    expect(
+      testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        baseUrl: "https://api.clawdi.ai/proxy/perplexity/",
+      }),
+    ).toMatchObject({
+      baseUrl: "https://api.clawdi.ai/proxy/perplexity/",
+      transport: "search_api",
+    });
+    expect(
+      testing.resolvePerplexityTransport({
+        apiKey: directPerplexityApiKey,
+        baseUrl: "https://api.clawdi.ai/proxy/other",
+      }).transport,
+    ).toBe("chat_completions");
+  });
+
   it("resolves OpenRouter env auth and transport", () => {
     withEnv(
       { [perplexityApiKeyEnv]: undefined, [openRouterApiKeyEnv]: openRouterPerplexityApiKey },
@@ -174,7 +201,7 @@ describe("perplexity web search provider", () => {
   it("forces search_api transport with the configured baseUrl when transport='search-api'", () => {
     // Phala-parity: a custom Perplexity-compatible baseUrl should still hit /search.
     expect(
-      __testing.resolvePerplexityTransport({
+      testing.resolvePerplexityTransport({
         apiKey: openRouterPerplexityApiKey,
         baseUrl: "https://search.example.com/v1",
         transport: "search-api",
@@ -186,7 +213,7 @@ describe("perplexity web search provider", () => {
 
     // Defaults to api.perplexity.ai when no baseUrl is configured.
     expect(
-      __testing.resolvePerplexityTransport({
+      testing.resolvePerplexityTransport({
         apiKey: directPerplexityApiKey,
         transport: "search-api",
       }),
@@ -198,7 +225,7 @@ describe("perplexity web search provider", () => {
 
   it("forces chat_completions transport on a direct Perplexity base when transport='chat-completions'", () => {
     expect(
-      __testing.resolvePerplexityTransport({
+      testing.resolvePerplexityTransport({
         apiKey: directPerplexityApiKey,
         transport: "chat-completions",
       }),
@@ -212,7 +239,7 @@ describe("perplexity web search provider", () => {
     // Smoke-check: explicit auto must match the unset-default path so existing
     // upstream behavior stays untouched.
     expect(
-      __testing.resolvePerplexityTransport({
+      testing.resolvePerplexityTransport({
         apiKey: directPerplexityApiKey,
         transport: "auto",
       }),
@@ -221,7 +248,7 @@ describe("perplexity web search provider", () => {
       transport: "search_api",
     });
     expect(
-      __testing.resolvePerplexityTransport({
+      testing.resolvePerplexityTransport({
         baseUrl: "https://api.perplexity.ai",
         transport: "auto",
       }).transport,
