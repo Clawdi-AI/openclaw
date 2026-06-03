@@ -32,14 +32,28 @@ import {
   type PerplexityTransport,
 } from "./perplexity-web-search-provider.shared.js";
 
-const PERPLEXITY_SEARCH_ENDPOINT = "https://api.perplexity.ai/search";
+const PERPLEXITY_SEARCH_PATH = "/search";
 const DEFAULT_PERPLEXITY_MODEL = "perplexity/sonar-pro";
+
+export type PerplexityTransportSelector = "auto" | "search-api" | "chat-completions";
 
 type PerplexityConfig = {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  transport?: PerplexityTransportSelector;
 };
+
+function normalizeTransportSelector(value: unknown): PerplexityTransportSelector | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "auto" || normalized === "search-api" || normalized === "chat-completions") {
+    return normalized;
+  }
+  return undefined;
+}
 
 type PerplexitySearchResponse = {
   choices?: Array<{
@@ -156,8 +170,28 @@ function resolvePerplexityTransport(perplexity?: PerplexityConfig): {
   transport: PerplexityTransport;
 } {
   const auth = resolvePerplexityApiKey(perplexity);
-  const baseUrl = resolvePerplexityBaseUrl(perplexity, auth.source, auth.apiKey);
   const model = resolvePerplexityModel(perplexity);
+  const explicit = normalizeTransportSelector(perplexity?.transport) ?? "auto";
+
+  // Explicit "search-api" forces the native Search API path. Honor any configured
+  // baseUrl (so phala-style custom endpoints work); fall back to the direct
+  // Perplexity host. Auth-source-based baseUrl inference is bypassed because the
+  // operator has explicitly chosen this transport.
+  if (explicit === "search-api") {
+    const configuredBaseUrl = normalizeOptionalString(perplexity?.baseUrl) ?? "";
+    const baseUrl = configuredBaseUrl || PERPLEXITY_DIRECT_BASE_URL;
+    return { ...auth, baseUrl, model, transport: "search_api" };
+  }
+
+  // Explicit "chat-completions" forces the OpenRouter-style chat-completions
+  // transport regardless of baseUrl heuristics.
+  if (explicit === "chat-completions") {
+    const baseUrl = resolvePerplexityBaseUrl(perplexity, auth.source, auth.apiKey);
+    return { ...auth, baseUrl, model, transport: "chat_completions" };
+  }
+
+  // "auto": preserve the upstream heuristic exactly.
+  const baseUrl = resolvePerplexityBaseUrl(perplexity, auth.source, auth.apiKey);
   const hasLegacyOverride = Boolean(
     normalizeOptionalString(perplexity?.baseUrl) || normalizeOptionalString(perplexity?.model),
   );
@@ -201,6 +235,7 @@ function extractPerplexityCitations(data: PerplexitySearchResponse): string[] {
 async function runPerplexitySearchApi(params: {
   query: string;
   apiKey: string;
+  baseUrl: string;
   count: number;
   timeoutSeconds: number;
   country?: string;
@@ -212,6 +247,9 @@ async function runPerplexitySearchApi(params: {
   maxTokens?: number;
   maxTokensPerPage?: number;
 }): Promise<Array<Record<string, unknown>>> {
+  // Honor configured baseUrl so phala-style custom Perplexity-compatible
+  // endpoints work; the path is always /search.
+  const endpoint = `${params.baseUrl.trim().replace(/\/$/, "")}${PERPLEXITY_SEARCH_PATH}`;
   const body: Record<string, unknown> = {
     query: params.query,
     max_results: params.count,
@@ -243,7 +281,7 @@ async function runPerplexitySearchApi(params: {
 
   return withTrustedWebSearchEndpoint(
     {
-      url: PERPLEXITY_SEARCH_ENDPOINT,
+      url: endpoint,
       timeoutSeconds: params.timeoutSeconds,
       init: {
         method: "POST",
@@ -523,6 +561,7 @@ export async function executePerplexitySearch(
           results: await runPerplexitySearchApi({
             query,
             apiKey: runtime.apiKey,
+            baseUrl: runtime.baseUrl,
             count: resolveSearchCount(count, DEFAULT_SEARCH_COUNT),
             timeoutSeconds,
             country: country ?? undefined,
