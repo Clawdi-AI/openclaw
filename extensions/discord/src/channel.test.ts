@@ -434,6 +434,7 @@ describe("discordPlugin outbound", () => {
     });
 
     const cfg = createCfg();
+    cfg.channels!.discord!.apiBaseUrl = "https://msg-router.example";
     const account = resolveAccount(cfg);
 
     await discordPlugin.status!.probeAccount!({
@@ -444,6 +445,9 @@ describe("discordPlugin outbound", () => {
 
     expect(probeDiscordMock).toHaveBeenCalledWith("discord-token", 5000, {
       includeApplication: true,
+      account: expect.objectContaining({
+        apiBaseUrl: "https://msg-router.example",
+      }),
     });
     expect(runtimeProbeDiscord).not.toHaveBeenCalled();
   });
@@ -507,11 +511,15 @@ describe("discordPlugin outbound", () => {
     monitorDiscordProviderMock.mockResolvedValue(undefined);
 
     const cfg = createCfg();
+    cfg.channels!.discord!.apiBaseUrl = "https://msg-router.example";
     await startDiscordAccount(cfg);
 
     await vi.waitFor(() =>
       expect(probeDiscordMock).toHaveBeenCalledWith("discord-token", 2500, {
         includeApplication: true,
+        account: expect.objectContaining({
+          apiBaseUrl: "https://msg-router.example",
+        }),
       }),
     );
     const monitorParams = objectArgAt(monitorDiscordProviderMock, 0, 0);
@@ -570,6 +578,9 @@ describe("discordPlugin outbound", () => {
     await vi.waitFor(() =>
       expect(probeDiscordMock).toHaveBeenCalledWith("discord-token", 2500, {
         includeApplication: true,
+        account: expect.objectContaining({
+          token: "discord-token",
+        }),
       }),
     );
     expect(statusPatches.filter((patch) => "bot" in patch || "application" in patch)).toEqual([]);
