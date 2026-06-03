@@ -35,6 +35,15 @@ describe("OpenAI Codex routing policy", () => {
     expect(modelSelectionShouldEnsureCodexPlugin({ model: "openai/gpt-5.5", config })).toBe(false);
   });
 
+  it("does not force Codex plugin installation for custom Clawdi Codex providers", () => {
+    expect(
+      modelSelectionShouldEnsureCodexPlugin({
+        model: "clawdi-codex/gpt-5.5",
+        config: {} as OpenClawConfig,
+      }),
+    ).toBe(false);
+  });
+
   it("maps explicit OpenClaw plus Codex auth profile to the OpenClaw Codex-auth transport", () => {
     expect(
       listOpenAIAuthProfileProvidersForAgentRuntime({

@@ -89,6 +89,32 @@ describe("describeEmbeddedAgentStreamStrategy", () => {
     ).toBe("openclaw-native-codex-responses");
   });
 
+  it("describes explicit PI OpenAI Codex runs as PI native Codex transport", () => {
+    expect(
+      describeEmbeddedAgentStreamStrategy({
+        currentStreamFn: undefined,
+        model: {
+          api: "openai-codex-responses",
+          provider: "openai-codex",
+          id: "gpt-5.5",
+        } as never,
+      }),
+    ).toBe("pi-native-codex-responses");
+  });
+
+  it("keeps custom Codex Responses providers on boundary-aware PI transport", () => {
+    expect(
+      describeEmbeddedAgentStreamStrategy({
+        currentStreamFn: undefined,
+        model: {
+          api: "openai-codex-responses",
+          provider: "clawdi-codex",
+          id: "gpt-5.5",
+        } as never,
+      }),
+    ).toBe("boundary-aware:openai-codex-responses");
+  });
+
   it("keeps custom session streams labeled as custom", () => {
     expect(
       describeEmbeddedAgentStreamStrategy({
