@@ -1921,35 +1921,6 @@ function isOpenAICodexResponsesModel(model: Model): boolean {
   );
 }
 
-function isNativeOpenAICodexResponsesBaseUrl(baseUrl?: string): boolean {
-  const trimmed = typeof baseUrl === "string" ? baseUrl.trim() : "";
-  if (!trimmed) {
-    return false;
-  }
-  try {
-    const url = new URL(trimmed);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return false;
-    }
-    if (url.hostname.toLowerCase() !== "chatgpt.com") {
-      return false;
-    }
-    const pathname = url.pathname.replace(/\/+$/u, "").toLowerCase();
-    return [
-      "/backend-api",
-      "/backend-api/v1",
-      "/backend-api/codex",
-      "/backend-api/codex/v1",
-    ].includes(pathname);
-  } catch {
-    return false;
-  }
-}
-
-function usesNativeOpenAICodexResponsesBackend(model: Model): boolean {
-  return isOpenAICodexResponsesModel(model) && isNativeOpenAICodexResponsesBaseUrl(model.baseUrl);
-}
-
 const OPENAI_CODEX_RESPONSES_UNSUPPORTED_PARAMS = [
   "max_output_tokens",
   "metadata",
@@ -1977,7 +1948,7 @@ function sanitizeOpenAICodexResponsesParams<T extends Record<string, unknown>>(
   model: Model,
   params: T,
 ): T {
-  if (!usesNativeOpenAICodexResponsesBackend(model)) {
+  if (!isOpenAICodexResponsesModel(model)) {
     return params;
   }
   for (const key of OPENAI_CODEX_RESPONSES_UNSUPPORTED_PARAMS) {
@@ -2002,7 +1973,7 @@ function resolveOpenAICodexResponsesInstructions(
   if (instructions && instructions.trim().length > 0) {
     return instructions;
   }
-  return usesNativeOpenAICodexResponsesBackend(model)
+  return isOpenAICodexResponsesModel(model)
     ? OPENAI_CODEX_RESPONSES_DEFAULT_INSTRUCTIONS
     : undefined;
 }
@@ -2047,7 +2018,6 @@ export function buildOpenAIResponsesParams(
   metadata?: Record<string, string>,
 ) {
   const isCodexResponses = isOpenAICodexResponsesModel(model);
-  const isNativeCodexResponses = usesNativeOpenAICodexResponsesBackend(model);
   const compat = getCompat(model as OpenAIModeModel);
   const supportsDeveloperRole =
     typeof compat.supportsDeveloperRole === "boolean" ? compat.supportsDeveloperRole : undefined;
@@ -2059,7 +2029,7 @@ export function buildOpenAIResponsesParams(
       includeSystemPrompt: !isCodexResponses,
       supportsDeveloperRole,
       replayReasoningItems: true,
-      replayResponsesItemIds: !isNativeCodexResponses,
+      replayResponsesItemIds: !isCodexResponses,
       authProfileId: options?.authProfileId,
       sessionId: options?.sessionId,
     },

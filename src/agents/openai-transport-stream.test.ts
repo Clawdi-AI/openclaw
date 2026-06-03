@@ -2323,7 +2323,7 @@ describe("openai transport stream", () => {
     expect(params.prompt_cache_retention).toBeUndefined();
   });
 
-  it("does not add fallback instructions for custom Codex-compatible responses backends", () => {
+  it("adds fallback instructions for custom Codex-compatible responses backends", () => {
     const params = buildOpenAIResponsesParams(
       {
         id: "gpt-5.5",
@@ -2348,8 +2348,8 @@ describe("openai transport stream", () => {
       },
     ) as Record<string, unknown>;
 
-    expect(params.instructions).toBeUndefined();
-    expect(params.max_output_tokens).toBe(16);
+    expect(params.instructions).toBe("Follow the user request.");
+    expect(params.max_output_tokens).toBeUndefined();
   });
 
   it("uses top-level instructions for Codex responses and preserves prompt cache identity", () => {
@@ -2493,7 +2493,7 @@ describe("openai transport stream", () => {
     expect(sanitized).not.toHaveProperty("top_p");
   });
 
-  it("preserves custom Codex-compatible responses params", () => {
+  it("sanitizes custom Codex-compatible responses params", () => {
     const params = buildOpenAIResponsesParams(
       {
         id: "gpt-5.4",
@@ -2527,13 +2527,11 @@ describe("openai transport stream", () => {
 
     expect(params.instructions).toBe("Stable prefix\nDynamic suffix");
     expect(params.prompt_cache_key).toBe("session-123");
-    expect(params.metadata).toEqual({
-      openclaw_session_id: "session-123",
-      openclaw_turn_id: "turn-123",
-    });
-    expect(params.max_output_tokens).toBe(1024);
-    expect(params.temperature).toBe(0.2);
-    expect(params.top_p).toBe(0.85);
+    expect(params).not.toHaveProperty("metadata");
+    expect(params).not.toHaveProperty("max_output_tokens");
+    expect(params).not.toHaveProperty("prompt_cache_retention");
+    expect(params).not.toHaveProperty("temperature");
+    expect(params).not.toHaveProperty("top_p");
   });
 
   it("forwards response_format to responses text format request params", () => {
@@ -2581,7 +2579,7 @@ describe("openai transport stream", () => {
     }
   });
 
-  it("preserves custom Codex-compatible responses params after payload hooks mutate them", () => {
+  it("sanitizes custom Codex-compatible responses params after payload hooks mutate them", () => {
     const payload = {
       model: "gpt-5.4",
       input: [],
@@ -2610,7 +2608,12 @@ describe("openai transport stream", () => {
       payload,
     );
 
-    expect(sanitized).toEqual(payload);
+    expect(sanitized.prompt_cache_key).toBe("session-123");
+    expect(sanitized).not.toHaveProperty("metadata");
+    expect(sanitized).not.toHaveProperty("max_output_tokens");
+    expect(sanitized).not.toHaveProperty("prompt_cache_retention");
+    expect(sanitized).not.toHaveProperty("service_tier");
+    expect(sanitized).not.toHaveProperty("temperature");
   });
 
   it("omits native Codex replay item ids and unproven encrypted reasoning", () => {
@@ -2719,7 +2722,7 @@ describe("openai transport stream", () => {
     expect(functionCall?.id).toBeUndefined();
   });
 
-  it("preserves prior Responses replay item ids for custom Codex-compatible responses", () => {
+  it("omits custom Codex-compatible replay item ids while preserving proven encrypted reasoning", () => {
     const model = {
       id: "gpt-5.4",
       name: "GPT-5.4",
@@ -2805,9 +2808,9 @@ describe("openai transport stream", () => {
     const reasoningItem = params.input?.find((item) => item.type === "reasoning");
     expectRecordFields(reasoningItem, {
       type: "reasoning",
-      id: "rs_prior",
       encrypted_content: "ciphertext",
     });
+    expect(reasoningItem?.id).toBeUndefined();
     expect(reasoningItem).not.toHaveProperty("__openclaw_replay");
     const assistantMessage = params.input?.find(
       (item) => item.type === "message" && item.role === "assistant",
@@ -2815,15 +2818,15 @@ describe("openai transport stream", () => {
     expectRecordFields(assistantMessage, {
       type: "message",
       role: "assistant",
-      id: "msg_prior",
       phase: "commentary",
     });
+    expect(assistantMessage?.id).toBeUndefined();
     const functionCall = params.input?.find((item) => item.type === "function_call");
     expectRecordFields(functionCall, {
       type: "function_call",
-      id: "fc_prior",
       call_id: "call_abc",
     });
+    expect(functionCall?.id).toBeUndefined();
   });
 
   it("drops oversized GitHub Copilot Responses reasoning replay items before send", () => {
@@ -2955,8 +2958,8 @@ describe("openai transport stream", () => {
     const reasoningItem = params.input?.find((item) => item.type === "reasoning");
     expectRecordFields(reasoningItem, {
       type: "reasoning",
-      id: "rs_prior",
     });
+    expect(reasoningItem?.id).toBeUndefined();
     expect(reasoningItem).not.toHaveProperty("encrypted_content");
   });
 
@@ -3028,8 +3031,8 @@ describe("openai transport stream", () => {
     const reasoningItem = params.input?.find((item) => item.type === "reasoning");
     expectRecordFields(reasoningItem, {
       type: "reasoning",
-      id: "rs_prior",
     });
+    expect(reasoningItem?.id).toBeUndefined();
     expect(reasoningItem).not.toHaveProperty("encrypted_content");
   });
 
@@ -3103,9 +3106,9 @@ describe("openai transport stream", () => {
     const reasoningItem = params.input?.find((item) => item.type === "reasoning");
     expectRecordFields(reasoningItem, {
       type: "reasoning",
-      id: "rs_prior",
       encrypted_content: "ciphertext",
     });
+    expect(reasoningItem?.id).toBeUndefined();
     expect(reasoningItem).not.toHaveProperty("__openclaw_replay");
   });
 
